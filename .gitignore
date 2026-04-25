@@ -2,6 +2,7 @@
 /vendor/
 .env
 .env.*
+!.env.example
 /bootstrap/cache/*.php
 /storage/*.key
 /storage/logs/*
