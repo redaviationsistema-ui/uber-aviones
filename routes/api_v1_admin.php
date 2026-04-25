@@ -1,0 +1,43 @@
+<?php
+
+use App\Http\Controladores\AdministradorControlador;
+use Illuminate\Support\Facades\Route;
+
+Route::prefix('admin')->middleware(['auth.token', 'role:admin'])->group(function () {
+    Route::get('/dashboard', [AdministradorControlador::class, 'dashboard']);
+    Route::get('/usuarios', [AdministradorControlador::class, 'users']);
+    Route::get('/usuarios/{user}', [AdministradorControlador::class, 'showUsuario']);
+    Route::put('/usuarios/{user}', [AdministradorControlador::class, 'updateUsuario']);
+    Route::post('/usuarios/{user}/bloquear', [AdministradorControlador::class, 'blockUsuario']);
+    Route::post('/usuarios/{user}/activar', [AdministradorControlador::class, 'activateUsuario']);
+
+    Route::get('/clientes', [AdministradorControlador::class, 'clients']);
+    Route::get('/proveedores', [AdministradorControlador::class, 'providers']);
+    Route::get('/proveedores/{provider}', [AdministradorControlador::class, 'showProveedor']);
+    Route::post('/proveedores/{provider}/aprobar', [AdministradorControlador::class, 'approveProveedor']);
+    Route::post('/proveedores/{provider}/rechazar', [AdministradorControlador::class, 'rejectProveedor']);
+    Route::post('/proveedores/{provider}/suspender', [AdministradorControlador::class, 'suspendProveedor']);
+
+    Route::get('/aeronaves', [AdministradorControlador::class, 'aircraft']);
+    Route::get('/aeronaves/{aircraft}', [AdministradorControlador::class, 'showAeronave']);
+    Route::post('/aeronaves/{aircraft}/bloquear', [AdministradorControlador::class, 'blockAeronave']);
+    Route::post('/aeronaves/{aircraft}/activar', [AdministradorControlador::class, 'activateAeronave']);
+
+    Route::get('/solicitudes', [AdministradorControlador::class, 'flightRequests']);
+    Route::get('/cotizaciones', [AdministradorControlador::class, 'quotes']);
+    Route::get('/reservas', [AdministradorControlador::class, 'reservations']);
+    Route::get('/pagos', [AdministradorControlador::class, 'payments']);
+    Route::get('/comisiones', [AdministradorControlador::class, 'commissions']);
+    Route::post('/comisiones/{commission}/liberar', [AdministradorControlador::class, 'releaseComision']);
+
+    Route::get('/demos', [AdministradorControlador::class, 'demos']);
+    Route::get('/suscripciones', [AdministradorControlador::class, 'subscriptions']);
+    Route::get('/planes', [AdministradorControlador::class, 'plans']);
+    Route::post('/planes', [AdministradorControlador::class, 'storePlan']);
+    Route::put('/planes/{plan}', [AdministradorControlador::class, 'updatePlan']);
+
+    Route::get('/reportes', [AdministradorControlador::class, 'reports']);
+    Route::get('/auditoria', [AdministradorControlador::class, 'audit']);
+    Route::get('/configuracion', [AdministradorControlador::class, 'settings']);
+    Route::put('/configuracion', [AdministradorControlador::class, 'updateSettings']);
+});

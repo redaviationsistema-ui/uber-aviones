@@ -1,0 +1,36 @@
+# Laravel
+/vendor/
+.env
+.env.*
+/bootstrap/cache/*.php
+/storage/*.key
+/storage/logs/*
+/storage/framework/*
+/public/storage
+
+# Opcional
+.phpunit.result.cache
+Homestead.json
+Homestead.yaml
+
+# Node
+node_modules/
+
+# Flutter
+.dart_tool/
+.packages
+build/
+ios/Pods/
+android/.gradle/
+android/local.properties
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
