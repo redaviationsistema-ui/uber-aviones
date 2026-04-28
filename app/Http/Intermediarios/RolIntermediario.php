@@ -12,7 +12,7 @@ class RolIntermediario
     {
         $user = $request->user();
 
-        if (! $user || ! in_array($user->role, $roles, true)) {
+        if (! $user || ! $user->isRole(...$roles)) {
             return response()->json([
                 'success' => false,
                 'message' => 'No tienes permisos para acceder a este recurso.',

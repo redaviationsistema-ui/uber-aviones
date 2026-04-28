@@ -12,6 +12,7 @@ Route::prefix('auth')->group(function () {
     Route::middleware('auth.token')->group(function () {
         Route::post('/logout', [AutenticacionControlador::class, 'logout']);
         Route::get('/me', [AutenticacionControlador::class, 'me']);
+        Route::get('/redirect-dashboard', [AutenticacionControlador::class, 'redirectDashboard']);
         Route::post('/verify-email', [AutenticacionControlador::class, 'verifyEmail']);
     });
 });

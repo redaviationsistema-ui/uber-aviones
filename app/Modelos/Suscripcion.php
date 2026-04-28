@@ -9,13 +9,34 @@ class Suscripcion extends Model
 {
     protected $table = 'subscriptions';
 
-    protected $fillable = ['user_id', 'plan_id', 'started_at', 'expires_at', 'status', 'payment_status'];
+    protected $fillable = [
+        'user_id',
+        'plan_id',
+        'trial_starts_at',
+        'trial_ends_at',
+        'started_at',
+        'starts_at',
+        'expires_at',
+        'ends_at',
+        'renews_at',
+        'cancelled_at',
+        'status',
+        'payment_status',
+        'payment_provider',
+        'provider_subscription_id',
+    ];
 
     protected function casts(): array
     {
         return [
             'started_at' => 'datetime',
             'expires_at' => 'datetime',
+            'trial_starts_at' => 'datetime',
+            'trial_ends_at' => 'datetime',
+            'starts_at' => 'datetime',
+            'ends_at' => 'datetime',
+            'renews_at' => 'datetime',
+            'cancelled_at' => 'datetime',
         ];
     }
 

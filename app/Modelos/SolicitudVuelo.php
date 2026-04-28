@@ -26,8 +26,13 @@ class SolicitudVuelo extends Model
         'estimated_distance_km',
         'passengers',
         'trip_type',
+        'aircraft_type',
+        'requirements',
+        'package_snapshot',
+        'visibility_payload',
         'notes',
         'status',
+        'workflow_status',
     ];
 
     protected function casts(): array
@@ -37,6 +42,9 @@ class SolicitudVuelo extends Model
             'return_date' => 'date',
             'departure_datetime' => 'datetime',
             'return_datetime' => 'datetime',
+            'requirements' => 'array',
+            'package_snapshot' => 'array',
+            'visibility_payload' => 'array',
         ];
     }
 
@@ -58,5 +66,15 @@ class SolicitudVuelo extends Model
     public function legs(): HasMany
     {
         return $this->hasMany(TramoSolicitudVuelo::class, 'flight_request_id');
+    }
+
+    public function operaciones(): HasMany
+    {
+        return $this->hasMany(Operacion::class, 'flight_request_id');
+    }
+
+    public function chatsProtegidos(): HasMany
+    {
+        return $this->hasMany(ChatProtegido::class, 'flight_request_id');
     }
 }

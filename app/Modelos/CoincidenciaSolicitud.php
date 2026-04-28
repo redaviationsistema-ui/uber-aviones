@@ -9,13 +9,28 @@ class CoincidenciaSolicitud extends Model
 {
     protected $table = 'request_matches';
 
-    protected $fillable = ['flight_request_id', 'aircraft_id', 'provider_id', 'match_score', 'estimated_price', 'status'];
+    protected $fillable = [
+        'flight_request_id',
+        'aircraft_id',
+        'provider_id',
+        'match_score',
+        'estimated_price',
+        'status',
+        'response_deadline',
+        'accepted_at',
+        'rejected_at',
+        'visibility_payload',
+    ];
 
     protected function casts(): array
     {
         return [
             'match_score' => 'decimal:2',
             'estimated_price' => 'decimal:2',
+            'response_deadline' => 'datetime',
+            'accepted_at' => 'datetime',
+            'rejected_at' => 'datetime',
+            'visibility_payload' => 'array',
         ];
     }
 

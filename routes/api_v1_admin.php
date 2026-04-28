@@ -4,7 +4,7 @@ use App\Http\Controladores\AdministradorControlador;
 use Illuminate\Support\Facades\Route;
 
 Route::prefix('admin')->middleware(['auth.token', 'role:admin'])->group(function () {
-    Route::get('/dashboard', [AdministradorControlador::class, 'dashboard']);
+    Route::get('/dashboard-marketplace', [AdministradorControlador::class, 'dashboard']);
     Route::get('/usuarios', [AdministradorControlador::class, 'users']);
     Route::get('/usuarios/{user}', [AdministradorControlador::class, 'showUsuario']);
     Route::put('/usuarios/{user}', [AdministradorControlador::class, 'updateUsuario']);

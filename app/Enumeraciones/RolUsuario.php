@@ -6,5 +6,6 @@ enum RolUsuario: string
 {
     case Client = 'client';
     case Proveedor = 'provider';
+    case Sobrecargo = 'sobrecargo';
     case Admin = 'admin';
 }

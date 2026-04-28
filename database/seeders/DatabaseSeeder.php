@@ -29,8 +29,21 @@ class DatabaseSeeder extends Seeder
             ['slug' => 'premium-monthly'],
             [
                 'name' => 'Premium Mensual',
+                'code' => 'PRO_MENSUAL',
+                'description' => 'Plan SaaS mensual Red Aviation.',
                 'price' => 299.00,
+                'price_monthly' => 299.00,
+                'price_yearly' => 2990.00,
                 'billing_cycle' => 'monthly',
+                'role_target' => 'client',
+                'max_requests' => 10,
+                'max_aircraft' => 0,
+                'max_users' => 1,
+                'has_priority' => true,
+                'has_concierge' => true,
+                'has_reports' => true,
+                'is_enterprise' => false,
+                'is_active' => true,
                 'features' => ['busqueda', 'cotizaciones', 'reservas', 'soporte_prioritario'],
                 'status' => 'active',
             ]
@@ -49,16 +62,29 @@ class DatabaseSeeder extends Seeder
         }
 
         ConfiguracionSistema::firstOrCreate(
-            ['key' => 'platform.commission_rate'],
-            ['group' => 'payments', 'value' => ['rate' => 0.10]]
+            ['key' => 'platform.business_model'],
+            ['group' => 'payments', 'value' => ['mode' => 'saas', 'commission_rate' => 0]]
         );
 
         Plan::firstOrCreate(
             ['slug' => 'premium-yearly'],
             [
                 'name' => 'Premium Anual',
+                'code' => 'ELITE_ANUAL',
+                'description' => 'Plan SaaS anual Red Aviation.',
                 'price' => 2990.00,
+                'price_monthly' => 299.00,
+                'price_yearly' => 2990.00,
                 'billing_cycle' => 'yearly',
+                'role_target' => 'client',
+                'max_requests' => 50,
+                'max_aircraft' => 0,
+                'max_users' => 5,
+                'has_priority' => true,
+                'has_concierge' => true,
+                'has_reports' => true,
+                'is_enterprise' => true,
+                'is_active' => true,
                 'features' => ['busqueda', 'cotizaciones', 'reservas', 'soporte_prioritario'],
                 'status' => 'active',
             ]
@@ -117,6 +143,18 @@ class DatabaseSeeder extends Seeder
                 'password' => 'password',
                 'phone' => '+52 55 1111 1111',
                 'role' => 'client',
+                'status' => 'active',
+            ]
+        );
+
+        Usuario::firstOrCreate(
+            ['email' => 'sobrecargo@redaviation.test'],
+            [
+                'name' => 'Sobrecargo Demo',
+                'password' => 'password',
+                'phone' => '+52 55 2222 2222',
+                'role' => 'client',
+                'operational_role' => 'sobrecargo',
                 'status' => 'active',
             ]
         );

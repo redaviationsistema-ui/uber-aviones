@@ -1,6 +1,8 @@
 <?php
 
 use App\Http\Intermediarios\AsegurarAccesoPremium;
+use App\Http\Intermediarios\FiltroAntiBrokerIntermediario;
+use App\Http\Intermediarios\VerificarLimitePlanIntermediario;
 use App\Http\Intermediarios\TokenApiIntermediario;
 use App\Http\Intermediarios\AuditoriaIntermediario;
 use App\Consola\Comandos\ExpirarCotizacionesComando;
@@ -12,6 +14,7 @@ use App\Http\Intermediarios\VerificarDemo;
 use App\Http\Intermediarios\VerificarProveedorAprobado;
 use App\Http\Intermediarios\VerificarSuscripcion;
 use App\Http\Intermediarios\ForzarRespuestaJson;
+use App\Http\Intermediarios\CorsIntermediario;
 use App\Http\Intermediarios\RolIntermediario;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
@@ -35,6 +38,8 @@ return Application::configure(basePath: dirname(__DIR__))
         LiberarPagosProveedorComando::class,
     ])
     ->withMiddleware(function (Middleware $middleware): void {
+        $middleware->append(CorsIntermediario::class);
+
         $middleware->alias([
             'auth.token' => TokenApiIntermediario::class,
             'audit.log' => AuditoriaIntermediario::class,
@@ -45,6 +50,11 @@ return Application::configure(basePath: dirname(__DIR__))
             'force.json' => ForzarRespuestaJson::class,
             'role' => RolIntermediario::class,
             'premium' => AsegurarAccesoPremium::class,
+            'anti_broker.filter' => FiltroAntiBrokerIntermediario::class,
+            'operator.verified' => VerificarProveedorAprobado::class,
+            'plan.limit' => VerificarLimitePlanIntermediario::class,
+            'subscription.active' => VerificarAccesoActivo::class,
+            'trial.active' => VerificarDemo::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {

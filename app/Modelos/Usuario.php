@@ -17,6 +17,7 @@ class Usuario extends Authenticatable
 
     public const ROLE_CLIENT = 'client';
     public const ROLE_PROVIDER = 'provider';
+    public const ROLE_SOBRECARGO = 'sobrecargo';
     public const ROLE_ADMIN = 'admin';
 
     protected $fillable = [
@@ -25,7 +26,10 @@ class Usuario extends Authenticatable
         'password',
         'phone',
         'role',
+        'operational_role',
         'status',
+        'contact_strikes',
+        'contact_blocked_until',
         'email_verified_at',
     ];
 
@@ -39,6 +43,7 @@ class Usuario extends Authenticatable
         return [
             'email_verified_at' => 'datetime',
             'password' => 'hashed',
+            'contact_blocked_until' => 'datetime',
         ];
     }
 
@@ -109,6 +114,7 @@ class Usuario extends Authenticatable
 
         return [
             'has_access' => $demoActive || $subscriptionActive || $this->role === self::ROLE_ADMIN,
+            'effective_role' => $this->effectiveRole(),
             'demo' => $demo ? [
                 'status' => $demoActive ? 'active' : 'expired',
                 'started_at' => $demo->started_at,
@@ -121,6 +127,66 @@ class Usuario extends Authenticatable
                 'started_at' => $subscription->started_at,
                 'expires_at' => $subscription->expires_at,
             ] : null,
+        ];
+    }
+
+    public function effectiveRole(): string
+    {
+        return $this->operational_role ?: $this->role;
+    }
+
+    public function isRole(string ...$roles): bool
+    {
+        return in_array($this->effectiveRole(), $roles, true) || in_array($this->role, $roles, true);
+    }
+
+    public function dashboardPath(): string
+    {
+        return match ($this->effectiveRole()) {
+            self::ROLE_ADMIN => '/admin/dashboard',
+            self::ROLE_PROVIDER => '/operator/dashboard',
+            self::ROLE_SOBRECARGO => '/sobrecargo/dashboard',
+            default => '/client/dashboard',
+        };
+    }
+
+    public function resolvedPlanId(): ?int
+    {
+        return $this->activeSuscripcion?->plan_id;
+    }
+
+    public function resolvedSubscriptionStatus(): string
+    {
+        $demo = $this->demo;
+        $subscription = $this->activeSuscripcion;
+
+        if ($demo?->status === 'active' && $demo->expires_at?->isFuture()) {
+            return 'demo_activa';
+        }
+
+        if ($subscription) {
+            return match ($subscription->status) {
+                'active' => 'activa',
+                'expired' => 'vencida',
+                'cancelled' => 'cancelada',
+                'past_due' => 'renovacion_pendiente',
+                default => $subscription->status,
+            };
+        }
+
+        return 'sin_suscripcion';
+    }
+
+    public function loginContext(): array
+    {
+        return [
+            'role' => $this->role,
+            'operational_role' => $this->operational_role,
+            'effective_role' => $this->effectiveRole(),
+            'status' => $this->status,
+            'subscription_status' => $this->resolvedSubscriptionStatus(),
+            'plan_id' => $this->resolvedPlanId(),
+            'dashboard' => $this->dashboardPath(),
         ];
     }
 }

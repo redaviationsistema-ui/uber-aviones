@@ -6,7 +6,7 @@ return new class extends Migration
 {
     public function up(): void
     {
-        // La migracion original se separo por tabla.
+        // Se separo en migraciones por tabla.
     }
 
     public function down(): void
