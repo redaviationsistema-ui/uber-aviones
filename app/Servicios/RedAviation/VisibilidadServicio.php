@@ -10,6 +10,20 @@ class VisibilidadServicio
 {
     public function solicitudParaCliente(SolicitudVuelo $solicitud): array
     {
+        $chat = $solicitud->relationLoaded('chatsProtegidos')
+            ? $solicitud->chatsProtegidos->sortByDesc('id')->first()
+            : $solicitud->chatsProtegidos()->latest('id')->first();
+
+        $operacion = $solicitud->relationLoaded('operaciones')
+            ? $solicitud->operaciones->sortByDesc('id')->first()
+            : $solicitud->operaciones()->latest('id')->first();
+
+        $timeline = $operacion
+            ? ($operacion->relationLoaded('timeline')
+                ? $operacion->timeline->sortByDesc('id')->take(4)->values()
+                : $operacion->timeline()->latest('id')->limit(4)->get())
+            : collect();
+
         return [
             'id' => $solicitud->id,
             'origin' => $solicitud->origin,
@@ -17,7 +31,24 @@ class VisibilidadServicio
             'departure_datetime' => $solicitud->departure_datetime,
             'passengers' => $solicitud->passengers,
             'aircraft_type' => $solicitud->aircraft_type,
+            'requirements' => $solicitud->requirements,
+            'notes' => $solicitud->notes,
             'status' => $solicitud->workflow_status ?? $solicitud->status,
+            'chat' => $chat ? [
+                'id' => $chat->id,
+                'status' => $chat->status,
+            ] : null,
+            'operation' => $operacion ? [
+                'id' => $operacion->id,
+                'status' => $operacion->status,
+                'timeline' => $timeline->map(fn ($item) => [
+                    'id' => $item->id,
+                    'status' => $item->status,
+                    'title' => $item->title,
+                    'description' => $item->description,
+                    'created_at' => $item->created_at,
+                ])->values(),
+            ] : null,
             'matched_options' => $solicitud->matches->map(fn ($match) => [
                 'id' => $match->id,
                 'aircraft_id' => $match->aircraft_id,
