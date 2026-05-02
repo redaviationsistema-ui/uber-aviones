@@ -8,11 +8,11 @@ class Aeropuerto extends Model
 {
     protected $table = 'airports';
 
+    public $timestamps = false;
+
     protected $fillable = [
         'iata',
         'icao',
-        'iata_code',
-        'icao_code',
         'name',
         'city',
         'country',

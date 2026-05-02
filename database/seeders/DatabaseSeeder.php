@@ -90,11 +90,7 @@ class DatabaseSeeder extends Seeder
                 'type' => 'airport',
             ],
         ] as $airport) {
-            Aeropuerto::updateOrCreate(['icao' => $airport['icao']], $airport + [
-                'icao_code' => $airport['icao'],
-                'iata_code' => $airport['iata'],
-                'status' => 'active',
-            ]);
+            Aeropuerto::updateOrCreate(['icao' => $airport['icao']], $airport + ['status' => 'active']);
         }
 
         ConfiguracionSistema::firstOrCreate(
