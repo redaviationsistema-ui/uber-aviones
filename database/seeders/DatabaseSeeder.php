@@ -50,11 +50,47 @@ class DatabaseSeeder extends Seeder
         );
 
         foreach ([
-            ['icao' => 'MMMX', 'iata' => 'MEX', 'name' => 'Aeropuerto Internacional Benito Juarez', 'city' => 'Ciudad de Mexico', 'country' => 'Mexico'],
-            ['icao' => 'MMUN', 'iata' => 'CUN', 'name' => 'Aeropuerto Internacional de Cancun', 'city' => 'Cancun', 'country' => 'Mexico'],
-            ['icao' => 'MMTO', 'iata' => 'TLC', 'name' => 'Aeropuerto Internacional de Toluca', 'city' => 'Toluca', 'country' => 'Mexico'],
+            [
+                'icao' => 'MMMX',
+                'iata' => 'MEX',
+                'name' => 'Aeropuerto Internacional Benito Juarez',
+                'city' => 'Ciudad de Mexico',
+                'country' => 'Mexico',
+                'latitude' => 19.4361000,
+                'longitude' => -99.0719000,
+                'altitude' => 7316,
+                'utc_offset' => -6,
+                'timezone' => 'America/Mexico_City',
+                'type' => 'airport',
+            ],
+            [
+                'icao' => 'MMUN',
+                'iata' => 'CUN',
+                'name' => 'Aeropuerto Internacional de Cancun',
+                'city' => 'Cancun',
+                'country' => 'Mexico',
+                'latitude' => 21.0365000,
+                'longitude' => -86.8771000,
+                'altitude' => 22,
+                'utc_offset' => -5,
+                'timezone' => 'America/Cancun',
+                'type' => 'airport',
+            ],
+            [
+                'icao' => 'MMTO',
+                'iata' => 'TLC',
+                'name' => 'Aeropuerto Internacional de Toluca',
+                'city' => 'Toluca',
+                'country' => 'Mexico',
+                'latitude' => 19.3371000,
+                'longitude' => -99.5660000,
+                'altitude' => 8466,
+                'utc_offset' => -6,
+                'timezone' => 'America/Mexico_City',
+                'type' => 'airport',
+            ],
         ] as $airport) {
-            Aeropuerto::firstOrCreate(['icao' => $airport['icao']], $airport + [
+            Aeropuerto::updateOrCreate(['icao' => $airport['icao']], $airport + [
                 'icao_code' => $airport['icao'],
                 'iata_code' => $airport['iata'],
                 'status' => 'active',
