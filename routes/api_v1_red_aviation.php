@@ -55,6 +55,9 @@ Route::middleware(['auth.token'])->group(function () {
         Route::get('/subscriptions', [AdminControlador::class, 'subscriptions']);
         Route::get('/kpis', [AdminControlador::class, 'kpis']);
         Route::get('/anti-broker-flags', [AdminControlador::class, 'antiBrokerFlags']);
+        Route::get('/data-transfer/schema', [AdminControlador::class, 'dataTransferSchema']);
+        Route::post('/data-transfer/import', [AdminControlador::class, 'importDataTransfer']);
+        Route::get('/data-transfer/export', [AdminControlador::class, 'exportDataTransfer']);
     });
 
     Route::get('/chats/{chat}', [ChatControlador::class, 'show']);
@@ -63,3 +66,4 @@ Route::middleware(['auth.token'])->group(function () {
     Route::get('/notifications', [NotificacionControlador::class, 'index']);
     Route::post('/notifications/{notification}/read', [NotificacionControlador::class, 'markAsRead']);
 });
+

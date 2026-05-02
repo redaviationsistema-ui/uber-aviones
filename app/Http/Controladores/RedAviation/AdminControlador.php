@@ -10,7 +10,14 @@ use App\Modelos\SolicitudVuelo;
 use App\Modelos\Suscripcion;
 use App\Modelos\Usuario;
 use App\Servicios\RedAviation\KpiSaasServicio;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
+use Shuchkin\SimpleXLS;
+use Shuchkin\SimpleXLSX;
+use Shuchkin\SimpleXLSXGen;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class AdminControlador extends ControladorBase
 {
@@ -87,4 +94,280 @@ class AdminControlador extends ControladorBase
     {
         return $this->ok(['flags' => BanderaAntiBroker::latest()->paginate(20)]);
     }
+
+    public function dataTransferSchema(Request $request)
+    {
+        $connection = $this->resolveConnection($request->query('connection'));
+        $tables = collect(Schema::connection($connection)->getTableListing())
+            ->map(fn (string $table) => [
+                'name' => $table,
+                'columns' => Schema::connection($connection)->getColumnListing($table),
+            ])
+            ->values();
+
+        return $this->ok([
+            'connection' => $connection,
+            'tables' => $tables,
+        ]);
+    }
+
+    public function importDataTransfer(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'connection' => ['required', 'string'],
+            'resource' => ['required', 'string'],
+            'mode' => ['required', 'in:append,replace'],
+            'file' => ['required', 'file', 'mimes:csv,txt,xlsx,xls'],
+        ]);
+
+        $connection = $this->resolveConnection($data['connection']);
+        $table = $this->resolveTable($connection, $data['resource']);
+        $columns = Schema::connection($connection)->getColumnListing($table);
+        $allowedColumns = array_values(array_diff($columns, ['id']));
+        $rows = $this->parseSpreadsheetFile($request->file('file')->getRealPath(), $request->file('file')->getClientOriginalExtension());
+
+        if (empty($rows)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'El archivo no contiene filas para importar.',
+            ], 422);
+        }
+
+        $normalizedRows = collect($rows)
+            ->map(function (array $row) use ($allowedColumns) {
+                $filtered = [];
+
+                foreach ($allowedColumns as $column) {
+                    if (array_key_exists($column, $row)) {
+                        $filtered[$column] = $row[$column] === '' ? null : $row[$column];
+                    }
+                }
+
+                return $filtered;
+            })
+            ->filter(fn (array $row) => ! empty($row))
+            ->values()
+            ->all();
+
+        if (empty($normalizedRows)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Ninguna columna del archivo coincide con la tabla seleccionada.',
+            ], 422);
+        }
+
+        DB::connection($connection)->transaction(function () use ($connection, $table, $data, $normalizedRows) {
+            $query = DB::connection($connection)->table($table);
+
+            if ($data['mode'] === 'replace') {
+                $query->delete();
+            }
+
+            foreach (array_chunk($normalizedRows, 500) as $chunk) {
+                $query->insert($chunk);
+            }
+        });
+
+        $this->writeAudit($request, 'data_transfer_import', 'admin_data_transfer', sprintf(
+            'Importacion a %s.%s con %d filas',
+            $connection,
+            $table,
+            count($normalizedRows)
+        ));
+
+        return $this->ok([
+            'summary' => [
+                'connection' => $connection,
+                'table' => $table,
+                'inserted_rows' => count($normalizedRows),
+                'message' => sprintf('Se importaron %d filas en %s.%s.', count($normalizedRows), $connection, $table),
+            ],
+        ]);
+    }
+
+    public function exportDataTransfer(Request $request): StreamedResponse|JsonResponse|\Illuminate\Http\Response
+    {
+        $connection = $this->resolveConnection($request->query('connection'));
+        $table = $this->resolveTable($connection, (string) $request->query('resource'));
+        $format = strtolower((string) $request->query('format', 'xlsx'));
+        $columns = Schema::connection($connection)->getColumnListing($table);
+        $rows = DB::connection($connection)->table($table)->limit(5000)->get($columns);
+
+        if ($format === 'csv') {
+            $filename = sprintf('%s-%s.csv', $table, now()->format('Y-m-d'));
+
+            return response()->streamDownload(function () use ($columns, $rows) {
+                $handle = fopen('php://output', 'w');
+                fputcsv($handle, $columns);
+
+                foreach ($rows as $row) {
+                    fputcsv($handle, array_map(fn (string $column) => $row->{$column}, $columns));
+                }
+
+                fclose($handle);
+            }, $filename, [
+                'Content-Type' => 'text/csv; charset=UTF-8',
+            ]);
+        }
+
+        if ($format === 'xlsx') {
+            $sheetRows = [$columns];
+
+            foreach ($rows as $row) {
+                $sheetRows[] = array_map(fn (string $column) => $row->{$column}, $columns);
+            }
+
+            $binary = (string) SimpleXLSXGen::fromArray($sheetRows, $table);
+            $filename = sprintf('%s-%s.xlsx', $table, now()->format('Y-m-d'));
+
+            return response($binary, 200, [
+                'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                'Content-Disposition' => 'attachment; filename="'.$filename.'"',
+            ]);
+        }
+
+        return response()->json([
+            'success' => false,
+            'message' => 'Formato de exportacion no soportado. Usa csv o xlsx.',
+        ], 422);
+    }
+
+    private function resolveConnection(?string $connection): string
+    {
+        $requested = $connection ?: config('database.default');
+        $allowed = ['pgsql', 'sqlite', 'sqlite-test'];
+
+        if (! in_array($requested, $allowed, true)) {
+            abort(response()->json([
+                'success' => false,
+                'message' => 'La conexion solicitada no esta permitida para importaciones.',
+            ], 422));
+        }
+
+        if ($requested === 'sqlite-test') {
+            config(['database.connections.sqlite-test' => [
+                'driver' => 'sqlite',
+                'database' => database_path('test.sqlite'),
+                'prefix' => '',
+                'foreign_key_constraints' => true,
+            ]]);
+        }
+
+        return $requested;
+    }
+
+    private function resolveTable(string $connection, string $table): string
+    {
+        $availableTables = Schema::connection($connection)->getTableListing();
+
+        if (! in_array($table, $availableTables, true)) {
+            abort(response()->json([
+                'success' => false,
+                'message' => 'La tabla seleccionada no existe en la conexion indicada.',
+            ], 422));
+        }
+
+        return $table;
+    }
+
+    private function parseSpreadsheetFile(string $path, string $extension): array
+    {
+        $extension = strtolower($extension);
+
+        return match ($extension) {
+            'csv', 'txt' => $this->parseCsvFile($path),
+            'xlsx' => $this->parseXlsxFile($path),
+            'xls' => $this->parseXlsFile($path),
+            default => [],
+        };
+    }
+
+    private function parseCsvFile(string $path): array
+    {
+        $handle = fopen($path, 'r');
+
+        if (! $handle) {
+            return [];
+        }
+
+        $headers = fgetcsv($handle);
+
+        if (! is_array($headers)) {
+            fclose($handle);
+            return [];
+        }
+
+        $headers = $this->normalizeHeaders($headers);
+        $rows = [];
+
+        while (($row = fgetcsv($handle)) !== false) {
+            if (count(array_filter($row, fn ($value) => $value !== null && $value !== '')) === 0) {
+                continue;
+            }
+
+            $rows[] = array_combine($headers, array_pad($row, count($headers), null));
+        }
+
+        fclose($handle);
+
+        return $rows;
+    }
+
+    private function parseXlsxFile(string $path): array
+    {
+        $xlsx = SimpleXLSX::parse($path);
+
+        if (! $xlsx) {
+            return [];
+        }
+
+        return $this->rowsToAssociative($xlsx->rows());
+    }
+
+    private function parseXlsFile(string $path): array
+    {
+        $xls = SimpleXLS::parse($path);
+
+        if (! $xls) {
+            return [];
+        }
+
+        return $this->rowsToAssociative($xls->rows());
+    }
+
+    private function rowsToAssociative(array $rows): array
+    {
+        if (empty($rows)) {
+            return [];
+        }
+
+        $headers = $this->normalizeHeaders((array) array_shift($rows));
+        $output = [];
+
+        foreach ($rows as $row) {
+            $row = array_map(fn ($value) => is_string($value) ? trim($value) : $value, (array) $row);
+
+            if (count(array_filter($row, fn ($value) => $value !== null && $value !== '')) === 0) {
+                continue;
+            }
+
+            $output[] = array_combine($headers, array_pad($row, count($headers), null));
+        }
+
+        return $output;
+    }
+
+    private function normalizeHeaders(array $headers): array
+    {
+        return array_map(function ($header) {
+            $header = (string) $header;
+            $header = preg_replace('/^\xEF\xBB\xBF/', '', $header);
+            $header = strtolower(trim($header));
+            $header = preg_replace('/\s+/', '_', $header);
+
+            return $header;
+        }, $headers);
+    }
 }
+
+
