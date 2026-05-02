@@ -10,6 +10,7 @@ use App\Modelos\SolicitudVuelo;
 use App\Modelos\Suscripcion;
 use App\Modelos\Usuario;
 use App\Servicios\RedAviation\KpiSaasServicio;
+use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -134,6 +135,7 @@ class AdminControlador extends ControladorBase
         }
 
         $normalizedRows = collect($rows)
+            ->map(fn (array $row) => $this->applyTableAliases($table, $row))
             ->map(function (array $row) use ($allowedColumns) {
                 $filtered = [];
 
@@ -156,17 +158,35 @@ class AdminControlador extends ControladorBase
             ], 422);
         }
 
-        DB::connection($connection)->transaction(function () use ($connection, $table, $data, $normalizedRows) {
-            $query = DB::connection($connection)->table($table);
+        $missingColumns = $this->detectMissingRequiredColumns($table, $normalizedRows);
 
-            if ($data['mode'] === 'replace') {
-                $query->delete();
-            }
+        if ($missingColumns !== []) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Faltan columnas obligatorias para importar en la tabla seleccionada.',
+                'missing_columns' => $missingColumns,
+            ], 422);
+        }
 
-            foreach (array_chunk($normalizedRows, 500) as $chunk) {
-                $query->insert($chunk);
-            }
-        });
+        try {
+            DB::connection($connection)->transaction(function () use ($connection, $table, $data, $normalizedRows) {
+                $query = DB::connection($connection)->table($table);
+
+                if ($data['mode'] === 'replace') {
+                    $query->delete();
+                }
+
+                foreach (array_chunk($normalizedRows, 500) as $chunk) {
+                    $query->insert($chunk);
+                }
+            });
+        } catch (QueryException $exception) {
+            return response()->json([
+                'success' => false,
+                'message' => 'La base de datos rechazo la importacion. Revisa columnas obligatorias, duplicados o tipos de dato.',
+                'detail' => $exception->getMessage(),
+            ], 422);
+        }
 
         $this->writeAudit($request, 'data_transfer_import', 'admin_data_transfer', sprintf(
             'Importacion a %s.%s con %d filas',
@@ -367,6 +387,51 @@ class AdminControlador extends ControladorBase
 
             return $header;
         }, $headers);
+    }
+
+    private function applyTableAliases(string $table, array $row): array
+    {
+        if ($table === 'airports') {
+            if (! array_key_exists('icao', $row) && array_key_exists('icao_code', $row)) {
+                $row['icao'] = $row['icao_code'];
+            }
+
+            if (! array_key_exists('iata', $row) && array_key_exists('iata_code', $row)) {
+                $row['iata'] = $row['iata_code'];
+            }
+
+            if (! array_key_exists('status', $row) || $row['status'] === '' || $row['status'] === null) {
+                $row['status'] = 'active';
+            }
+        }
+
+        return $row;
+    }
+
+    private function detectMissingRequiredColumns(string $table, array $rows): array
+    {
+        $requiredColumns = match ($table) {
+            'airports' => ['icao', 'name'],
+            default => [],
+        };
+
+        if ($requiredColumns === []) {
+            return [];
+        }
+
+        $missing = [];
+
+        foreach ($requiredColumns as $column) {
+            $hasValue = collect($rows)->contains(function (array $row) use ($column) {
+                return array_key_exists($column, $row) && $row[$column] !== null && $row[$column] !== '';
+            });
+
+            if (! $hasValue) {
+                $missing[] = $column;
+            }
+        }
+
+        return $missing;
     }
 }
 
