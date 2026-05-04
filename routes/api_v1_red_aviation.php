@@ -34,7 +34,9 @@ Route::middleware(['auth.token'])->group(function () {
         Route::get('/my-aircraft', [OperadorControlador::class, 'indexAircraft']);
         Route::get('/aircraft', [OperadorControlador::class, 'indexAircraft']);
         Route::put('/aircraft/{aircraft}', [OperadorControlador::class, 'updateAircraft']);
+        Route::post('/aircraft/{aircraft}/subscribe', [OperadorControlador::class, 'subscribeAircraft']);
         Route::post('/aircraft/{aircraft}/images', [AeronaveControlador::class, 'storeImage']);
+        Route::post('/aircraft/{aircraft}/documents', [AeronaveControlador::class, 'storeDocument']);
         Route::delete('/aircraft/{aircraft}/images/{image}', [AeronaveControlador::class, 'destroyImage']);
         Route::post('/availability', [OperadorControlador::class, 'storeAvailability']);
         Route::get('/my-requests', [OperadorControlador::class, 'requests']);
@@ -68,6 +70,8 @@ Route::middleware(['auth.token'])->group(function () {
         Route::get('/requests', [AdminControlador::class, 'requests']);
         Route::post('/requests/{flightRequest}/assign', [AdminControlador::class, 'assign']);
         Route::get('/subscriptions', [AdminControlador::class, 'subscriptions']);
+        Route::get('/fleet/aircraft', [AdminControlador::class, 'aircraftFleet']);
+        Route::get('/fleet/aircraft-subscriptions', [AdminControlador::class, 'aircraftSubscriptionsPerFleet']);
         Route::get('/kpis', [AdminControlador::class, 'kpis']);
         Route::get('/anti-broker-flags', [AdminControlador::class, 'antiBrokerFlags']);
         Route::get('/data-transfer/schema', [AdminControlador::class, 'dataTransferSchema']);

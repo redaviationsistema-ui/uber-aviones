@@ -7,8 +7,10 @@ use App\Modelos\BanderaAntiBroker;
 use App\Modelos\Operacion;
 use App\Modelos\Proveedor;
 use App\Modelos\Rol;
+use App\Modelos\Aeronave;
 use App\Modelos\SolicitudVuelo;
 use App\Modelos\Suscripcion;
+use App\Modelos\SuscripcionAeronave;
 use App\Modelos\Usuario;
 use App\Servicios\RedAviation\KpiSaasServicio;
 use Illuminate\Database\QueryException;
@@ -251,6 +253,25 @@ class AdminControlador extends ControladorBase
     public function subscriptions()
     {
         return $this->ok(['subscriptions' => Suscripcion::with(['user', 'plan'])->latest()->paginate(20)]);
+    }
+
+    public function aircraftFleet()
+    {
+        return $this->ok([
+            'aircraft' => Aeronave::with([
+                'provider',
+                'documents',
+                'images',
+                'suscripcionesAeronave' => fn ($q) => $q->where('status', 'active')->with('plan')->latest('id'),
+            ])->latest()->paginate(40),
+        ]);
+    }
+
+    public function aircraftSubscriptionsPerFleet()
+    {
+        return $this->ok([
+            'aircraft_subscriptions' => SuscripcionAeronave::with(['aircraft.provider', 'plan', 'user'])->latest()->paginate(40),
+        ]);
     }
 
     public function kpis()

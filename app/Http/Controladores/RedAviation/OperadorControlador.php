@@ -6,10 +6,13 @@ use App\Http\Controladores\ControladorBase;
 use App\Modelos\Aeronave;
 use App\Modelos\DisponibilidadAeronave;
 use App\Modelos\Operacion;
+use App\Modelos\Plan;
 use App\Modelos\SolicitudVuelo;
+use App\Modelos\SuscripcionAeronave;
 use App\Servicios\ReintentoCoincidenciaSolicitudServicio;
 use App\Servicios\RedAviation\VisibilidadServicio;
 use Illuminate\Http\Request;
+use Illuminate\Support\Str;
 
 class OperadorControlador extends ControladorBase
 {
@@ -30,7 +33,12 @@ class OperadorControlador extends ControladorBase
             'metrics' => [
                 'aeronaves' => Aeronave::where('provider_id', $provider?->id)->count(),
                 'solicitudes_pendientes' => $provider
-                    ? $provider->aircraft()->whereHas('availability')->count()
+                    ? SolicitudVuelo::query()
+                        ->whereHas('matches', function ($query) use ($provider) {
+                            $query->where('provider_id', $provider->id)
+                                ->whereIn('status', ['pending', 'sent_to_provider']);
+                        })
+                        ->count()
                     : 0,
             ],
             'provider' => [
@@ -88,6 +96,7 @@ class OperadorControlador extends ControladorBase
             'availability',
             'documents',
             'images',
+            'suscripcionesAeronave' => fn ($q) => $q->where('status', 'active')->with('plan')->latest('id'),
         ])->where('provider_id', $providerId)->latest()->get();
 
         return $this->ok([
@@ -202,6 +211,56 @@ class OperadorControlador extends ControladorBase
         ]);
     }
 
+    public function subscribeAircraft(Request $request, Aeronave $aircraft)
+    {
+        abort_if($aircraft->provider_id !== $request->user()->provider_id, 403, 'No puedes suscribir aeronaves de otro proveedor.');
+
+        $data = $request->validate([
+            'plan_id' => ['required', 'exists:plans,id'],
+            'payment_provider' => ['nullable', 'string', 'max:100'],
+        ]);
+
+        $plan = Plan::findOrFail($data['plan_id']);
+
+        SuscripcionAeronave::query()
+            ->where('aircraft_id', $aircraft->id)
+            ->where('status', 'active')
+            ->update(['status' => 'cancelled', 'ends_at' => now()]);
+
+        $subscription = SuscripcionAeronave::create([
+            'aircraft_id' => $aircraft->id,
+            'plan_id' => $plan->id,
+            'user_id' => $request->user()->id,
+            'status' => 'active',
+            'payment_provider' => $data['payment_provider'] ?? 'manual',
+            'payment_reference' => 'AC-'.strtoupper(Str::random(10)),
+            'starts_at' => now(),
+            'ends_at' => now()->addMonth(),
+        ]);
+
+        if (! in_array($aircraft->status, ['blocked', 'maintenance'], true)) {
+            $aircraft->update(['status' => 'active']);
+        }
+
+        $user = $request->user()->loadMissing('activeSuscripcion.plan');
+        $count = Aeronave::where('provider_id', $request->user()->provider_id)->count();
+
+        return $this->ok([
+            'subscription' => $subscription->load('plan'),
+            'aircraft' => $this->formatAircraftPayload(
+                $aircraft->fresh([
+                    'provider.user.activeSuscripcion.plan',
+                    'availability',
+                    'documents',
+                    'images',
+                    'suscripcionesAeronave' => fn ($q) => $q->where('status', 'active')->with('plan')->latest('id'),
+                ]),
+                $user->activeSuscripcion?->plan,
+                $count
+            ),
+        ], 201);
+    }
+
     private function aircraftRules(bool $creating = true): array
     {
         $required = $creating ? 'required' : 'sometimes';
@@ -238,6 +297,10 @@ class OperadorControlador extends ControladorBase
         $monthlyBase = (float) ($resolvedPlan?->price_monthly ?? $resolvedPlan?->price_yearly ?? $resolvedPlan?->price ?? 0);
         $monthlyPerAircraft = $monthlyBase > 0 ? round($monthlyBase / $aircraftCount, 2) : null;
 
+        $activeAircraftSub = $aircraft->relationLoaded('suscripcionesAeronave')
+            ? $aircraft->suscripcionesAeronave->first()
+            : null;
+
         return [
             ...$aircraft->toArray(),
             'main_image' => $aircraft->images
@@ -248,6 +311,15 @@ class OperadorControlador extends ControladorBase
                 ])
                 ->values()
                 ->first()?->image_url,
+            'aircraft_subscription' => $activeAircraftSub ? [
+                'id' => $activeAircraftSub->id,
+                'plan_id' => $activeAircraftSub->plan_id,
+                'status' => $activeAircraftSub->status,
+                'payment_provider' => $activeAircraftSub->payment_provider,
+                'payment_reference' => $activeAircraftSub->payment_reference,
+                'ends_at' => $activeAircraftSub->ends_at,
+                'plan' => $activeAircraftSub->plan,
+            ] : null,
             'membership_context' => $resolvedPlan ? [
                 'plan_id' => $resolvedPlan->id,
                 'plan_name' => $resolvedPlan->name,

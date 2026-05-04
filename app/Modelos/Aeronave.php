@@ -67,4 +67,9 @@ class Aeronave extends Model
     {
         return $this->hasMany(DocumentoAeronave::class, 'aircraft_id');
     }
+
+    public function suscripcionesAeronave(): HasMany
+    {
+        return $this->hasMany(SuscripcionAeronave::class, 'aircraft_id');
+    }
 }
