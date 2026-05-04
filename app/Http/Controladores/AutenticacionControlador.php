@@ -38,19 +38,21 @@ class AutenticacionControlador extends ControladorBase
         );
 
         if ($user->role === Usuario::ROLE_PROVIDER) {
-            Proveedor::create([
+            $provider = Proveedor::create([
                 'user_id' => $user->id,
                 'company_name' => $data['company_name'],
                 'commercial_name' => $data['commercial_name'] ?? null,
                 'approval_status' => 'pending',
             ]);
+
+            $user->forceFill(['provider_id' => $provider->id])->save();
         }
 
         return $this->ok([
             'token' => TokenApi::issue($user),
-            'user' => $user->fresh(['provider', 'profile', 'roles']),
-            'access' => $user->fresh(['roles', 'demo', 'activeSuscripcion.plan'])->accessStatus(),
-            'login_context' => $user->fresh(['roles', 'demo', 'activeSuscripcion.plan'])->loginContext(),
+            'user' => $user->fresh(['provider', 'ownedProvider', 'profile', 'roles']),
+            'access' => $user->fresh(['provider', 'roles', 'demo', 'activeSuscripcion.plan'])->accessStatus(),
+            'login_context' => $user->fresh(['provider', 'roles', 'demo', 'activeSuscripcion.plan'])->loginContext(),
         ], 201);
     }
 
@@ -79,7 +81,7 @@ class AutenticacionControlador extends ControladorBase
 
         return $this->ok([
             'token' => TokenApi::issue($user),
-            'user' => $user->load(['provider', 'profile', 'roles', 'demo', 'activeSuscripcion.plan']),
+            'user' => $user->load(['provider', 'ownedProvider', 'profile', 'roles', 'demo', 'activeSuscripcion.plan']),
             'access' => $user->accessStatus(),
             'login_context' => $user->loginContext(),
         ]);
@@ -87,7 +89,7 @@ class AutenticacionControlador extends ControladorBase
 
     public function me(Request $request)
     {
-        $user = $request->user()->load(['provider', 'profile', 'roles', 'demo', 'activeSuscripcion.plan', 'paymentMethods']);
+        $user = $request->user()->load(['provider', 'ownedProvider', 'profile', 'roles', 'demo', 'activeSuscripcion.plan', 'paymentMethods']);
 
         return $this->ok([
             'user' => $user,
@@ -154,7 +156,7 @@ class AutenticacionControlador extends ControladorBase
             collect($userData)->except(['name', 'phone'])->all()
         );
 
-        return $this->ok(['user' => $request->user()->fresh(['profile', 'provider'])]);
+        return $this->ok(['user' => $request->user()->fresh(['profile', 'provider', 'ownedProvider'])]);
     }
 
     public function resetPassword(Request $request)

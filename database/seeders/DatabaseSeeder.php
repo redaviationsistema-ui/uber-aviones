@@ -123,10 +123,10 @@ class DatabaseSeeder extends Seeder
             ]
         );
 
-        $providerUsuario = Usuario::firstOrCreate(
+        $providerUsuario = Usuario::updateOrCreate(
             ['email' => 'proveedor@privateflights.test'],
             [
-                'name' => 'Proveedor Demo',
+                'name' => 'Proveedor Prueba',
                 'password' => 'password',
                 'phone' => '+52 55 0000 0000',
                 'role' => 'provider',
@@ -135,22 +135,97 @@ class DatabaseSeeder extends Seeder
         );
         $providerUsuario->syncRoles([Usuario::ROLE_PROVIDER], Usuario::ROLE_PROVIDER);
 
-        $provider = Proveedor::firstOrCreate(
+        $provider = Proveedor::updateOrCreate(
             ['user_id' => $providerUsuario->id],
             [
-                'company_name' => 'Private Jets Demo SA de CV',
-                'commercial_name' => 'Private Jets Demo',
+                'company_name' => 'Proveedor Prueba',
+                'commercial_name' => 'Proveedor Prueba',
                 'approval_status' => 'approved',
             ]
         );
+        $providerUsuario->forceFill(['provider_id' => $provider->id])->saveQuietly();
 
-        $aircraft = Aeronave::firstOrCreate(
-            ['registration' => 'XA-DEMO'],
+        $learjet = Aeronave::updateOrCreate(
+            ['registration' => 'XA-LJ45'],
             [
                 'provider_id' => $provider->id,
-                'model' => 'Citation Latitude',
+                'model' => 'Learjet 45XR',
                 'capacity' => 8,
                 'base_airport' => 'MMMX',
+                'range_km' => 3700,
+                'speed_kmh' => 860,
+                'hourly_rate' => 5200,
+                'currency' => 'USD',
+                'status' => 'active',
+            ]
+        );
+
+        $hawker = Aeronave::updateOrCreate(
+            ['registration' => 'XA-HW8X'],
+            [
+                'provider_id' => $provider->id,
+                'model' => 'Hawker 800XP',
+                'capacity' => 8,
+                'base_airport' => 'MMMX',
+                'range_km' => 4300,
+                'speed_kmh' => 745,
+                'hourly_rate' => 6100,
+                'currency' => 'USD',
+                'status' => 'active',
+            ]
+        );
+
+        DisponibilidadAeronave::firstOrCreate(
+            [
+                'aircraft_id' => $learjet->id,
+                'start_datetime' => now()->addDay()->startOfDay(),
+            ],
+            [
+                'end_datetime' => now()->addDays(30)->endOfDay(),
+                'status' => 'available',
+            ]
+        );
+
+        DisponibilidadAeronave::firstOrCreate(
+            [
+                'aircraft_id' => $hawker->id,
+                'start_datetime' => now()->addDay()->startOfDay(),
+            ],
+            [
+                'end_datetime' => now()->addDays(30)->endOfDay(),
+                'status' => 'available',
+            ]
+        );
+
+        $kevinUsuario = Usuario::updateOrCreate(
+            ['email' => 'redaviationsistema@gmail.com'],
+            [
+                'name' => 'Kevin',
+                'password' => 'password',
+                'phone' => '+52 55 3333 3333',
+                'role' => 'provider',
+                'status' => 'active',
+            ]
+        );
+        $kevinUsuario->syncRoles([Usuario::ROLE_PROVIDER], Usuario::ROLE_PROVIDER);
+
+        $kevinProvider = Proveedor::updateOrCreate(
+            ['user_id' => $kevinUsuario->id],
+            [
+                'company_name' => 'Kevin Aviation',
+                'commercial_name' => 'Kevin',
+                'approval_status' => 'approved',
+            ]
+        );
+        $kevinUsuario->forceFill(['provider_id' => $kevinProvider->id])->saveQuietly();
+
+        $citation = Aeronave::updateOrCreate(
+            ['registration' => 'XA-CTLT'],
+            [
+                'provider_id' => $kevinProvider->id,
+                'model' => 'Citation Latitude',
+                'capacity' => 9,
+                'base_airport' => 'MMTO',
                 'range_km' => 5000,
                 'speed_kmh' => 826,
                 'hourly_rate' => 4800,
@@ -161,7 +236,7 @@ class DatabaseSeeder extends Seeder
 
         DisponibilidadAeronave::firstOrCreate(
             [
-                'aircraft_id' => $aircraft->id,
+                'aircraft_id' => $citation->id,
                 'start_datetime' => now()->addDay()->startOfDay(),
             ],
             [

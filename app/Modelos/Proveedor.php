@@ -20,6 +20,11 @@ class Proveedor extends Model
         return $this->belongsTo(Usuario::class, 'user_id');
     }
 
+    public function users(): HasMany
+    {
+        return $this->hasMany(Usuario::class, 'provider_id');
+    }
+
     public function aircraft(): HasMany
     {
         return $this->hasMany(Aeronave::class, 'provider_id');

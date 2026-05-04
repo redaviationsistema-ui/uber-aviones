@@ -67,6 +67,7 @@ class AdminControlador extends ControladorBase
                 Usuario::ROLE_ADMIN,
                 Usuario::ROLE_SOBRECARGO,
             ])],
+            'provider_id' => ['nullable', 'exists:providers,id'],
             'status' => ['sometimes', 'in:active,inactive,blocked'],
         ]);
 
@@ -76,11 +77,12 @@ class AdminControlador extends ControladorBase
             'email' => $data['email'],
             'password' => Hash::make($plainPassword),
             'phone' => $data['phone'] ?? null,
+            'provider_id' => $data['provider_id'] ?? null,
             'status' => $data['status'] ?? 'active',
         ]);
 
         $this->syncUserRoles($user, $data['role']);
-        $this->ensureProviderRecord($user);
+        $this->ensureProviderRecord($user, $data);
         $this->writeAudit($request, 'admin_user_created', 'admin_users', sprintf(
             'Admin creo al usuario %s con rol %s.',
             $user->email,
@@ -105,6 +107,7 @@ class AdminControlador extends ControladorBase
                 Usuario::ROLE_ADMIN,
                 Usuario::ROLE_SOBRECARGO,
             ])],
+            'provider_id' => ['nullable', 'exists:providers,id'],
             'status' => ['sometimes', 'in:active,inactive,blocked'],
         ]);
 
@@ -112,7 +115,9 @@ class AdminControlador extends ControladorBase
 
         if (isset($data['role'])) {
             $this->syncUserRoles($user, $data['role']);
-            $this->ensureProviderRecord($user);
+            $this->ensureProviderRecord($user, $data);
+        } elseif (array_key_exists('provider_id', $data)) {
+            $user->forceFill(['provider_id' => $data['provider_id']])->save();
         }
 
         $this->writeAudit($request, 'admin_user_updated', 'admin_users', sprintf(
@@ -605,13 +610,25 @@ class AdminControlador extends ControladorBase
         $user->syncRoles($roles, $selectedRole);
     }
 
-    private function ensureProviderRecord(Usuario $user): void
+    private function ensureProviderRecord(Usuario $user, array $data = []): void
     {
         if (! $user->hasRole(Usuario::ROLE_PROVIDER)) {
+            $user->forceFill(['provider_id' => null])->saveQuietly();
             return;
         }
 
-        $user->provider()->firstOrCreate(
+        if (! empty($data['provider_id'])) {
+            $provider = Proveedor::findOrFail($data['provider_id']);
+            $user->forceFill(['provider_id' => $provider->id])->saveQuietly();
+
+            if (! $provider->user_id) {
+                $provider->forceFill(['user_id' => $user->id])->saveQuietly();
+            }
+
+            return;
+        }
+
+        $provider = $user->ownedProvider()->firstOrCreate(
             ['user_id' => $user->id],
             [
                 'company_name' => $user->name,
@@ -619,6 +636,10 @@ class AdminControlador extends ControladorBase
                 'approval_status' => 'pending',
             ]
         );
+
+        if ($user->provider_id !== $provider->id) {
+            $user->forceFill(['provider_id' => $provider->id])->saveQuietly();
+        }
     }
 }
 

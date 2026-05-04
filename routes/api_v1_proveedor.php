@@ -10,9 +10,11 @@ use Illuminate\Support\Facades\Route;
 
 Route::prefix('proveedor')->middleware(['auth.token', 'role:provider,admin'])->group(function () {
     Route::get('/dashboard', [ProveedorControlador::class, 'dashboard']);
+    Route::get('/mi-dashboard', [ProveedorControlador::class, 'dashboard']);
     Route::get('/perfil', [AutenticacionControlador::class, 'me']);
     Route::put('/perfil', [AutenticacionControlador::class, 'updatePerfil']);
 
+    Route::get('/mis-aeronaves', [AeronaveControlador::class, 'index']);
     Route::apiResource('aeronaves', AeronaveControlador::class)
         ->parameters(['aeronaves' => 'aircraft']);
     Route::post('/aeronaves/{aircraft}/imagenes', [AeronaveControlador::class, 'storeImage']);
@@ -25,6 +27,7 @@ Route::prefix('proveedor')->middleware(['auth.token', 'role:provider,admin'])->g
     Route::put('/disponibilidad/{availability}', [AeronaveControlador::class, 'updateAvailability']);
     Route::delete('/disponibilidad/{availability}', [AeronaveControlador::class, 'destroyAvailability']);
 
+    Route::get('/mis-solicitudes', [ProveedorControlador::class, 'requests']);
     Route::get('/solicitudes', [ProveedorControlador::class, 'requests']);
     Route::get('/solicitudes/{flightRequest}', [ProveedorControlador::class, 'showRequest']);
     Route::post('/solicitudes/{flightRequest}/aceptar', [ProveedorControlador::class, 'acceptRequest']);

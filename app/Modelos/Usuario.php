@@ -3,6 +3,7 @@
 namespace App\Modelos;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
@@ -33,6 +34,7 @@ class Usuario extends Authenticatable
         'phone',
         'role',
         'operational_role',
+        'provider_id',
         'status',
         'contact_strikes',
         'contact_blocked_until',
@@ -42,6 +44,10 @@ class Usuario extends Authenticatable
     protected $hidden = [
         'password',
         'remember_token',
+    ];
+
+    protected $appends = [
+        'proveedor_id',
     ];
 
     protected function casts(): array
@@ -65,7 +71,12 @@ class Usuario extends Authenticatable
             ->withTimestamps();
     }
 
-    public function provider(): HasOne
+    public function provider(): BelongsTo
+    {
+        return $this->belongsTo(Proveedor::class, 'provider_id');
+    }
+
+    public function ownedProvider(): HasOne
     {
         return $this->hasOne(Proveedor::class, 'user_id');
     }
@@ -305,10 +316,17 @@ class Usuario extends Authenticatable
             'operational_role' => $this->operational_role,
             'effective_role' => $this->effectiveRole(),
             'roles' => $this->roleCodes(),
+            'provider_id' => $this->provider_id,
+            'proveedor_id' => $this->provider_id,
             'status' => $this->status,
             'subscription_status' => $this->resolvedSubscriptionStatus(),
             'plan_id' => $this->resolvedPlanId(),
             'dashboard' => $this->dashboardPath(),
         ];
+    }
+
+    public function getProveedorIdAttribute(): ?int
+    {
+        return $this->provider_id;
     }
 }

@@ -28,10 +28,13 @@ Route::middleware(['auth.token'])->group(function () {
 
     Route::prefix('operator')->middleware(['role:provider,admin', 'operator.verified'])->group(function () {
         Route::get('/dashboard', [OperadorControlador::class, 'dashboard']);
+        Route::get('/my-dashboard', [OperadorControlador::class, 'dashboard']);
         Route::post('/aircraft', [OperadorControlador::class, 'storeAircraft']);
+        Route::get('/my-aircraft', [OperadorControlador::class, 'indexAircraft']);
         Route::get('/aircraft', [OperadorControlador::class, 'indexAircraft']);
         Route::put('/aircraft/{aircraft}', [OperadorControlador::class, 'updateAircraft']);
         Route::post('/availability', [OperadorControlador::class, 'storeAvailability']);
+        Route::get('/my-requests', [OperadorControlador::class, 'requests']);
         Route::get('/requests', [OperadorControlador::class, 'requests']);
         Route::post('/requests/{flightRequest}/accept', [OperadorControlador::class, 'accept']);
         Route::post('/requests/{flightRequest}/reject', [OperadorControlador::class, 'reject']);

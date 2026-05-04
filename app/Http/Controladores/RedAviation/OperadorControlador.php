@@ -59,10 +59,12 @@ class OperadorControlador extends ControladorBase
 
     public function storeAircraft(Request $request)
     {
+        abort_if(! $request->user()->provider_id, 422, 'El usuario proveedor no tiene provider_id asignado.');
+
         $data = $request->validate($this->aircraftRules());
 
         $aeronave = Aeronave::create($data + [
-            'provider_id' => $request->user()->provider->id,
+            'provider_id' => $request->user()->provider_id,
             'status' => 'active',
             'currency' => 'USD',
         ]);
@@ -78,13 +80,15 @@ class OperadorControlador extends ControladorBase
     {
         $user = $request->user()->loadMissing('activeSuscripcion.plan');
         $plan = $user->activeSuscripcion?->plan;
-        $provider = $request->user()->provider;
+        $providerId = $request->user()->provider_id;
+        abort_if(! $providerId, 422, 'El usuario proveedor no tiene provider_id asignado.');
+
         $aircraft = Aeronave::with([
             'provider.user.activeSuscripcion.plan',
             'availability',
             'documents',
             'images',
-        ])->where('provider_id', $provider->id)->latest()->get();
+        ])->where('provider_id', $providerId)->latest()->get();
 
         return $this->ok([
             'aircraft' => $aircraft->map(fn (Aeronave $item) => $this->formatAircraftPayload($item, $plan, $aircraft->count())),
@@ -101,7 +105,7 @@ class OperadorControlador extends ControladorBase
 
     public function updateAircraft(Request $request, Aeronave $aircraft)
     {
-        abort_if($aircraft->provider_id !== $request->user()->provider->id, 403);
+        abort_if($aircraft->provider_id !== $request->user()->provider_id, 403);
 
         $aircraft->update($request->validate($this->aircraftRules(false)));
 
@@ -111,7 +115,7 @@ class OperadorControlador extends ControladorBase
             'aircraft' => $this->formatAircraftPayload(
                 $aircraft->fresh(['provider.user.activeSuscripcion.plan', 'availability', 'documents', 'images']),
                 $user->activeSuscripcion?->plan,
-                $request->user()->provider->aircraft()->count()
+                Aeronave::where('provider_id', $request->user()->provider_id)->count()
             ),
         ]);
     }
@@ -127,7 +131,7 @@ class OperadorControlador extends ControladorBase
         ]);
 
         $aircraft = Aeronave::findOrFail($data['aircraft_id']);
-        abort_if($aircraft->provider_id !== $request->user()->provider->id, 403);
+        abort_if($aircraft->provider_id !== $request->user()->provider_id, 403);
 
         $availability = DisponibilidadAeronave::create($data);
 
@@ -136,7 +140,8 @@ class OperadorControlador extends ControladorBase
 
     public function requests(Request $request)
     {
-        $providerId = $request->user()->provider->id;
+        $providerId = $request->user()->provider_id;
+        abort_if(! $providerId, 422, 'El usuario proveedor no tiene provider_id asignado.');
         $solicitudes = SolicitudVuelo::with(['matches' => fn ($query) => $query->where('provider_id', $providerId), 'matches.aircraft'])
             ->whereHas('matches', fn ($query) => $query->where('provider_id', $providerId))
             ->latest()
@@ -148,7 +153,8 @@ class OperadorControlador extends ControladorBase
 
     public function accept(Request $request, SolicitudVuelo $flightRequest)
     {
-        $providerId = $request->user()->provider->id;
+        $providerId = $request->user()->provider_id;
+        abort_if(! $providerId, 422, 'El usuario proveedor no tiene provider_id asignado.');
         $match = $flightRequest->matches()->where('provider_id', $providerId)->firstOrFail();
 
         $match->update([
@@ -182,7 +188,8 @@ class OperadorControlador extends ControladorBase
 
     public function reject(Request $request, SolicitudVuelo $flightRequest)
     {
-        $providerId = $request->user()->provider->id;
+        $providerId = $request->user()->provider_id;
+        abort_if(! $providerId, 422, 'El usuario proveedor no tiene provider_id asignado.');
         $match = $flightRequest->matches()->where('provider_id', $providerId)->firstOrFail();
         $match->update([
             'status' => 'rejected',

@@ -8,6 +8,7 @@ use App\Modelos\DocumentoAeronave;
 use App\Modelos\ImagenAeronave;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Storage;
 
 class AeronaveControlador extends ControladorBase
 {
@@ -16,7 +17,7 @@ class AeronaveControlador extends ControladorBase
         $query = Aeronave::with(['provider.user.activeSuscripcion.plan', 'images', 'availability', 'documents']);
 
         if ($request->user()->hasRole('provider') && ! $request->user()->hasRole('admin')) {
-            $query->where('provider_id', $request->user()->provider?->id);
+            $query->where('provider_id', $request->user()->provider_id);
         }
 
         $aircraft = $query->latest()->paginate(20);
@@ -137,18 +138,38 @@ class AeronaveControlador extends ControladorBase
         $this->authorizeProveedorAeronave($request, $aircraft);
 
         $data = $request->validate([
-            'image_url' => ['required', 'string', 'max:255'],
+            'image' => ['required', 'file', 'image', 'max:10240'],
             'sort_order' => ['sometimes', 'integer', 'min:0'],
             'is_main' => ['sometimes', 'boolean'],
         ]);
 
-        return $this->ok(['image' => $aircraft->images()->create($data)], 201);
+        $path = $request->file('image')->store('aircraft', 's3');
+        $imageUrl = Storage::disk('s3')->url($path);
+
+        $image = $aircraft->images()->create([
+            'image_url' => $imageUrl,
+            'sort_order' => $data['sort_order'] ?? 0,
+            'is_main' => $data['is_main'] ?? false,
+        ]);
+
+        return $this->ok([
+            'image' => $image,
+            'path' => $path,
+            'url' => $imageUrl,
+        ], 201);
     }
 
     public function destroyImage(Request $request, Aeronave $aircraft, ImagenAeronave $image)
     {
         $this->authorizeProveedorAeronave($request, $aircraft);
         abort_if($image->aircraft_id !== $aircraft->id, 404);
+
+        $path = $this->resolveS3Path($image->image_url);
+
+        if ($path) {
+            Storage::disk('s3')->delete($path);
+        }
+
         $image->delete();
 
         return $this->ok(['message' => 'Imagen eliminada.']);
@@ -274,6 +295,29 @@ class AeronaveControlador extends ControladorBase
             return;
         }
 
-        abort_if($aircraft->provider_id !== $request->user()->provider?->id, 403, 'No puedes gestionar esta aeronave.');
+        abort_if($aircraft->provider_id !== $request->user()->provider_id, 403, 'No puedes gestionar esta aeronave.');
+    }
+
+    private function resolveS3Path(string $url): ?string
+    {
+        $configuredUrl = rtrim((string) config('filesystems.disks.s3.url'), '/');
+
+        if ($configuredUrl !== '' && str_starts_with($url, $configuredUrl.'/')) {
+            return ltrim(substr($url, strlen($configuredUrl)), '/');
+        }
+
+        $path = ltrim((string) parse_url($url, PHP_URL_PATH), '/');
+
+        if ($path === '') {
+            return null;
+        }
+
+        $bucket = (string) config('filesystems.disks.s3.bucket');
+
+        if ($bucket !== '' && str_starts_with($path, $bucket.'/')) {
+            return ltrim(substr($path, strlen($bucket)), '/');
+        }
+
+        return $path;
     }
 }

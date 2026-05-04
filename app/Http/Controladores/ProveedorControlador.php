@@ -33,11 +33,11 @@ class ProveedorControlador extends ControladorBase
 
     public function requests(Request $request)
     {
-        $provider = $request->user()->provider;
-        abort_if(! $provider, 404, 'Proveedor no encontrado.');
+        $providerId = $request->user()->provider_id;
+        abort_if(! $providerId, 404, 'Proveedor no encontrado.');
 
-        $requests = SolicitudVuelo::whereHas('matches', fn ($query) => $query->where('provider_id', $provider->id))
-            ->with(['matches' => fn ($query) => $query->where('provider_id', $provider->id), 'client'])
+        $requests = SolicitudVuelo::whereHas('matches', fn ($query) => $query->where('provider_id', $providerId))
+            ->with(['matches' => fn ($query) => $query->where('provider_id', $providerId), 'client'])
             ->latest()
             ->paginate(20);
 
@@ -46,18 +46,18 @@ class ProveedorControlador extends ControladorBase
 
     public function showRequest(Request $request, SolicitudVuelo $flightRequest)
     {
-        $provider = $request->user()->provider;
-        abort_if(! $provider || ! $flightRequest->matches()->where('provider_id', $provider->id)->exists(), 403);
+        $providerId = $request->user()->provider_id;
+        abort_if(! $providerId || ! $flightRequest->matches()->where('provider_id', $providerId)->exists(), 403);
 
         return $this->ok(['flight_request' => $flightRequest->load(['matches.aircraft', 'quotes'])]);
     }
 
     public function acceptRequest(Request $request, SolicitudVuelo $flightRequest)
     {
-        $provider = $request->user()->provider;
-        abort_if(! $provider, 404);
+        $providerId = $request->user()->provider_id;
+        abort_if(! $providerId, 404);
 
-        $flightRequest->matches()->where('provider_id', $provider->id)->update([
+        $flightRequest->matches()->where('provider_id', $providerId)->update([
             'status' => 'accepted',
             'accepted_at' => now(),
             'rejected_at' => null,
@@ -72,10 +72,10 @@ class ProveedorControlador extends ControladorBase
 
     public function rejectRequest(Request $request, SolicitudVuelo $flightRequest)
     {
-        $provider = $request->user()->provider;
-        abort_if(! $provider, 404);
+        $providerId = $request->user()->provider_id;
+        abort_if(! $providerId, 404);
 
-        $flightRequest->matches()->where('provider_id', $provider->id)->update([
+        $flightRequest->matches()->where('provider_id', $providerId)->update([
             'status' => 'rejected',
             'rejected_at' => now(),
         ]);
@@ -89,19 +89,19 @@ class ProveedorControlador extends ControladorBase
 
     public function payments(Request $request)
     {
-        $provider = $request->user()->provider;
-        abort_if(! $provider, 404);
+        $providerId = $request->user()->provider_id;
+        abort_if(! $providerId, 404);
 
         return $this->ok([
-            'payments' => Pago::whereHas('reservation', fn ($query) => $query->where('provider_id', $provider->id))->paginate(20),
+            'payments' => Pago::whereHas('reservation', fn ($query) => $query->where('provider_id', $providerId))->paginate(20),
         ]);
     }
 
     public function commissions(Request $request)
     {
-        $provider = $request->user()->provider;
-        abort_if(! $provider, 404);
+        $providerId = $request->user()->provider_id;
+        abort_if(! $providerId, 404);
 
-        return $this->ok(['commissions' => Comision::where('provider_id', $provider->id)->paginate(20)]);
+        return $this->ok(['commissions' => Comision::where('provider_id', $providerId)->paginate(20)]);
     }
 }
