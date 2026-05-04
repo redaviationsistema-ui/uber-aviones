@@ -3,6 +3,7 @@
 namespace App\Modelos;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Foundation\Auth\User as Authenticatable;
@@ -19,6 +20,11 @@ class Usuario extends Authenticatable
     public const ROLE_PROVIDER = 'provider';
     public const ROLE_SOBRECARGO = 'sobrecargo';
     public const ROLE_ADMIN = 'admin';
+    public const BASE_ROLES = [
+        self::ROLE_CLIENT,
+        self::ROLE_PROVIDER,
+        self::ROLE_ADMIN,
+    ];
 
     protected $fillable = [
         'name',
@@ -50,6 +56,13 @@ class Usuario extends Authenticatable
     public function profile(): HasOne
     {
         return $this->hasOne(Perfil::class, 'user_id');
+    }
+
+    public function roles(): BelongsToMany
+    {
+        return $this->belongsToMany(Rol::class, 'user_roles', 'user_id', 'role_id')
+            ->withPivot(['is_primary', 'assigned_at'])
+            ->withTimestamps();
     }
 
     public function provider(): HasOne
@@ -113,8 +126,9 @@ class Usuario extends Authenticatable
         $subscriptionActive = $subscription !== null;
 
         return [
-            'has_access' => $demoActive || $subscriptionActive || $this->role === self::ROLE_ADMIN,
+            'has_access' => $demoActive || $subscriptionActive || $this->hasRole(self::ROLE_ADMIN),
             'effective_role' => $this->effectiveRole(),
+            'roles' => $this->roleCodes(),
             'demo' => $demo ? [
                 'status' => $demoActive ? 'active' : 'expired',
                 'started_at' => $demo->started_at,
@@ -132,12 +146,119 @@ class Usuario extends Authenticatable
 
     public function effectiveRole(): string
     {
-        return $this->operational_role ?: $this->role;
+        return $this->primaryRoleCode() ?: ($this->operational_role ?: $this->role);
     }
 
     public function isRole(string ...$roles): bool
     {
-        return in_array($this->effectiveRole(), $roles, true) || in_array($this->role, $roles, true);
+        return $this->hasRole(...$roles);
+    }
+
+    public function hasRole(string ...$roles): bool
+    {
+        $assignedRoles = $this->roleCodes();
+
+        foreach ($roles as $role) {
+            if (in_array($role, $assignedRoles, true)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    public function roleCodes(): array
+    {
+        if ($this->relationLoaded('roles')) {
+            $codes = $this->roles
+                ->pluck('code')
+                ->filter(fn ($code) => is_string($code) && $code !== '')
+                ->values()
+                ->all();
+        } else {
+            $codes = $this->roles()
+                ->pluck('roles.code')
+                ->filter(fn ($code) => is_string($code) && $code !== '')
+                ->values()
+                ->all();
+        }
+
+        if ($codes !== []) {
+            return array_values(array_unique($codes));
+        }
+
+        return array_values(array_unique(array_filter([$this->role, $this->operational_role])));
+    }
+
+    public function primaryRoleCode(): ?string
+    {
+        if ($this->relationLoaded('roles')) {
+            $primary = $this->roles->firstWhere('pivot.is_primary', true);
+
+            return $primary?->code;
+        }
+
+        return $this->roles()
+            ->wherePivot('is_primary', true)
+            ->value('roles.code');
+    }
+
+    public function syncRoles(array $roleCodes, ?string $primaryRoleCode = null): void
+    {
+        $roleCodes = collect($roleCodes)
+            ->filter(fn ($code) => is_string($code) && $code !== '')
+            ->unique()
+            ->values();
+
+        if ($roleCodes->isEmpty()) {
+            $roleCodes = collect([self::ROLE_CLIENT]);
+        }
+
+        $primaryRoleCode = $primaryRoleCode && $roleCodes->contains($primaryRoleCode)
+            ? $primaryRoleCode
+            : ($roleCodes->contains(self::ROLE_CLIENT) ? self::ROLE_CLIENT : $roleCodes->first());
+
+        $roles = Rol::query()
+            ->whereIn('code', $roleCodes->all())
+            ->pluck('id', 'code');
+
+        $syncPayload = [];
+
+        foreach ($roleCodes as $code) {
+            if (! isset($roles[$code])) {
+                continue;
+            }
+
+            $syncPayload[$roles[$code]] = [
+                'is_primary' => $code === $primaryRoleCode,
+                'assigned_at' => now(),
+            ];
+        }
+
+        if ($syncPayload === []) {
+            return;
+        }
+
+        $this->roles()->sync($syncPayload);
+        $this->syncLegacyRoleColumns($roleCodes->all(), $primaryRoleCode);
+        $this->unsetRelation('roles');
+    }
+
+    private function syncLegacyRoleColumns(array $roleCodes, string $primaryRoleCode): void
+    {
+        $roleCodes = array_values(array_unique($roleCodes));
+        $baseRole = collect([self::ROLE_ADMIN, self::ROLE_PROVIDER, self::ROLE_CLIENT])
+            ->first(fn ($role) => in_array($role, $roleCodes, true))
+            ?? (in_array($primaryRoleCode, self::BASE_ROLES, true) ? $primaryRoleCode : self::ROLE_CLIENT);
+
+        $operationalRole = ! in_array($primaryRoleCode, self::BASE_ROLES, true)
+            ? $primaryRoleCode
+            : collect($roleCodes)->first(fn ($role) => ! in_array($role, self::BASE_ROLES, true));
+
+        $this->forceFill([
+            'role' => $baseRole,
+            'operational_role' => $operationalRole,
+        ])->saveQuietly();
     }
 
     public function dashboardPath(): string
@@ -183,6 +304,7 @@ class Usuario extends Authenticatable
             'role' => $this->role,
             'operational_role' => $this->operational_role,
             'effective_role' => $this->effectiveRole(),
+            'roles' => $this->roleCodes(),
             'status' => $this->status,
             'subscription_status' => $this->resolvedSubscriptionStatus(),
             'plan_id' => $this->resolvedPlanId(),

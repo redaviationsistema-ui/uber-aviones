@@ -24,6 +24,7 @@ class DatabaseSeeder extends Seeder
                 'status' => 'active',
             ]
         );
+        $admin->syncRoles([Usuario::ROLE_ADMIN], Usuario::ROLE_ADMIN);
 
         Plan::firstOrCreate(
             ['slug' => 'premium-monthly'],
@@ -132,6 +133,7 @@ class DatabaseSeeder extends Seeder
                 'status' => 'active',
             ]
         );
+        $providerUsuario->syncRoles([Usuario::ROLE_PROVIDER], Usuario::ROLE_PROVIDER);
 
         $provider = Proveedor::firstOrCreate(
             ['user_id' => $providerUsuario->id],
@@ -168,7 +170,7 @@ class DatabaseSeeder extends Seeder
             ]
         );
 
-        Usuario::firstOrCreate(
+        $client = Usuario::firstOrCreate(
             ['email' => 'cliente@privateflights.test'],
             [
                 'name' => 'Cliente Demo',
@@ -178,8 +180,9 @@ class DatabaseSeeder extends Seeder
                 'status' => 'active',
             ]
         );
+        $client->syncRoles([Usuario::ROLE_CLIENT], Usuario::ROLE_CLIENT);
 
-        Usuario::firstOrCreate(
+        $sobrecargo = Usuario::firstOrCreate(
             ['email' => 'sobrecargo@redaviation.test'],
             [
                 'name' => 'Sobrecargo Demo',
@@ -189,6 +192,10 @@ class DatabaseSeeder extends Seeder
                 'operational_role' => 'sobrecargo',
                 'status' => 'active',
             ]
+        );
+        $sobrecargo->syncRoles(
+            [Usuario::ROLE_CLIENT, Usuario::ROLE_SOBRECARGO],
+            Usuario::ROLE_SOBRECARGO
         );
 
         $admin->profile()->firstOrCreate(['country' => 'Mexico', 'city' => 'CDMX']);

@@ -51,9 +51,19 @@ class AdministradorControlador extends ControladorBase
         $user->update($request->validate([
             'name' => ['sometimes', 'string', 'max:255'],
             'phone' => ['nullable', 'string', 'max:50'],
-            'role' => ['sometimes', 'in:client,provider,admin'],
+            'role' => ['sometimes', 'in:client,provider,admin,sobrecargo'],
             'status' => ['sometimes', 'in:active,inactive,blocked'],
         ]));
+
+        if ($request->filled('role')) {
+            $selectedRole = $request->string('role')->toString();
+            $user->syncRoles(
+                $selectedRole === Usuario::ROLE_SOBRECARGO
+                    ? [Usuario::ROLE_CLIENT, Usuario::ROLE_SOBRECARGO]
+                    : [$selectedRole],
+                $selectedRole
+            );
+        }
 
         return $this->ok(['user' => $user->fresh()]);
     }
@@ -74,7 +84,12 @@ class AdministradorControlador extends ControladorBase
 
     public function clients()
     {
-        return $this->ok(['clients' => Usuario::where('role', 'client')->with(['profile', 'demo', 'activeSuscripcion.plan'])->paginate(25)]);
+        return $this->ok([
+            'clients' => Usuario::whereHas('roles', fn ($query) => $query->where('code', Usuario::ROLE_CLIENT))
+                ->whereDoesntHave('roles', fn ($query) => $query->where('code', Usuario::ROLE_SOBRECARGO))
+                ->with(['profile', 'demo', 'activeSuscripcion.plan', 'roles'])
+                ->paginate(25),
+        ]);
     }
 
     public function providers()

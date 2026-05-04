@@ -7,18 +7,24 @@ use App\Modelos\Aeronave;
 use App\Modelos\DisponibilidadAeronave;
 use App\Modelos\Operacion;
 use App\Modelos\SolicitudVuelo;
+use App\Servicios\ReintentoCoincidenciaSolicitudServicio;
 use App\Servicios\RedAviation\VisibilidadServicio;
 use Illuminate\Http\Request;
 
 class OperadorControlador extends ControladorBase
 {
-    public function __construct(private readonly VisibilidadServicio $visibilidadServicio)
+    public function __construct(
+        private readonly VisibilidadServicio $visibilidadServicio,
+        private readonly ReintentoCoincidenciaSolicitudServicio $reintentoServicio,
+    )
     {
     }
 
     public function dashboard(Request $request)
     {
         $provider = $request->user()->provider;
+        $user = $request->user()->loadMissing('activeSuscripcion.plan');
+        $plan = $user->activeSuscripcion?->plan;
 
         return $this->ok([
             'metrics' => [
@@ -27,20 +33,33 @@ class OperadorControlador extends ControladorBase
                     ? $provider->aircraft()->whereHas('availability')->count()
                     : 0,
             ],
+            'provider' => [
+                'id' => $provider?->id,
+                'company_name' => $provider?->company_name,
+                'commercial_name' => $provider?->commercial_name,
+                'approval_status' => $provider?->approval_status,
+            ],
+            'membership' => $plan ? [
+                'plan_id' => $plan->id,
+                'plan_name' => $plan->name,
+                'code' => $plan->code,
+                'billing_cycle' => $plan->billing_cycle,
+                'price_monthly' => $plan->price_monthly,
+                'price_yearly' => $plan->price_yearly,
+                'max_aircraft' => $plan->max_aircraft,
+                'max_users' => $plan->max_users,
+                'has_priority' => $plan->has_priority,
+                'has_concierge' => $plan->has_concierge,
+                'has_reports' => $plan->has_reports,
+                'is_enterprise' => $plan->is_enterprise,
+                'expires_at' => $user->activeSuscripcion?->expires_at,
+            ] : null,
         ]);
     }
 
     public function storeAircraft(Request $request)
     {
-        $data = $request->validate([
-            'model' => ['required', 'string', 'max:255'],
-            'registration' => ['required', 'string', 'max:50'],
-            'capacity' => ['required', 'integer', 'min:1'],
-            'base_airport' => ['required', 'string', 'max:20'],
-            'range_km' => ['nullable', 'integer', 'min:0'],
-            'speed_kmh' => ['nullable', 'integer', 'min:0'],
-            'hourly_rate' => ['nullable', 'numeric', 'min:0'],
-        ]);
+        $data = $request->validate($this->aircraftRules());
 
         $aeronave = Aeronave::create($data + [
             'provider_id' => $request->user()->provider->id,
@@ -48,13 +67,35 @@ class OperadorControlador extends ControladorBase
             'currency' => 'USD',
         ]);
 
-        return $this->ok(['aircraft' => $aeronave], 201);
+        return $this->ok([
+            'aircraft' => $this->formatAircraftPayload(
+                $aeronave->fresh(['provider.user.activeSuscripcion.plan', 'availability', 'documents', 'images'])
+            ),
+        ], 201);
     }
 
     public function indexAircraft(Request $request)
     {
+        $user = $request->user()->loadMissing('activeSuscripcion.plan');
+        $plan = $user->activeSuscripcion?->plan;
+        $provider = $request->user()->provider;
+        $aircraft = Aeronave::with([
+            'provider.user.activeSuscripcion.plan',
+            'availability',
+            'documents',
+            'images',
+        ])->where('provider_id', $provider->id)->latest()->get();
+
         return $this->ok([
-            'aircraft' => Aeronave::where('provider_id', $request->user()->provider->id)->latest()->get(),
+            'aircraft' => $aircraft->map(fn (Aeronave $item) => $this->formatAircraftPayload($item, $plan, $aircraft->count())),
+            'membership' => $plan ? [
+                'plan_id' => $plan->id,
+                'plan_name' => $plan->name,
+                'billing_cycle' => $plan->billing_cycle,
+                'price_monthly' => $plan->price_monthly,
+                'price_yearly' => $plan->price_yearly,
+                'max_aircraft' => $plan->max_aircraft,
+            ] : null,
         ]);
     }
 
@@ -62,14 +103,17 @@ class OperadorControlador extends ControladorBase
     {
         abort_if($aircraft->provider_id !== $request->user()->provider->id, 403);
 
-        $aircraft->update($request->validate([
-            'model' => ['sometimes', 'string', 'max:255'],
-            'capacity' => ['sometimes', 'integer', 'min:1'],
-            'base_airport' => ['sometimes', 'string', 'max:20'],
-            'status' => ['sometimes', 'string', 'max:50'],
-        ]));
+        $aircraft->update($request->validate($this->aircraftRules(false)));
 
-        return $this->ok(['aircraft' => $aircraft->fresh()]);
+        $user = $request->user()->loadMissing('activeSuscripcion.plan');
+
+        return $this->ok([
+            'aircraft' => $this->formatAircraftPayload(
+                $aircraft->fresh(['provider.user.activeSuscripcion.plan', 'availability', 'documents', 'images']),
+                $user->activeSuscripcion?->plan,
+                $request->user()->provider->aircraft()->count()
+            ),
+        ]);
     }
 
     public function storeAvailability(Request $request)
@@ -145,6 +189,58 @@ class OperadorControlador extends ControladorBase
             'rejected_at' => now(),
         ]);
 
-        return $this->ok(['match' => $match->fresh()]);
+        return $this->ok([
+            'match' => $match->fresh(),
+            'retry' => $this->reintentoServicio->manejarRechazo($flightRequest),
+        ]);
+    }
+
+    private function aircraftRules(bool $creating = true): array
+    {
+        $required = $creating ? 'required' : 'sometimes';
+
+        return [
+            'model' => [$required, 'string', 'max:255'],
+            'registration' => [$required, 'string', 'max:50'],
+            'capacity' => [$required, 'integer', 'min:1'],
+            'base_airport' => [$required, 'string', 'max:20'],
+            'range_km' => ['nullable', 'integer', 'min:0'],
+            'speed_kmh' => ['nullable', 'integer', 'min:0'],
+            'hourly_rate' => ['nullable', 'numeric', 'min:0'],
+            'currency' => ['sometimes', 'string', 'size:3'],
+            'status' => ['sometimes', 'in:active,inactive,maintenance,blocked'],
+            'security_filter' => ['nullable', 'string', 'max:50'],
+            'security_score' => ['nullable', 'integer', 'min:0', 'max:100'],
+            'airworthiness_status' => ['nullable', 'string', 'max:100'],
+            'last_maintenance_at' => ['nullable', 'date'],
+            'engine_run_at' => ['nullable', 'date'],
+            'captain_training_at' => ['nullable', 'date'],
+            'lodging_location' => ['nullable', 'string', 'max:150'],
+            'client_fbo' => ['nullable', 'string', 'max:120'],
+            'dispatch_center' => ['nullable', 'string', 'max:120'],
+            'dispatch_notes' => ['nullable', 'string'],
+            'security_notes' => ['nullable', 'string'],
+        ];
+    }
+
+    private function formatAircraftPayload(Aeronave $aircraft, $plan = null, ?int $fleetCount = null): array
+    {
+        $providerUser = $aircraft->provider?->user;
+        $resolvedPlan = $plan ?? $providerUser?->activeSuscripcion?->plan;
+        $aircraftCount = max($fleetCount ?? ($aircraft->provider?->aircraft()->count() ?? 1), 1);
+        $monthlyBase = (float) ($resolvedPlan?->price_monthly ?? $resolvedPlan?->price_yearly ?? $resolvedPlan?->price ?? 0);
+        $monthlyPerAircraft = $monthlyBase > 0 ? round($monthlyBase / $aircraftCount, 2) : null;
+
+        return [
+            ...$aircraft->toArray(),
+            'membership_context' => $resolvedPlan ? [
+                'plan_id' => $resolvedPlan->id,
+                'plan_name' => $resolvedPlan->name,
+                'billing_cycle' => $resolvedPlan->billing_cycle,
+                'max_aircraft' => $resolvedPlan->max_aircraft,
+                'monthly_cost_per_aircraft' => $monthlyPerAircraft,
+                'within_plan_limit' => $resolvedPlan->max_aircraft ? $aircraftCount <= $resolvedPlan->max_aircraft : true,
+            ] : null,
+        ];
     }
 }

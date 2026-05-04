@@ -12,7 +12,7 @@ class VerificarProveedorAprobado
     {
         $provider = $request->user()?->provider;
 
-        if ($request->user()?->role !== 'admin' && (! $provider || $provider->approval_status !== 'approved')) {
+        if (! $request->user()?->hasRole('admin') && (! $provider || $provider->approval_status !== 'approved')) {
             return response()->json([
                 'success' => false,
                 'message' => 'Proveedor no aprobado.',

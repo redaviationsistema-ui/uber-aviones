@@ -13,13 +13,18 @@ class AeronaveControlador extends ControladorBase
 {
     public function index(Request $request)
     {
-        $query = Aeronave::with(['provider.user', 'images']);
+        $query = Aeronave::with(['provider.user.activeSuscripcion.plan', 'images', 'availability', 'documents']);
 
-        if ($request->user()->role === 'provider') {
+        if ($request->user()->hasRole('provider') && ! $request->user()->hasRole('admin')) {
             $query->where('provider_id', $request->user()->provider?->id);
         }
 
-        return $this->ok(['aircraft' => $query->latest()->paginate(20)]);
+        $aircraft = $query->latest()->paginate(20);
+        $aircraft->setCollection(
+            $aircraft->getCollection()->map(fn (Aeronave $item) => $this->formatAircraftPayload($item))
+        );
+
+        return $this->ok(['aircraft' => $aircraft]);
     }
 
     public function store(Request $request)
@@ -36,14 +41,18 @@ class AeronaveControlador extends ControladorBase
         $data = $request->validate($this->rules());
         $aircraft = $provider->aircraft()->create($data);
 
-        return $this->ok(['aircraft' => $aircraft], 201);
+        return $this->ok(['aircraft' => $this->formatAircraftPayload($aircraft->fresh(['provider.user.activeSuscripcion.plan', 'availability', 'documents', 'images']))], 201);
     }
 
     public function show(Request $request, Aeronave $aircraft)
     {
         $this->authorizeProveedorAeronave($request, $aircraft);
 
-        return $this->ok(['aircraft' => $aircraft->load(['provider.user', 'images', 'availability'])]);
+        return $this->ok([
+            'aircraft' => $this->formatAircraftPayload(
+                $aircraft->load(['provider.user.activeSuscripcion.plan', 'images', 'availability', 'documents'])
+            ),
+        ]);
     }
 
     public function update(Request $request, Aeronave $aircraft)
@@ -52,7 +61,11 @@ class AeronaveControlador extends ControladorBase
 
         $aircraft->update($request->validate($this->rules(false)));
 
-        return $this->ok(['aircraft' => $aircraft->fresh()]);
+        return $this->ok([
+            'aircraft' => $this->formatAircraftPayload(
+                $aircraft->fresh(['provider.user.activeSuscripcion.plan', 'images', 'availability', 'documents'])
+            ),
+        ]);
     }
 
     public function destroy(Request $request, Aeronave $aircraft)
@@ -175,7 +188,7 @@ class AeronaveControlador extends ControladorBase
     {
         $query = DisponibilidadAeronave::with('aircraft');
 
-        if ($request->user()->role === 'provider') {
+        if ($request->user()->hasRole('provider') && ! $request->user()->hasRole('admin')) {
             $query->whereHas('aircraft', fn ($scope) => $scope->where('provider_id', $request->user()->provider?->id));
         }
 
@@ -218,12 +231,46 @@ class AeronaveControlador extends ControladorBase
             'hourly_rate' => [$required, 'numeric', 'min:0'],
             'currency' => ['sometimes', 'string', 'size:3'],
             'status' => ['sometimes', 'in:active,inactive,maintenance,blocked'],
+            'security_filter' => ['nullable', 'string', 'max:50'],
+            'security_score' => ['nullable', 'integer', 'min:0', 'max:100'],
+            'airworthiness_status' => ['nullable', 'string', 'max:100'],
+            'last_maintenance_at' => ['nullable', 'date'],
+            'engine_run_at' => ['nullable', 'date'],
+            'captain_training_at' => ['nullable', 'date'],
+            'lodging_location' => ['nullable', 'string', 'max:150'],
+            'client_fbo' => ['nullable', 'string', 'max:120'],
+            'dispatch_center' => ['nullable', 'string', 'max:120'],
+            'dispatch_notes' => ['nullable', 'string'],
+            'security_notes' => ['nullable', 'string'],
+        ];
+    }
+
+    private function formatAircraftPayload(Aeronave $aircraft): array
+    {
+        $providerUser = $aircraft->provider?->user;
+        $plan = $providerUser?->activeSuscripcion?->plan;
+        $providerAircraftCount = $aircraft->provider?->aircraft()->count() ?? 1;
+        $monthlyBase = (float) ($plan?->price_monthly ?? $plan?->price_yearly ?? $plan?->price ?? 0);
+        $monthlyPerAircraft = $providerAircraftCount > 0 && $monthlyBase > 0
+            ? round($monthlyBase / $providerAircraftCount, 2)
+            : null;
+
+        return [
+            ...$aircraft->toArray(),
+            'membership_context' => $plan ? [
+                'plan_id' => $plan->id,
+                'plan_name' => $plan->name,
+                'billing_cycle' => $plan->billing_cycle,
+                'max_aircraft' => $plan->max_aircraft,
+                'monthly_cost_per_aircraft' => $monthlyPerAircraft,
+                'within_plan_limit' => $plan->max_aircraft ? $providerAircraftCount <= $plan->max_aircraft : true,
+            ] : null,
         ];
     }
 
     private function authorizeProveedorAeronave(Request $request, Aeronave $aircraft): void
     {
-        if ($request->user()->role === 'admin') {
+        if ($request->user()->hasRole('admin')) {
             return;
         }
 

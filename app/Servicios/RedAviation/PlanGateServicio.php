@@ -20,7 +20,7 @@ class PlanGateServicio
 
     public function puedeCrearSolicitud(Usuario $usuario): bool
     {
-        if ($usuario->role === Usuario::ROLE_ADMIN) {
+        if ($usuario->hasRole(Usuario::ROLE_ADMIN)) {
             return true;
         }
 

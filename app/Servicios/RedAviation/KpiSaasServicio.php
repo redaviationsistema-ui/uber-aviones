@@ -14,9 +14,11 @@ class KpiSaasServicio
     {
         return [
             'usuarios_totales' => Usuario::count(),
-            'clientes' => Usuario::where('role', 'client')->whereNull('operational_role')->count(),
-            'operadores' => Usuario::where('role', 'provider')->count(),
-            'sobrecargos' => Usuario::where('operational_role', 'sobrecargo')->count(),
+            'clientes' => Usuario::whereHas('roles', fn ($query) => $query->where('code', Usuario::ROLE_CLIENT))
+                ->whereDoesntHave('roles', fn ($query) => $query->where('code', Usuario::ROLE_SOBRECARGO))
+                ->count(),
+            'operadores' => Usuario::whereHas('roles', fn ($query) => $query->where('code', Usuario::ROLE_PROVIDER))->count(),
+            'sobrecargos' => Usuario::whereHas('roles', fn ($query) => $query->where('code', Usuario::ROLE_SOBRECARGO))->count(),
             'solicitudes' => SolicitudVuelo::count(),
             'operaciones_activas' => Operacion::whereNotIn('status', ['finalizada', 'cancelada'])->count(),
             'suscripciones_activas' => Suscripcion::where('status', 'active')->count(),

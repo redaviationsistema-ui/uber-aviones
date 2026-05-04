@@ -5,6 +5,7 @@ namespace App\Modelos;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class Reserva extends Model
 {
@@ -56,5 +57,20 @@ class Reserva extends Model
     public function legs(): HasMany
     {
         return $this->hasMany(TramoReserva::class, 'reservation_id');
+    }
+
+    public function payments(): HasMany
+    {
+        return $this->hasMany(Pago::class, 'reservation_id');
+    }
+
+    public function contract(): HasOne
+    {
+        return $this->hasOne(ContratoReserva::class, 'reservation_id');
+    }
+
+    public function review(): HasOne
+    {
+        return $this->hasOne(CalificacionServicio::class, 'reservation_id');
     }
 }

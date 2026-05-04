@@ -6,6 +6,7 @@ use App\Http\Controladores\ControladorBase;
 use App\Modelos\BanderaAntiBroker;
 use App\Modelos\Operacion;
 use App\Modelos\Proveedor;
+use App\Modelos\Rol;
 use App\Modelos\SolicitudVuelo;
 use App\Modelos\Suscripcion;
 use App\Modelos\Usuario;
@@ -13,8 +14,11 @@ use App\Servicios\RedAviation\KpiSaasServicio;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Str;
+use Illuminate\Validation\Rule;
 use Shuchkin\SimpleXLS;
 use Shuchkin\SimpleXLSX;
 use Shuchkin\SimpleXLSXGen;
@@ -33,7 +37,161 @@ class AdminControlador extends ControladorBase
 
     public function users()
     {
-        return $this->ok(['users' => Usuario::latest()->paginate(20)]);
+        return $this->ok([
+            'users' => Usuario::with(['roles', 'profile', 'provider'])
+                ->latest()
+                ->paginate(20),
+        ]);
+    }
+
+    public function roles()
+    {
+        return $this->ok([
+            'roles' => Rol::query()
+                ->where('is_active', true)
+                ->orderBy('name')
+                ->get(),
+        ]);
+    }
+
+    public function storeUser(Request $request)
+    {
+        $data = $request->validate([
+            'name' => ['required', 'string', 'max:255'],
+            'email' => ['required', 'email', 'max:255', 'unique:users,email'],
+            'password' => ['nullable', 'string', 'min:8'],
+            'phone' => ['nullable', 'string', 'max:50'],
+            'role' => ['required', Rule::in([
+                Usuario::ROLE_CLIENT,
+                Usuario::ROLE_PROVIDER,
+                Usuario::ROLE_ADMIN,
+                Usuario::ROLE_SOBRECARGO,
+            ])],
+            'status' => ['sometimes', 'in:active,inactive,blocked'],
+        ]);
+
+        $plainPassword = $data['password'] ?? Str::password(12);
+        $user = Usuario::create([
+            'name' => $data['name'],
+            'email' => $data['email'],
+            'password' => Hash::make($plainPassword),
+            'phone' => $data['phone'] ?? null,
+            'status' => $data['status'] ?? 'active',
+        ]);
+
+        $this->syncUserRoles($user, $data['role']);
+        $this->ensureProviderRecord($user);
+        $this->writeAudit($request, 'admin_user_created', 'admin_users', sprintf(
+            'Admin creo al usuario %s con rol %s.',
+            $user->email,
+            $data['role']
+        ));
+
+        return $this->ok([
+            'user' => $user->fresh(['roles', 'profile', 'provider']),
+            'temporary_password' => $plainPassword,
+        ], 201);
+    }
+
+    public function updateUser(Request $request, Usuario $user)
+    {
+        $data = $request->validate([
+            'name' => ['sometimes', 'string', 'max:255'],
+            'email' => ['sometimes', 'email', 'max:255', Rule::unique('users', 'email')->ignore($user->id)],
+            'phone' => ['nullable', 'string', 'max:50'],
+            'role' => ['sometimes', Rule::in([
+                Usuario::ROLE_CLIENT,
+                Usuario::ROLE_PROVIDER,
+                Usuario::ROLE_ADMIN,
+                Usuario::ROLE_SOBRECARGO,
+            ])],
+            'status' => ['sometimes', 'in:active,inactive,blocked'],
+        ]);
+
+        $user->update(collect($data)->except('role')->all());
+
+        if (isset($data['role'])) {
+            $this->syncUserRoles($user, $data['role']);
+            $this->ensureProviderRecord($user);
+        }
+
+        $this->writeAudit($request, 'admin_user_updated', 'admin_users', sprintf(
+            'Admin actualizo al usuario %s.',
+            $user->email
+        ));
+
+        return $this->ok([
+            'user' => $user->fresh(['roles', 'profile', 'provider']),
+        ]);
+    }
+
+    public function destroyUser(Request $request, Usuario $user)
+    {
+        if ($request->user()?->is($user)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No puedes eliminar tu propio usuario administrador.',
+            ], 422);
+        }
+
+        $email = $user->email;
+        $user->delete();
+
+        $this->writeAudit($request, 'admin_user_deleted', 'admin_users', sprintf(
+            'Admin elimino al usuario %s.',
+            $email
+        ));
+
+        return $this->ok([
+            'message' => 'Usuario eliminado correctamente.',
+        ]);
+    }
+
+    public function blockUser(Request $request, Usuario $user)
+    {
+        $user->update(['status' => 'blocked']);
+
+        $this->writeAudit($request, 'admin_user_blocked', 'admin_users', sprintf(
+            'Admin bloqueo al usuario %s.',
+            $user->email
+        ));
+
+        return $this->ok([
+            'user' => $user->fresh(['roles', 'profile', 'provider']),
+        ]);
+    }
+
+    public function activateUser(Request $request, Usuario $user)
+    {
+        $user->update(['status' => 'active']);
+
+        $this->writeAudit($request, 'admin_user_activated', 'admin_users', sprintf(
+            'Admin activo al usuario %s.',
+            $user->email
+        ));
+
+        return $this->ok([
+            'user' => $user->fresh(['roles', 'profile', 'provider']),
+        ]);
+    }
+
+    public function resetUserPassword(Request $request, Usuario $user)
+    {
+        $plainPassword = Str::password(12);
+        $user->forceFill([
+            'password' => Hash::make($plainPassword),
+        ])->save();
+
+        $this->writeAudit($request, 'admin_user_password_reset', 'admin_users', sprintf(
+            'Admin reinicio la contrasena del usuario %s.',
+            $user->email
+        ));
+
+        return $this->ok([
+            'message' => 'Contrasena reiniciada correctamente.',
+            'temporary_password' => $plainPassword,
+            'user' => $user->fresh(['roles', 'profile', 'provider']),
+        ]);
     }
 
     public function operators()
@@ -43,7 +201,11 @@ class AdminControlador extends ControladorBase
 
     public function sobrecargos()
     {
-        return $this->ok(['sobrecargos' => Usuario::where('operational_role', 'sobrecargo')->latest()->paginate(20)]);
+        return $this->ok([
+            'sobrecargos' => Usuario::whereHas('roles', fn ($query) => $query->where('code', Usuario::ROLE_SOBRECARGO))
+                ->latest()
+                ->paginate(20),
+        ]);
     }
 
     public function requests()
@@ -432,6 +594,31 @@ class AdminControlador extends ControladorBase
         }
 
         return $missing;
+    }
+
+    private function syncUserRoles(Usuario $user, string $selectedRole): void
+    {
+        $roles = $selectedRole === Usuario::ROLE_SOBRECARGO
+            ? [Usuario::ROLE_CLIENT, Usuario::ROLE_SOBRECARGO]
+            : [$selectedRole];
+
+        $user->syncRoles($roles, $selectedRole);
+    }
+
+    private function ensureProviderRecord(Usuario $user): void
+    {
+        if (! $user->hasRole(Usuario::ROLE_PROVIDER)) {
+            return;
+        }
+
+        $user->provider()->firstOrCreate(
+            ['user_id' => $user->id],
+            [
+                'company_name' => $user->name,
+                'commercial_name' => $user->name,
+                'approval_status' => 'pending',
+            ]
+        );
     }
 }
 

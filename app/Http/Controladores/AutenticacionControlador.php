@@ -30,6 +30,12 @@ class AutenticacionControlador extends ControladorBase
             'role' => $persistedRole,
             'operational_role' => $role === Usuario::ROLE_SOBRECARGO ? Usuario::ROLE_SOBRECARGO : null,
         ]);
+        $user->syncRoles(
+            $role === Usuario::ROLE_SOBRECARGO
+                ? [Usuario::ROLE_CLIENT, Usuario::ROLE_SOBRECARGO]
+                : [$persistedRole],
+            $role
+        );
 
         if ($user->role === Usuario::ROLE_PROVIDER) {
             Proveedor::create([
@@ -42,9 +48,9 @@ class AutenticacionControlador extends ControladorBase
 
         return $this->ok([
             'token' => TokenApi::issue($user),
-            'user' => $user->fresh(['provider', 'profile']),
-            'access' => $user->accessStatus(),
-            'login_context' => $user->fresh(['demo', 'activeSuscripcion.plan'])->loginContext(),
+            'user' => $user->fresh(['provider', 'profile', 'roles']),
+            'access' => $user->fresh(['roles', 'demo', 'activeSuscripcion.plan'])->accessStatus(),
+            'login_context' => $user->fresh(['roles', 'demo', 'activeSuscripcion.plan'])->loginContext(),
         ], 201);
     }
 
@@ -73,7 +79,7 @@ class AutenticacionControlador extends ControladorBase
 
         return $this->ok([
             'token' => TokenApi::issue($user),
-            'user' => $user->load(['provider', 'profile', 'demo', 'activeSuscripcion.plan']),
+            'user' => $user->load(['provider', 'profile', 'roles', 'demo', 'activeSuscripcion.plan']),
             'access' => $user->accessStatus(),
             'login_context' => $user->loginContext(),
         ]);
@@ -81,7 +87,7 @@ class AutenticacionControlador extends ControladorBase
 
     public function me(Request $request)
     {
-        $user = $request->user()->load(['provider', 'profile', 'demo', 'activeSuscripcion.plan', 'paymentMethods']);
+        $user = $request->user()->load(['provider', 'profile', 'roles', 'demo', 'activeSuscripcion.plan', 'paymentMethods']);
 
         return $this->ok([
             'user' => $user,
@@ -92,7 +98,7 @@ class AutenticacionControlador extends ControladorBase
 
     public function redirectDashboard(Request $request)
     {
-        $user = $request->user()->load(['demo', 'activeSuscripcion.plan']);
+        $user = $request->user()->load(['roles', 'demo', 'activeSuscripcion.plan']);
 
         return $this->ok([
             'dashboard' => $user->dashboardPath(),

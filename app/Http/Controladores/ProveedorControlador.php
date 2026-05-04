@@ -6,10 +6,15 @@ use App\Modelos\SolicitudVuelo;
 use App\Modelos\Comision;
 use App\Modelos\Pago;
 use App\Modelos\Reserva;
+use App\Servicios\ReintentoCoincidenciaSolicitudServicio;
 use Illuminate\Http\Request;
 
 class ProveedorControlador extends ControladorBase
 {
+    public function __construct(private readonly ReintentoCoincidenciaSolicitudServicio $reintentoServicio)
+    {
+    }
+
     public function dashboard(Request $request)
     {
         $provider = $request->user()->provider;
@@ -52,7 +57,15 @@ class ProveedorControlador extends ControladorBase
         $provider = $request->user()->provider;
         abort_if(! $provider, 404);
 
-        $flightRequest->matches()->where('provider_id', $provider->id)->update(['status' => 'accepted']);
+        $flightRequest->matches()->where('provider_id', $provider->id)->update([
+            'status' => 'accepted',
+            'accepted_at' => now(),
+            'rejected_at' => null,
+        ]);
+        $flightRequest->update([
+            'status' => 'matched',
+            'workflow_status' => 'aceptada',
+        ]);
 
         return $this->ok(['message' => 'Solicitud aceptada para cotizar.']);
     }
@@ -62,9 +75,16 @@ class ProveedorControlador extends ControladorBase
         $provider = $request->user()->provider;
         abort_if(! $provider, 404);
 
-        $flightRequest->matches()->where('provider_id', $provider->id)->update(['status' => 'rejected']);
+        $flightRequest->matches()->where('provider_id', $provider->id)->update([
+            'status' => 'rejected',
+            'rejected_at' => now(),
+        ]);
+        $retry = $this->reintentoServicio->manejarRechazo($flightRequest);
 
-        return $this->ok(['message' => 'Solicitud rechazada.']);
+        return $this->ok([
+            'message' => 'Solicitud rechazada.',
+            'retry' => $retry,
+        ]);
     }
 
     public function payments(Request $request)

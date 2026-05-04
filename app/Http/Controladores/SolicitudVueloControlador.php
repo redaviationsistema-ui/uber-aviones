@@ -14,7 +14,7 @@ class SolicitudVueloControlador extends ControladorBase
         $query = SolicitudVuelo::with(['matches.aircraft', 'quotes'])
             ->latest();
 
-        if ($request->user()->role === 'client') {
+        if ($request->user()->hasRole('client') && ! $request->user()->hasRole('admin')) {
             $query->where('client_id', $request->user()->id);
         }
 
@@ -62,7 +62,7 @@ class SolicitudVueloControlador extends ControladorBase
 
     public function show(Request $request, SolicitudVuelo $flightRequest)
     {
-        if ($request->user()->role === 'client' && $flightRequest->client_id !== $request->user()->id) {
+        if ($request->user()->hasRole('client') && ! $request->user()->hasRole('admin') && $flightRequest->client_id !== $request->user()->id) {
             abort(403, 'No puedes ver esta solicitud.');
         }
 
@@ -77,7 +77,15 @@ class SolicitudVueloControlador extends ControladorBase
                 ->latest()
                 ->limit(50)
                 ->get(),
-            'reservations' => $request->user()->reservations()->with(['quote', 'aircraft'])->latest()->limit(50)->get(),
+            'reservations' => $request->user()->reservations()->with(['quote', 'aircraft', 'contract', 'review', 'payments'])->latest()->limit(50)->get(),
+            'payments' => $request->user()->reservations()
+                ->with('payments')
+                ->latest()
+                ->limit(50)
+                ->get()
+                ->pluck('payments')
+                ->flatten()
+                ->values(),
         ]);
     }
 

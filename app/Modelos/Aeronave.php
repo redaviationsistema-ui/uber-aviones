@@ -24,11 +24,28 @@ class Aeronave extends Model
         'hourly_rate',
         'currency',
         'status',
+        'security_filter',
+        'security_score',
+        'airworthiness_status',
+        'last_maintenance_at',
+        'engine_run_at',
+        'captain_training_at',
+        'lodging_location',
+        'client_fbo',
+        'dispatch_center',
+        'dispatch_notes',
+        'security_notes',
     ];
 
     protected function casts(): array
     {
-        return ['hourly_rate' => 'decimal:2'];
+        return [
+            'hourly_rate' => 'decimal:2',
+            'security_score' => 'integer',
+            'last_maintenance_at' => 'date',
+            'engine_run_at' => 'date',
+            'captain_training_at' => 'date',
+        ];
     }
 
     public function provider(): BelongsTo

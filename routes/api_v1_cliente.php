@@ -37,7 +37,12 @@ Route::prefix('cliente')->middleware(['auth.token', 'role:client,admin'])->group
     Route::get('/reservas', [ReservaControlador::class, 'index']);
     Route::get('/reservas/{reservation}', [ReservaControlador::class, 'show']);
     Route::post('/reservas', [ReservaControlador::class, 'store'])->middleware('premium');
+    Route::get('/reservas/{reservation}/contrato', [ReservaControlador::class, 'showContract']);
+    Route::post('/reservas/{reservation}/contrato/generar', [ReservaControlador::class, 'generateContract']);
+    Route::post('/reservas/{reservation}/contrato/firmar', [ReservaControlador::class, 'signContract']);
+    Route::post('/reservas/{reservation}/calificar', [ReservaControlador::class, 'rateService']);
     Route::post('/reservas/{reservation}/pagar', [PagoControlador::class, 'storeReservaPago']);
+    Route::post('/reservas/{reservation}/reintentar-pago', [PagoControlador::class, 'retryReservaPago']);
 
     Route::get('/pagos', [PagoControlador::class, 'index']);
     Route::get('/historial', [SolicitudVueloControlador::class, 'history']);

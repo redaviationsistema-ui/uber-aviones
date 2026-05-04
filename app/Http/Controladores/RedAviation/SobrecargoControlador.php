@@ -44,6 +44,52 @@ class SobrecargoControlador extends ControladorBase
         ]);
     }
 
+    public function startService(Request $request, Operacion $operation)
+    {
+        abort_if($operation->sobrecargo_user_id !== $request->user()->id, 403);
+
+        $operation->update([
+            'status' => 'in_progress',
+            'started_at' => now(),
+        ]);
+
+        $timeline = LineaTiempoOperacion::create([
+            'operation_id' => $operation->id,
+            'status' => 'servicio_iniciado',
+            'title' => 'Sobrecargo inicia servicio',
+            'description' => 'La atencion al cliente comenzo en el dia del vuelo.',
+            'created_by' => $request->user()->id,
+        ]);
+
+        return $this->ok([
+            'operation' => $operation->fresh(),
+            'timeline_item' => $timeline,
+        ]);
+    }
+
+    public function completeService(Request $request, Operacion $operation)
+    {
+        abort_if($operation->sobrecargo_user_id !== $request->user()->id, 403);
+
+        $operation->update([
+            'status' => 'completed',
+            'completed_at' => now(),
+        ]);
+
+        $timeline = LineaTiempoOperacion::create([
+            'operation_id' => $operation->id,
+            'status' => 'servicio_finalizado',
+            'title' => 'Vuelo finalizado',
+            'description' => 'El sobrecargo cerro la atencion y dejo el servicio completado.',
+            'created_by' => $request->user()->id,
+        ]);
+
+        return $this->ok([
+            'operation' => $operation->fresh(),
+            'timeline_item' => $timeline,
+        ]);
+    }
+
     public function completeChecklist(Request $request, ChecklistOperacion $checklist)
     {
         abort_if($checklist->sobrecargo_user_id !== $request->user()->id, 403);

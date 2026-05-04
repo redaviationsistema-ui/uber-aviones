@@ -12,7 +12,7 @@ class CotizacionControlador extends ControladorBase
     {
         $query = Cotizacion::with(['flightRequest', 'aircraft', 'provider.user'])->latest();
 
-        if ($request->user()->role === 'client') {
+        if ($request->user()->hasRole('client') && ! $request->user()->hasRole('admin')) {
             $query->whereHas('flightRequest', fn ($scope) => $scope->where('client_id', $request->user()->id));
         }
 
@@ -34,11 +34,11 @@ class CotizacionControlador extends ControladorBase
 
     public function show(Request $request, Cotizacion $quote)
     {
-        if ($request->user()->role === 'client') {
+        if ($request->user()->hasRole('client') && ! $request->user()->hasRole('admin')) {
             abort_if($quote->flightRequest->client_id !== $request->user()->id, 403);
         }
 
-        if ($request->user()->role === 'provider') {
+        if ($request->user()->hasRole('provider') && ! $request->user()->hasRole('admin')) {
             abort_if($quote->provider_id !== $request->user()->provider?->id, 403);
         }
 
@@ -85,7 +85,7 @@ class CotizacionControlador extends ControladorBase
     public function respond(Request $request, Cotizacion $quote)
     {
         $provider = $request->user()->provider;
-        abort_if($request->user()->role !== 'admin' && $quote->provider_id !== $provider?->id, 403);
+        abort_if(! $request->user()->hasRole('admin') && $quote->provider_id !== $provider?->id, 403);
 
         $data = $request->validate(['status' => ['required', 'in:sent,rejected,expired']]);
         $quote->update($data);

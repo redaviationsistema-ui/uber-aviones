@@ -28,6 +28,16 @@ class UsuarioFactory extends Factory
         ];
     }
 
+    public function configure(): static
+    {
+        return $this->afterCreating(function (Usuario $usuario) {
+            $roleCodes = array_values(array_filter([$usuario->role, $usuario->operational_role]));
+            $primaryRole = $usuario->operational_role ?: $usuario->role;
+
+            $usuario->syncRoles($roleCodes, $primaryRole);
+        });
+    }
+
     public function unverified(): static
     {
         return $this->state(fn (array $attributes) => [

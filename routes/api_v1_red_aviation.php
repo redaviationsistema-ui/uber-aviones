@@ -41,6 +41,8 @@ Route::middleware(['auth.token'])->group(function () {
         Route::get('/dashboard', [SobrecargoControlador::class, 'dashboard']);
         Route::get('/assignments', [SobrecargoControlador::class, 'assignments']);
         Route::get('/operations/{operation}', [SobrecargoControlador::class, 'operation']);
+        Route::post('/operations/{operation}/start-service', [SobrecargoControlador::class, 'startService']);
+        Route::post('/operations/{operation}/complete-service', [SobrecargoControlador::class, 'completeService']);
         Route::post('/checklists/{checklist}/complete', [SobrecargoControlador::class, 'completeChecklist']);
         Route::post('/incidents', [SobrecargoControlador::class, 'incidents']);
     });
@@ -48,6 +50,13 @@ Route::middleware(['auth.token'])->group(function () {
     Route::prefix('admin')->middleware(['role:admin'])->group(function () {
         Route::get('/dashboard', [AdminControlador::class, 'dashboard']);
         Route::get('/users', [AdminControlador::class, 'users']);
+        Route::post('/users', [AdminControlador::class, 'storeUser']);
+        Route::get('/roles', [AdminControlador::class, 'roles']);
+        Route::put('/users/{user}', [AdminControlador::class, 'updateUser']);
+        Route::delete('/users/{user}', [AdminControlador::class, 'destroyUser']);
+        Route::post('/users/{user}/block', [AdminControlador::class, 'blockUser']);
+        Route::post('/users/{user}/activate', [AdminControlador::class, 'activateUser']);
+        Route::post('/users/{user}/reset-password', [AdminControlador::class, 'resetUserPassword']);
         Route::get('/operators', [AdminControlador::class, 'operators']);
         Route::get('/sobrecargos', [AdminControlador::class, 'sobrecargos']);
         Route::get('/requests', [AdminControlador::class, 'requests']);

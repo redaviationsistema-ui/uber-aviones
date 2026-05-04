@@ -32,7 +32,7 @@ class MatchingRedAviationServicio
                 ],
                 [
                     'match_score' => max(1, 100 - abs($aeronave->capacity - $solicitud->passengers) * 5),
-                    'status' => 'blind_sent',
+                    'status' => 'pending',
                     'response_deadline' => now()->addMinutes(30),
                     'visibility_payload' => [
                         'aircraft_model' => $aeronave->model,
@@ -52,3 +52,4 @@ class MatchingRedAviationServicio
         ]);
     }
 }
+
