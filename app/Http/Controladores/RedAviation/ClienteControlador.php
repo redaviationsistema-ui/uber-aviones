@@ -68,7 +68,7 @@ class ClienteControlador extends ControladorBase
 
         return $this->ok([
             'flight_request' => $this->visibilidadServicio->solicitudParaCliente(
-                $solicitud->fresh(['matches.aircraft', 'chatsProtegidos', 'operaciones.timeline'])
+                $solicitud->fresh(['matches.aircraft.images', 'chatsProtegidos', 'operaciones.timeline'])
             ),
             'chat_id' => $chat->id,
         ], 201);
@@ -76,7 +76,7 @@ class ClienteControlador extends ControladorBase
 
     public function indexFlightRequests(Request $request)
     {
-        $solicitudes = SolicitudVuelo::with(['matches.aircraft', 'chatsProtegidos', 'operaciones.timeline'])
+        $solicitudes = SolicitudVuelo::with(['matches.aircraft.images', 'chatsProtegidos', 'operaciones.timeline'])
             ->where('client_id', $request->user()->id)
             ->latest()
             ->get()
@@ -91,7 +91,7 @@ class ClienteControlador extends ControladorBase
 
         return $this->ok([
             'flight_request' => $this->visibilidadServicio->solicitudParaCliente(
-                $flightRequest->load(['matches.aircraft', 'chatsProtegidos', 'operaciones.timeline'])
+                $flightRequest->load(['matches.aircraft.images', 'chatsProtegidos', 'operaciones.timeline'])
             ),
         ]);
     }

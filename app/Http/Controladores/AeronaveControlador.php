@@ -107,7 +107,7 @@ class AeronaveControlador extends ControladorBase
         $end = $start->copy()->addHours(4);
 
         $aircraft = Aeronave::with(['provider.user', 'images'])
-            ->where('status', 'active')
+            ->whereIn('status', ['active', 'trial_active'])
             ->where('capacity', '>=', $data['passengers'])
             ->where('base_airport', $data['origin'])
             ->whereHas('provider', fn ($query) => $query->where('approval_status', 'approved'))
@@ -119,17 +119,21 @@ class AeronaveControlador extends ControladorBase
             ->orderBy('hourly_rate')
             ->get();
 
-        return $this->ok(['aircraft' => $aircraft]);
+        return $this->ok([
+            'aircraft' => $aircraft->map(fn (Aeronave $item) => $this->formatPublicAircraftPayload($item))->values(),
+        ]);
     }
 
     public function preview()
     {
         return $this->ok([
             'aircraft' => Aeronave::with(['provider', 'images'])
-                ->where('status', 'active')
+                ->whereIn('status', ['active', 'trial_active'])
                 ->latest()
                 ->limit(12)
-                ->get(),
+                ->get()
+                ->map(fn (Aeronave $item) => $this->formatPublicAircraftPayload($item))
+                ->values(),
         ]);
     }
 
@@ -139,17 +143,28 @@ class AeronaveControlador extends ControladorBase
 
         $data = $request->validate([
             'image' => ['required', 'file', 'image', 'max:10240'],
+            'kind' => ['sometimes', 'string', 'in:main,exterior,interior,cabin,seats,amenities,gallery'],
+            'title' => ['nullable', 'string', 'max:150'],
             'sort_order' => ['sometimes', 'integer', 'min:0'],
             'is_main' => ['sometimes', 'boolean'],
+            'visible_to_client' => ['sometimes', 'boolean'],
         ]);
 
         $path = $request->file('image')->store('aircraft', 's3');
         $imageUrl = Storage::disk('s3')->url($path);
+        $isMain = (bool) ($data['is_main'] ?? false);
+
+        if ($isMain) {
+            $aircraft->images()->update(['is_main' => false]);
+        }
 
         $image = $aircraft->images()->create([
+            'kind' => $data['kind'] ?? ($isMain ? 'main' : 'gallery'),
+            'title' => $data['title'] ?? null,
             'image_url' => $imageUrl,
             'sort_order' => $data['sort_order'] ?? 0,
-            'is_main' => $data['is_main'] ?? false,
+            'is_main' => $isMain,
+            'visible_to_client' => array_key_exists('visible_to_client', $data) ? (bool) $data['visible_to_client'] : true,
         ]);
 
         return $this->ok([
@@ -278,6 +293,7 @@ class AeronaveControlador extends ControladorBase
 
         return [
             ...$aircraft->toArray(),
+            'main_image' => $this->resolveMainImageUrl($aircraft),
             'membership_context' => $plan ? [
                 'plan_id' => $plan->id,
                 'plan_name' => $plan->name,
@@ -296,6 +312,56 @@ class AeronaveControlador extends ControladorBase
         }
 
         abort_if($aircraft->provider_id !== $request->user()->provider_id, 403, 'No puedes gestionar esta aeronave.');
+    }
+
+    private function formatPublicAircraftPayload(Aeronave $aircraft): array
+    {
+        $visibleImages = $aircraft->images
+            ->where('visible_to_client', true)
+            ->sortBy([
+                ['is_main', 'desc'],
+                ['sort_order', 'asc'],
+                ['id', 'asc'],
+            ])
+            ->values();
+
+        $mainImage = $visibleImages->firstWhere('is_main', true)?->image_url
+            ?? $visibleImages->first()?->image_url;
+
+        return [
+            'id' => $aircraft->id,
+            'model' => $aircraft->model,
+            'category' => $aircraft->category ?? 'Cabina ejecutiva',
+            'capacity' => $aircraft->capacity,
+            'range_km' => $aircraft->range_km,
+            'status' => $aircraft->status,
+            'main_image' => $mainImage,
+            'images' => $visibleImages->map(fn (ImagenAeronave $image) => [
+                'id' => $image->id,
+                'kind' => $image->kind,
+                'title' => $image->title,
+                'image_url' => $image->image_url,
+                'is_main' => $image->is_main,
+            ])->values(),
+            'amenities' => $visibleImages
+                ->whereIn('kind', ['amenities', 'cabin', 'seats'])
+                ->pluck('title')
+                ->filter()
+                ->values(),
+        ];
+    }
+
+    private function resolveMainImageUrl(Aeronave $aircraft): ?string
+    {
+        $images = $aircraft->images
+            ->sortBy([
+                ['is_main', 'desc'],
+                ['sort_order', 'asc'],
+                ['id', 'asc'],
+            ])
+            ->values();
+
+        return $images->firstWhere('is_main', true)?->image_url ?? $images->first()?->image_url;
     }
 
     private function resolveS3Path(string $url): ?string

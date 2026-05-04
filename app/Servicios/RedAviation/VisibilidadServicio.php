@@ -2,6 +2,8 @@
 
 namespace App\Servicios\RedAviation;
 
+use App\Modelos\Aeronave;
+use App\Modelos\ImagenAeronave;
 use App\Modelos\Operacion;
 use App\Modelos\SolicitudVuelo;
 use App\Modelos\Usuario;
@@ -53,11 +55,16 @@ class VisibilidadServicio
                 'id' => $match->id,
                 'aircraft_id' => $match->aircraft_id,
                 'status' => $match->status,
-                'aircraft' => [
-                    'model' => $match->aircraft?->model,
-                    'capacity' => $match->aircraft?->capacity,
-                    'category' => $solicitud->aircraft_type,
-                ],
+                'aircraft' => $match->aircraft
+                    ? $this->aeronaveVisibleParaCliente($match->aircraft, $solicitud->aircraft_type)
+                    : [
+                        'model' => null,
+                        'capacity' => null,
+                        'category' => $solicitud->aircraft_type,
+                        'main_image' => null,
+                        'images' => [],
+                        'amenities' => [],
+                    ],
             ])->values(),
         ];
     }
@@ -104,6 +111,42 @@ class VisibilidadServicio
             'role' => $usuario->effectiveRole(),
             'status' => $usuario->status,
             'contact_strikes' => $usuario->contact_strikes,
+        ];
+    }
+
+    private function aeronaveVisibleParaCliente(Aeronave $aircraft, ?string $fallbackCategory = null): array
+    {
+        $visibleImages = $aircraft->relationLoaded('images')
+            ? $aircraft->images
+                ->where('visible_to_client', true)
+                ->sortBy([
+                    ['is_main', 'desc'],
+                    ['sort_order', 'asc'],
+                    ['id', 'asc'],
+                ])
+                ->values()
+            : collect();
+
+        $mainImage = $visibleImages->firstWhere('is_main', true)?->image_url
+            ?? $visibleImages->first()?->image_url;
+
+        return [
+            'model' => $aircraft->model,
+            'capacity' => $aircraft->capacity,
+            'category' => $aircraft->category ?? $fallbackCategory,
+            'main_image' => $mainImage,
+            'images' => $visibleImages->map(fn (ImagenAeronave $image) => [
+                'id' => $image->id,
+                'kind' => $image->kind,
+                'title' => $image->title,
+                'image_url' => $image->image_url,
+                'is_main' => $image->is_main,
+            ])->values(),
+            'amenities' => $visibleImages
+                ->whereIn('kind', ['amenities', 'cabin', 'seats'])
+                ->pluck('title')
+                ->filter()
+                ->values(),
         ];
     }
 }

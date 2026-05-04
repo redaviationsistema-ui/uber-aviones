@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controladores\AeronaveControlador;
 use App\Http\Controladores\RedAviation\AdminControlador;
 use App\Http\Controladores\RedAviation\ChatControlador;
 use App\Http\Controladores\RedAviation\ClienteControlador;
@@ -33,6 +34,8 @@ Route::middleware(['auth.token'])->group(function () {
         Route::get('/my-aircraft', [OperadorControlador::class, 'indexAircraft']);
         Route::get('/aircraft', [OperadorControlador::class, 'indexAircraft']);
         Route::put('/aircraft/{aircraft}', [OperadorControlador::class, 'updateAircraft']);
+        Route::post('/aircraft/{aircraft}/images', [AeronaveControlador::class, 'storeImage']);
+        Route::delete('/aircraft/{aircraft}/images/{image}', [AeronaveControlador::class, 'destroyImage']);
         Route::post('/availability', [OperadorControlador::class, 'storeAvailability']);
         Route::get('/my-requests', [OperadorControlador::class, 'requests']);
         Route::get('/requests', [OperadorControlador::class, 'requests']);

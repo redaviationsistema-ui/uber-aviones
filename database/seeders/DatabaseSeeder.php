@@ -245,6 +245,8 @@ class DatabaseSeeder extends Seeder
             ]
         );
 
+        Aeronave::where('registration', 'XA-DEMO')->delete();
+
         $client = Usuario::firstOrCreate(
             ['email' => 'cliente@privateflights.test'],
             [

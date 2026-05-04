@@ -9,11 +9,14 @@ class ImagenAeronave extends Model
 {
     protected $table = 'aircraft_images';
 
-    protected $fillable = ['aircraft_id', 'image_url', 'sort_order', 'is_main'];
+    protected $fillable = ['aircraft_id', 'kind', 'title', 'image_url', 'sort_order', 'is_main', 'visible_to_client'];
 
     protected function casts(): array
     {
-        return ['is_main' => 'boolean'];
+        return [
+            'is_main' => 'boolean',
+            'visible_to_client' => 'boolean',
+        ];
     }
 
     public function aircraft(): BelongsTo

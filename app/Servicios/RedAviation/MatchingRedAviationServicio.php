@@ -13,7 +13,7 @@ class MatchingRedAviationServicio
         $fin = ($solicitud->return_datetime ?? $inicio)->copy()->addHours(4);
 
         $aeronaves = Aeronave::with('provider')
-            ->where('status', 'active')
+            ->whereIn('status', ['active', 'trial_active'])
             ->where('capacity', '>=', $solicitud->passengers)
             ->whereHas('provider', fn ($query) => $query->where('approval_status', 'approved'))
             ->whereDoesntHave('availability', function ($query) use ($inicio, $fin) {

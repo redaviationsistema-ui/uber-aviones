@@ -240,6 +240,14 @@ class OperadorControlador extends ControladorBase
 
         return [
             ...$aircraft->toArray(),
+            'main_image' => $aircraft->images
+                ->sortBy([
+                    ['is_main', 'desc'],
+                    ['sort_order', 'asc'],
+                    ['id', 'asc'],
+                ])
+                ->values()
+                ->first()?->image_url,
             'membership_context' => $resolvedPlan ? [
                 'plan_id' => $resolvedPlan->id,
                 'plan_name' => $resolvedPlan->name,
