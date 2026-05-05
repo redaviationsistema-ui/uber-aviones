@@ -48,12 +48,7 @@ class AutenticacionControlador extends ControladorBase
             $user->forceFill(['provider_id' => $provider->id])->save();
         }
 
-        return $this->ok([
-            'token' => TokenApi::issue($user),
-            'user' => $user->fresh(['provider', 'ownedProvider', 'profile', 'roles']),
-            'access' => $user->fresh(['provider', 'roles', 'demo', 'activeSuscripcion.plan'])->accessStatus(),
-            'login_context' => $user->fresh(['provider', 'roles', 'demo', 'activeSuscripcion.plan'])->loginContext(),
-        ], 201);
+        return $this->authenticatedResponse($request, $user->fresh(['provider', 'ownedProvider', 'profile', 'roles', 'demo', 'activeSuscripcion.plan']), 201);
     }
 
     public function login(Request $request)
@@ -79,12 +74,7 @@ class AutenticacionControlador extends ControladorBase
             ], 403);
         }
 
-        return $this->ok([
-            'token' => TokenApi::issue($user),
-            'user' => $user->load(['provider', 'ownedProvider', 'profile', 'roles', 'demo', 'activeSuscripcion.plan']),
-            'access' => $user->accessStatus(),
-            'login_context' => $user->loginContext(),
-        ]);
+        return $this->authenticatedResponse($request, $user->load(['provider', 'ownedProvider', 'profile', 'roles', 'demo', 'activeSuscripcion.plan']));
     }
 
     public function me(Request $request)
@@ -110,11 +100,14 @@ class AutenticacionControlador extends ControladorBase
 
     public function logout(Request $request)
     {
-        if ($token = $request->bearerToken()) {
-            TokenApi::where('token', hash('sha256', $token))->delete();
+        $plainToken = $request->bearerToken() ?: $request->cookie($this->authCookieName());
+
+        if ($plainToken) {
+            TokenApi::where('token', hash('sha256', $plainToken))->delete();
         }
 
-        return $this->ok(['message' => 'Sesion cerrada correctamente.']);
+        return $this->ok(['message' => 'Sesion cerrada correctamente.'])
+            ->withoutCookie($this->authCookieName(), '/', env('SESSION_DOMAIN'));
     }
 
     public function forgotPassword(Request $request)
@@ -168,5 +161,56 @@ class AutenticacionControlador extends ControladorBase
         ]);
 
         return $this->ok(['message' => 'Endpoint preparado para integrar broker de password reset.']);
+    }
+
+    private function authenticatedResponse(Request $request, Usuario $user, int $status = 200)
+    {
+        $plainToken = TokenApi::issue($user, 'browser-session');
+
+        return $this->ok([
+            'user' => $user,
+            'access' => $user->accessStatus(),
+            'login_context' => $user->loginContext(),
+        ], $status)->cookie(
+            $this->authCookieName(),
+            $plainToken,
+            $this->authCookieLifetimeMinutes(),
+            '/',
+            env('SESSION_DOMAIN'),
+            $this->shouldUseSecureCookies($request),
+            true,
+            false,
+            $this->authCookieSameSite()
+        );
+    }
+
+    private function authCookieName(): string
+    {
+        return (string) env('AUTH_TOKEN_COOKIE', 'red_aviation_session');
+    }
+
+    private function authCookieLifetimeMinutes(): int
+    {
+        return (int) env('AUTH_TOKEN_TTL_MINUTES', 60 * 24 * 30);
+    }
+
+    private function authCookieSameSite(): string
+    {
+        return (string) env('AUTH_TOKEN_SAME_SITE', 'none');
+    }
+
+    private function shouldUseSecureCookies(Request $request): bool
+    {
+        if ($request->isSecure()) {
+            return true;
+        }
+
+        $configured = env('SESSION_SECURE_COOKIE');
+
+        if ($configured !== null) {
+            return filter_var($configured, FILTER_VALIDATE_BOOL);
+        }
+
+        return app()->environment('production');
     }
 }

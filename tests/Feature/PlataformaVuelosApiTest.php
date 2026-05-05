@@ -20,14 +20,14 @@ class PlataformaVuelosApiTest extends TestCase
             'role' => 'client',
         ])->assertCreated();
 
-        $token = $register->json('token');
+        $sessionCookie = $register->getCookie('red_aviation_session');
 
-        $this->withToken($token)
+        $this->withCookie($sessionCookie->getName(), $sessionCookie->getValue())
             ->postJson('/api/v1/cliente/demo/activar')
             ->assertCreated()
             ->assertJsonPath('success', true);
 
-        $this->withToken($token)
+        $this->withCookie($sessionCookie->getName(), $sessionCookie->getValue())
             ->postJson('/api/v1/cliente/solicitudes', [
                 'origin' => 'MMMX',
                 'destination' => 'MMUN',
@@ -51,14 +51,14 @@ class PlataformaVuelosApiTest extends TestCase
             'role' => 'client',
         ])->assertCreated();
 
-        $token = $register->json('token');
+        $sessionCookie = $register->getCookie('red_aviation_session');
 
-        $this->withToken($token)
+        $this->withCookie($sessionCookie->getName(), $sessionCookie->getValue())
             ->postJson('/api/v1/subscriptions/start-trial')
             ->assertCreated()
             ->assertJsonPath('subscription_status', 'demo_activa');
 
-        $response = $this->withToken($token)
+        $response = $this->withCookie($sessionCookie->getName(), $sessionCookie->getValue())
             ->postJson('/api/v1/client/flight-requests', [
                 'origin' => 'MMMX',
                 'destination' => 'MMUN',
@@ -85,13 +85,13 @@ class PlataformaVuelosApiTest extends TestCase
             'role' => 'client',
         ])->assertCreated();
 
-        $token = $register->json('token');
+        $sessionCookie = $register->getCookie('red_aviation_session');
 
-        $this->withToken($token)
+        $this->withCookie($sessionCookie->getName(), $sessionCookie->getValue())
             ->postJson('/api/v1/subscriptions/start-trial')
             ->assertCreated();
 
-        $requestResponse = $this->withToken($token)
+        $requestResponse = $this->withCookie($sessionCookie->getName(), $sessionCookie->getValue())
             ->postJson('/api/v1/client/flight-requests', [
                 'origin' => 'MMMX',
                 'destination' => 'MMUN',
@@ -102,7 +102,7 @@ class PlataformaVuelosApiTest extends TestCase
 
         $chatId = $requestResponse->json('chat_id');
 
-        $this->withToken($token)
+        $this->withCookie($sessionCookie->getName(), $sessionCookie->getValue())
             ->postJson("/api/v1/chats/{$chatId}/messages", [
                 'message' => 'Escribeme por WhatsApp al +52 55 1234 5678 o correo test@example.com',
             ])
@@ -123,7 +123,8 @@ class PlataformaVuelosApiTest extends TestCase
 
         $clientLogin
             ->assertJsonPath('login_context.effective_role', 'client')
-            ->assertJsonPath('login_context.dashboard', '/client/dashboard');
+            ->assertJsonPath('login_context.dashboard', '/client/dashboard')
+            ->assertCookie('red_aviation_session');
 
         $sobrecargoLogin = $this->postJson('/api/v1/auth/login', [
             'email' => 'sobrecargo@redaviation.test',
@@ -132,7 +133,8 @@ class PlataformaVuelosApiTest extends TestCase
 
         $sobrecargoLogin
             ->assertJsonPath('login_context.effective_role', 'sobrecargo')
-            ->assertJsonPath('login_context.dashboard', '/sobrecargo/dashboard');
+            ->assertJsonPath('login_context.dashboard', '/sobrecargo/dashboard')
+            ->assertCookie('red_aviation_session');
 
         $adminLogin = $this->postJson('/api/v1/auth/login', [
             'email' => 'admin@privateflights.test',
@@ -141,7 +143,8 @@ class PlataformaVuelosApiTest extends TestCase
 
         $adminLogin
             ->assertJsonPath('login_context.effective_role', 'admin')
-            ->assertJsonPath('login_context.dashboard', '/admin/dashboard');
+            ->assertJsonPath('login_context.dashboard', '/admin/dashboard')
+            ->assertCookie('red_aviation_session');
     }
 
     public function test_authenticated_user_can_request_redirect_dashboard(): void
@@ -153,9 +156,9 @@ class PlataformaVuelosApiTest extends TestCase
             'password' => 'password',
         ])->assertOk();
 
-        $token = $login->json('token');
+        $sessionCookie = $login->getCookie('red_aviation_session');
 
-        $this->withToken($token)
+        $this->withCookie($sessionCookie->getName(), $sessionCookie->getValue())
             ->getJson('/api/v1/auth/redirect-dashboard')
             ->assertOk()
             ->assertJsonPath('dashboard', '/sobrecargo/dashboard')

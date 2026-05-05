@@ -11,7 +11,7 @@ class TokenApiIntermediario
 {
     public function handle(Request $request, Closure $next): Response
     {
-        $plainToken = $request->bearerToken();
+        $plainToken = $request->bearerToken() ?: $request->cookie($this->authCookieName());
 
         if (! $plainToken) {
             return $this->unauthenticated();
@@ -32,6 +32,11 @@ class TokenApiIntermediario
         $request->setUserResolver(fn () => $token->user);
 
         return $next($request);
+    }
+
+    private function authCookieName(): string
+    {
+        return (string) env('AUTH_TOKEN_COOKIE', 'red_aviation_session');
     }
 
     private function unauthenticated(): Response
