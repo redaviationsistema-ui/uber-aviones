@@ -2,12 +2,21 @@
 
 namespace App\Http\Controladores;
 
+use App\Modelos\Aeronave;
+use App\Modelos\LineaTiempoOperacion;
+use App\Modelos\Operacion;
 use App\Modelos\SolicitudVuelo;
 use App\Modelos\Comision;
 use App\Modelos\Pago;
+use App\Modelos\PagoProveedor;
+use App\Modelos\Perfil;
+use App\Modelos\Proveedor;
+use App\Modelos\RegistroAuditoria;
 use App\Modelos\Reserva;
+use App\Modelos\Usuario;
 use App\Servicios\ReintentoCoincidenciaSolicitudServicio;
 use Illuminate\Http\Request;
+use Illuminate\Validation\Rule;
 
 class ProveedorControlador extends ControladorBase
 {
@@ -17,17 +26,119 @@ class ProveedorControlador extends ControladorBase
 
     public function dashboard(Request $request)
     {
-        $provider = $request->user()->provider;
+        $provider = $request->user()->loadMissing('provider', 'profile')->provider;
         abort_if(! $provider, 404, 'Proveedor no encontrado.');
 
         return $this->ok([
-            'provider' => $provider,
+            'provider' => $this->formatCompanyPayload($request),
             'metrics' => [
                 'aircraft' => $provider->aircraft()->count(),
-                'active_aircraft' => $provider->aircraft()->where('status', 'active')->count(),
+                'active_aircraft' => $provider->aircraft()->whereIn('status', ['active', 'trial_active'])->count(),
+                'inactive_aircraft' => $provider->aircraft()->whereIn('status', ['inactive', 'blocked', 'archived', 'suspended'])->count(),
+                'pending_requests' => SolicitudVuelo::whereHas('matches', function ($query) use ($provider) {
+                    $query->where('provider_id', $provider->id)
+                        ->whereIn('status', ['pending', 'sent_to_provider']);
+                })->count(),
+                'active_operations' => Operacion::where('provider_id', $provider->id)
+                    ->whereNotIn('status', ['finalizada', 'cancelada', 'completed', 'cancelled'])
+                    ->count(),
+                'open_incidents' => LineaTiempoOperacion::whereHas('operacion', fn ($query) => $query->where('provider_id', $provider->id))
+                    ->where('status', 'incidencia')
+                    ->count(),
                 'pending_quotes' => $provider->quotes()->where('status', 'pending')->count(),
                 'reservations' => $provider->reservations()->count(),
+                'pending_payments' => PagoProveedor::where('provider_id', $provider->id)
+                    ->whereIn('status', ['pending', 'held'])
+                    ->count(),
             ],
+        ]);
+    }
+
+    public function company(Request $request)
+    {
+        return $this->ok([
+            'company' => $this->formatCompanyPayload($request),
+        ]);
+    }
+
+    public function updateCompany(Request $request)
+    {
+        $user = $request->user()->loadMissing('provider', 'profile');
+        $provider = $user->provider;
+        abort_if(! $provider, 404, 'Proveedor no encontrado.');
+
+        $data = $request->validate([
+            'legal_name' => ['nullable', 'string', 'max:255'],
+            'company_name' => ['nullable', 'string', 'max:255'],
+            'commercial_name' => ['nullable', 'string', 'max:255'],
+            'trade_name' => ['nullable', 'string', 'max:255'],
+            'rfc' => ['nullable', 'string', 'max:50'],
+            'phone' => ['nullable', 'string', 'max:50'],
+            'email' => ['nullable', 'email', 'max:255', Rule::unique('users', 'email')->ignore($user->id)],
+            'address' => ['nullable', 'string', 'max:255'],
+            'legal_representative' => ['nullable', 'string', 'max:255'],
+            'admin_notes' => ['nullable', 'string'],
+            'documents' => ['nullable', 'array'],
+            'documents.*.name' => ['nullable', 'string', 'max:255'],
+            'documents.*.state' => ['nullable', 'string', 'max:100'],
+        ]);
+
+        $profile = $user->profile ?: new Perfil(['user_id' => $user->id]);
+        $currentTaxData = $profile->tax_data ?? [];
+
+        $documents = array_key_exists('documents', $data)
+            ? array_values(array_map(
+                fn ($document, $index) => [
+                    'id' => $document['id'] ?? ($index + 1),
+                    'name' => $document['name'] ?? ('Documento '.($index + 1)),
+                    'state' => $document['state'] ?? 'pendiente',
+                ],
+                $data['documents'],
+                array_keys($data['documents'])
+            ))
+            : ($currentTaxData['documents'] ?? []);
+
+        $profile->fill([
+            'company_name' => $data['legal_name'] ?? $data['company_name'] ?? $provider->company_name,
+            'address' => $data['address'] ?? $profile->address,
+            'tax_data' => [
+                ...$currentTaxData,
+                'rfc' => $data['rfc'] ?? ($currentTaxData['rfc'] ?? null),
+                'legal_name' => $data['legal_name'] ?? $data['company_name'] ?? ($currentTaxData['legal_name'] ?? $provider->company_name),
+                'legal_representative' => $data['legal_representative'] ?? ($currentTaxData['legal_representative'] ?? null),
+                'documents' => $documents,
+            ],
+        ])->save();
+
+        $provider->update([
+            'company_name' => $data['legal_name'] ?? $data['company_name'] ?? $provider->company_name,
+            'commercial_name' => $data['commercial_name'] ?? $data['trade_name'] ?? $provider->commercial_name,
+            'notes' => $data['admin_notes'] ?? $provider->notes,
+        ]);
+
+        $user->update(array_filter([
+            'phone' => $data['phone'] ?? null,
+            'email' => $data['email'] ?? null,
+        ], fn ($value) => $value !== null));
+
+        $this->writeAudit($request, 'update', 'provider_company', 'Empresa del proveedor actualizada.');
+
+        return $this->ok([
+            'company' => $this->formatCompanyPayload($request->user()->fresh(['provider', 'profile'])),
+        ]);
+    }
+
+    public function submitCompanyReview(Request $request)
+    {
+        $provider = $request->user()->provider;
+        abort_if(! $provider, 404, 'Proveedor no encontrado.');
+
+        $provider->update(['approval_status' => 'pending']);
+        $this->writeAudit($request, 'submit_review', 'provider_company', 'Proveedor enviado a revision.');
+
+        return $this->ok([
+            'company' => $this->formatCompanyPayload($request->user()->fresh(['provider', 'profile'])),
+            'message' => 'Empresa enviada a revision.',
         ]);
     }
 
@@ -93,8 +204,48 @@ class ProveedorControlador extends ControladorBase
         abort_if(! $providerId, 404);
 
         return $this->ok([
-            'payments' => Pago::whereHas('reservation', fn ($query) => $query->where('provider_id', $providerId))->paginate(20),
+            'payments' => PagoProveedor::where('provider_id', $providerId)
+                ->latest()
+                ->paginate(20)
+                ->through(fn (PagoProveedor $payment) => [
+                    'id' => $payment->id,
+                    'flight' => $payment->commission_id ? 'Reserva / comision #'.$payment->commission_id : 'Liquidacion proveedor',
+                    'completed_at' => optional($payment->paid_at ?? $payment->released_at ?? $payment->created_at)?->toDateString(),
+                    'amount' => number_format((float) $payment->amount, 2).' '.($payment->currency ?: 'USD'),
+                    'status' => $payment->status,
+                    'receipt' => $payment->transaction_reference,
+                    'notes' => $payment->notes,
+                ]),
         ]);
+    }
+
+    public function crew(Request $request)
+    {
+        $providerId = $request->user()->provider_id;
+        abort_if(! $providerId, 404, 'Proveedor no encontrado.');
+
+        $crew = Usuario::query()
+            ->with(['roles'])
+            ->where('provider_id', $providerId)
+            ->where(function ($query) {
+                $query->whereHas('roles', fn ($roles) => $roles->whereIn('code', ['sobrecargo']))
+                    ->orWhere('operational_role', 'sobrecargo');
+            })
+            ->latest()
+            ->get()
+            ->map(fn (Usuario $user) => [
+                'id' => $user->id,
+                'name' => $user->name,
+                'role' => $user->operational_role ?: $user->effectiveRole(),
+                'base' => $user->profile?->city,
+                'availability' => $user->status === 'active' ? 'Disponible' : 'No disponible',
+                'phone' => $user->phone,
+                'note' => $user->profile?->business_type ?: 'Sin notas',
+                'email' => $user->email,
+            ])
+            ->values();
+
+        return $this->ok(['crew' => $crew]);
     }
 
     public function commissions(Request $request)
@@ -103,5 +254,339 @@ class ProveedorControlador extends ControladorBase
         abort_if(! $providerId, 404);
 
         return $this->ok(['commissions' => Comision::where('provider_id', $providerId)->paginate(20)]);
+    }
+
+    public function operations(Request $request)
+    {
+        $providerId = $request->user()->provider_id;
+        abort_if(! $providerId, 404, 'Proveedor no encontrado.');
+
+        $operations = Operacion::with(['solicitudVuelo', 'aeronave', 'sobrecargo', 'timeline'])
+            ->where('provider_id', $providerId)
+            ->latest()
+            ->paginate(20)
+            ->through(fn (Operacion $operation) => $this->formatOperationPayload($operation));
+
+        return $this->ok(['operations' => $operations]);
+    }
+
+    public function updateOperation(Request $request, Operacion $operation)
+    {
+        $providerId = $request->user()->provider_id;
+        abort_if($operation->provider_id !== $providerId, 403, 'No puedes actualizar esta operacion.');
+
+        $data = $request->validate([
+            'status' => ['required', 'string', 'max:100'],
+        ]);
+
+        $operation->update([
+            'status' => $data['status'],
+            'started_at' => in_array($data['status'], ['En vuelo', 'en_vuelo', 'in_progress'], true)
+                ? ($operation->started_at ?? now())
+                : $operation->started_at,
+            'completed_at' => in_array($data['status'], ['Finalizada', 'finalizada', 'completed'], true)
+                ? now()
+                : $operation->completed_at,
+        ]);
+
+        $operation->timeline()->create([
+            'status' => $this->normalizeOperationTimelineStatus($data['status']),
+            'title' => 'Estado operativo actualizado',
+            'description' => 'Proveedor actualizo la operacion a '.$data['status'].'.',
+            'created_by' => $request->user()->id,
+        ]);
+
+        $this->writeAudit($request, 'update', 'provider_operations', 'Operacion actualizada por proveedor.');
+
+        return $this->ok([
+            'operation' => $this->formatOperationPayload($operation->fresh(['solicitudVuelo', 'aeronave', 'sobrecargo', 'timeline'])),
+        ]);
+    }
+
+    public function incidents(Request $request)
+    {
+        $providerId = $request->user()->provider_id;
+        abort_if(! $providerId, 404, 'Proveedor no encontrado.');
+
+        $incidents = LineaTiempoOperacion::with(['operacion.solicitudVuelo', 'operacion.aeronave'])
+            ->where('status', 'incidencia')
+            ->whereHas('operacion', fn ($query) => $query->where('provider_id', $providerId))
+            ->latest()
+            ->paginate(20)
+            ->through(fn (LineaTiempoOperacion $incident) => $this->formatIncidentPayload($incident));
+
+        return $this->ok(['incidents' => $incidents]);
+    }
+
+    public function storeIncident(Request $request)
+    {
+        $providerId = $request->user()->provider_id;
+        abort_if(! $providerId, 404, 'Proveedor no encontrado.');
+
+        $data = $request->validate([
+            'operation_id' => ['nullable', 'exists:operations,id'],
+            'flight' => ['nullable', 'string', 'max:150'],
+            'type' => ['required', 'string', 'max:100'],
+            'priority' => ['nullable', 'string', 'max:50'],
+            'status' => ['nullable', 'string', 'max:50'],
+            'evidence' => ['nullable', 'string', 'max:255'],
+            'comment' => ['nullable', 'string'],
+        ]);
+
+        $operation = null;
+        if (! empty($data['operation_id'])) {
+            $operation = Operacion::with(['solicitudVuelo', 'aeronave'])
+                ->where('provider_id', $providerId)
+                ->findOrFail($data['operation_id']);
+        } else {
+            $operation = Operacion::with(['solicitudVuelo', 'aeronave'])
+                ->where('provider_id', $providerId)
+                ->latest()
+                ->first();
+        }
+
+        abort_if(! $operation, 422, 'No hay una operacion del proveedor para vincular la incidencia.');
+
+        $descriptionParts = array_filter([
+            'Tipo: '.$data['type'],
+            ! empty($data['priority']) ? 'Prioridad: '.$data['priority'] : null,
+            ! empty($data['evidence']) ? 'Evidencia: '.$data['evidence'] : null,
+            $data['comment'] ?? null,
+            ! empty($data['flight']) ? 'Vuelo: '.$data['flight'] : null,
+        ]);
+
+        $timeline = $operation->timeline()->create([
+            'status' => 'incidencia',
+            'title' => $data['type'],
+            'description' => implode(' | ', $descriptionParts),
+            'created_by' => $request->user()->id,
+        ]);
+
+        $operation->update(['status' => 'incidencia']);
+        $this->writeAudit($request, 'create', 'provider_incidents', 'Incidencia creada por proveedor.');
+
+        return $this->ok([
+            'incident' => $this->formatIncidentPayload($timeline->fresh(['operacion.solicitudVuelo', 'operacion.aeronave'])),
+        ], 201);
+    }
+
+    public function updateIncident(Request $request, LineaTiempoOperacion $timeline)
+    {
+        $providerId = $request->user()->provider_id;
+        $timeline->loadMissing('operacion');
+        abort_if(! $timeline->operacion || $timeline->operacion->provider_id !== $providerId, 403, 'No puedes editar esta incidencia.');
+
+        $data = $request->validate([
+            'status' => ['required', 'string', 'max:50'],
+        ]);
+
+        $timeline->update([
+            'status' => strtolower($data['status']) === 'cerrada' ? 'cerrada' : 'incidencia',
+            'description' => trim(($timeline->description ? $timeline->description.' | ' : '').'Estado: '.$data['status']),
+        ]);
+
+        if (in_array(strtolower($data['status']), ['resuelta', 'cerrada'], true)) {
+            $timeline->operacion->update(['status' => strtolower($data['status']) === 'cerrada' ? 'finalizada' : 'confirmada']);
+        }
+
+        $this->writeAudit($request, 'update', 'provider_incidents', 'Incidencia actualizada por proveedor.');
+
+        return $this->ok([
+            'incident' => $this->formatIncidentPayload($timeline->fresh(['operacion.solicitudVuelo', 'operacion.aeronave'])),
+        ]);
+    }
+
+    public function history(Request $request)
+    {
+        $providerId = $request->user()->provider_id;
+        abort_if(! $providerId, 404, 'Proveedor no encontrado.');
+
+        $userIds = Proveedor::findOrFail($providerId)->users()->pluck('id')->push($request->user()->id)->unique();
+
+        $entries = RegistroAuditoria::whereIn('user_id', $userIds)
+            ->latest()
+            ->limit(80)
+            ->get()
+            ->map(fn (RegistroAuditoria $entry) => [
+                'id' => $entry->id,
+                'date' => optional($entry->created_at)?->format('Y-m-d H:i'),
+                'module' => $entry->module,
+                'action' => $entry->description ?: $entry->action,
+                'actor' => 'Usuario #'.$entry->user_id,
+            ])
+            ->values();
+
+        return $this->ok(['history' => $entries]);
+    }
+
+    public function settings(Request $request)
+    {
+        $profile = $request->user()->loadMissing('profile')->profile;
+        $taxData = $profile?->tax_data ?? [];
+        $settings = $taxData['provider_settings'] ?? [];
+
+        return $this->ok([
+            'settings' => [
+                'email_notifications' => (bool) ($settings['email_notifications'] ?? true),
+                'payment_alerts' => (bool) ($settings['payment_alerts'] ?? true),
+                'ops_alerts' => (bool) ($settings['ops_alerts'] ?? true),
+                'crew_approval_mode' => $settings['crew_approval_mode'] ?? 'suggest_only',
+            ],
+        ]);
+    }
+
+    public function updateSettings(Request $request)
+    {
+        $data = $request->validate([
+            'email_notifications' => ['required', 'boolean'],
+            'payment_alerts' => ['required', 'boolean'],
+            'ops_alerts' => ['required', 'boolean'],
+            'crew_approval_mode' => ['required', 'string', 'in:suggest_only,provider_confirms'],
+        ]);
+
+        $user = $request->user()->loadMissing('profile');
+        $profile = $user->profile ?: new Perfil(['user_id' => $user->id]);
+        $taxData = $profile->tax_data ?? [];
+
+        $profile->fill([
+            'tax_data' => [
+                ...$taxData,
+                'provider_settings' => [
+                    'email_notifications' => (bool) $data['email_notifications'],
+                    'payment_alerts' => (bool) $data['payment_alerts'],
+                    'ops_alerts' => (bool) $data['ops_alerts'],
+                    'crew_approval_mode' => $data['crew_approval_mode'],
+                ],
+            ],
+        ])->save();
+
+        $this->writeAudit($request, 'update', 'provider_settings', 'Configuracion del proveedor actualizada.');
+
+        return $this->ok([
+            'settings' => [
+                'email_notifications' => (bool) $data['email_notifications'],
+                'payment_alerts' => (bool) $data['payment_alerts'],
+                'ops_alerts' => (bool) $data['ops_alerts'],
+                'crew_approval_mode' => $data['crew_approval_mode'],
+            ],
+        ]);
+    }
+
+    private function formatCompanyPayload(Request|\App\Modelos\Usuario $source): array
+    {
+        $user = $source instanceof Request
+            ? $source->user()->loadMissing('provider', 'profile')
+            : $source->loadMissing('provider', 'profile');
+        $provider = $user->provider;
+        $profile = $user->profile;
+        $taxData = $profile?->tax_data ?? [];
+        $documents = collect($taxData['documents'] ?? [])
+            ->values()
+            ->map(fn ($document, $index) => [
+                'id' => $document['id'] ?? ($index + 1),
+                'name' => $document['name'] ?? ('Documento '.($index + 1)),
+                'state' => $document['state'] ?? 'pendiente',
+            ])
+            ->all();
+
+        return [
+            'id' => $provider?->id,
+            'legal_name' => $taxData['legal_name'] ?? $provider?->company_name,
+            'company_name' => $provider?->company_name,
+            'commercial_name' => $provider?->commercial_name,
+            'trade_name' => $provider?->commercial_name,
+            'rfc' => $taxData['rfc'] ?? null,
+            'phone' => $user->phone,
+            'email' => $user->email,
+            'address' => $profile?->address,
+            'legal_representative' => $taxData['legal_representative'] ?? null,
+            'status' => $provider?->approval_status ?? 'pending',
+            'validation_status' => $provider?->approval_status ?? 'pending',
+            'review_status' => $provider?->approval_status ?? 'pending',
+            'admin_notes' => $provider?->notes,
+            'documents' => $documents,
+        ];
+    }
+
+    private function formatOperationPayload(Operacion $operation): array
+    {
+        $flightRequest = $operation->solicitudVuelo;
+        $aircraft = $operation->aeronave;
+        $latestTimeline = $operation->relationLoaded('timeline')
+            ? $operation->timeline->sortByDesc('id')->first()
+            : $operation->timeline()->latest('id')->first();
+
+        return [
+            'id' => $operation->id,
+            'request_id' => $operation->flight_request_id,
+            'route' => trim(($flightRequest?->origin ?? 'N/D').' - '.($flightRequest?->destination ?? 'N/D')),
+            'aircraft' => $aircraft?->model,
+            'aircraft_model' => $aircraft?->model,
+            'crew' => $operation->sobrecargo?->name,
+            'departure_datetime' => $flightRequest?->departure_datetime,
+            'arrival_datetime' => $operation->completed_at,
+            'status' => $this->humanizeOperationStatus($operation->status),
+            'notes' => $latestTimeline?->description,
+        ];
+    }
+
+    private function formatIncidentPayload(LineaTiempoOperacion $incident): array
+    {
+        $operation = $incident->operacion;
+        $flightRequest = $operation?->solicitudVuelo;
+
+        return [
+            'id' => $incident->id,
+            'type' => $incident->title,
+            'flight' => trim(($flightRequest?->origin ?? 'N/D').' - '.($flightRequest?->destination ?? 'N/D')),
+            'status' => str_contains(strtolower((string) $incident->description), 'estado: cerrada')
+                ? 'Cerrada'
+                : (str_contains(strtolower((string) $incident->description), 'estado: resuelta') ? 'Resuelta' : 'Abierta'),
+            'priority' => $this->extractTaggedValue((string) $incident->description, 'Prioridad'),
+            'evidence' => $this->extractTaggedValue((string) $incident->description, 'Evidencia'),
+            'comment' => $incident->description,
+            'created_at' => optional($incident->created_at)?->format('Y-m-d H:i'),
+            'operation_id' => $operation?->id,
+        ];
+    }
+
+    private function extractTaggedValue(string $description, string $label): ?string
+    {
+        foreach (explode('|', $description) as $segment) {
+            $segment = trim($segment);
+            if (str_starts_with($segment, $label.':')) {
+                return trim(substr($segment, strlen($label) + 1));
+            }
+        }
+
+        return null;
+    }
+
+    private function humanizeOperationStatus(?string $status): string
+    {
+        return match (strtolower((string) $status)) {
+            'confirmada', 'confirmed' => 'Confirmada',
+            'en_preparacion', 'preparacion', 'preparing' => 'En preparacion',
+            'lista', 'ready' => 'Lista',
+            'en_vuelo', 'in_progress', 'in_flight' => 'En vuelo',
+            'finalizada', 'completed' => 'Finalizada',
+            'incidencia' => 'Con incidencia',
+            'cancelada', 'cancelled' => 'Cancelada',
+            default => $status ?: 'Confirmada',
+        };
+    }
+
+    private function normalizeOperationTimelineStatus(string $status): string
+    {
+        return match (strtolower($status)) {
+            'confirmada' => 'confirmada',
+            'en preparacion' => 'preparacion',
+            'lista' => 'lista',
+            'en vuelo' => 'en_vuelo',
+            'finalizada' => 'finalizada',
+            'con incidencia' => 'incidencia',
+            'cancelada' => 'cancelada',
+            default => str_replace(' ', '_', strtolower($status)),
+        };
     }
 }

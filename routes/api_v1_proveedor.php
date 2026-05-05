@@ -11,6 +11,9 @@ use Illuminate\Support\Facades\Route;
 Route::prefix('proveedor')->middleware(['auth.token', 'role:provider,admin'])->group(function () {
     Route::get('/dashboard', [ProveedorControlador::class, 'dashboard']);
     Route::get('/mi-dashboard', [ProveedorControlador::class, 'dashboard']);
+    Route::get('/empresa', [ProveedorControlador::class, 'company']);
+    Route::put('/empresa', [ProveedorControlador::class, 'updateCompany']);
+    Route::post('/empresa/enviar-revision', [ProveedorControlador::class, 'submitCompanyReview']);
     Route::get('/perfil', [AutenticacionControlador::class, 'me']);
     Route::put('/perfil', [AutenticacionControlador::class, 'updatePerfil']);
 
@@ -39,7 +42,16 @@ Route::prefix('proveedor')->middleware(['auth.token', 'role:provider,admin'])->g
 
     Route::get('/reservas', [ReservaControlador::class, 'providerIndex']);
     Route::get('/reservas/{reservation}', [ReservaControlador::class, 'show']);
+    Route::get('/tripulacion', [ProveedorControlador::class, 'crew']);
+    Route::get('/operaciones', [ProveedorControlador::class, 'operations']);
+    Route::put('/operaciones/{operation}', [ProveedorControlador::class, 'updateOperation']);
+    Route::get('/incidencias', [ProveedorControlador::class, 'incidents']);
+    Route::post('/incidencias', [ProveedorControlador::class, 'storeIncident']);
+    Route::put('/incidencias/{timeline}', [ProveedorControlador::class, 'updateIncident']);
     Route::get('/pagos', [ProveedorControlador::class, 'payments']);
+    Route::get('/configuracion', [ProveedorControlador::class, 'settings']);
+    Route::put('/configuracion', [ProveedorControlador::class, 'updateSettings']);
     Route::get('/comisiones', [ProveedorControlador::class, 'commissions']);
+    Route::get('/historial', [ProveedorControlador::class, 'history']);
     Route::get('/notificaciones', [NotificacionControlador::class, 'index']);
 });
