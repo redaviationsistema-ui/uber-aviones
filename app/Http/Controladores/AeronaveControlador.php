@@ -196,25 +196,45 @@ class AeronaveControlador extends ControladorBase
 
         $data = $request->validate([
             'type' => ['required_without:document_type', 'nullable', 'string', 'max:100'],
-            'file_url' => ['required_without:document_url', 'nullable', 'string', 'max:255'],
+            'file' => ['required_without_all:file_url,document_url', 'nullable', 'file', 'max:20480'],
+            'file_url' => ['required_without_all:file,document_url', 'nullable', 'string', 'max:255'],
             'document_type' => ['required_without:type', 'nullable', 'string', 'max:100'],
             'document_name' => ['nullable', 'string', 'max:150'],
-            'document_url' => ['required_without:file_url', 'nullable', 'string'],
+            'document_url' => ['required_without_all:file,file_url', 'nullable', 'string'],
             'expires_at' => ['nullable', 'date'],
         ]);
+
+        if ($request->hasFile('file')) {
+            $path = $request->file('file')->store('aircraft-documents', 's3');
+            $documentUrl = Storage::disk('s3')->url($path);
+            $data['file_url'] = $documentUrl;
+            $data['document_url'] = $documentUrl;
+            $data['document_name'] = $data['document_name'] ?? $request->file('file')->getClientOriginalName();
+        }
 
         $data['type'] = $data['type'] ?? $data['document_type'];
         $data['file_url'] = $data['file_url'] ?? $data['document_url'];
         $data['document_type'] = $data['document_type'] ?? $data['type'];
         $data['document_url'] = $data['document_url'] ?? $data['file_url'];
 
-        return $this->ok(['document' => $aircraft->documents()->create($data)], 201);
+        $document = $aircraft->documents()->create($data);
+
+        return $this->ok([
+            'document' => $document,
+            'url' => $document->document_url,
+        ], 201);
     }
 
     public function destroyDocument(Request $request, Aeronave $aircraft, DocumentoAeronave $document)
     {
         $this->authorizeProveedorAeronave($request, $aircraft);
         abort_if($document->aircraft_id !== $aircraft->id, 404);
+
+        $path = $this->resolveS3Path($document->document_url ?: $document->file_url);
+        if ($path) {
+            Storage::disk('s3')->delete($path);
+        }
+
         $document->delete();
 
         return $this->ok(['message' => 'Documento eliminado.']);
