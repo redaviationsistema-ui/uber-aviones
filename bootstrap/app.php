@@ -14,7 +14,6 @@ use App\Http\Intermediarios\VerificarDemo;
 use App\Http\Intermediarios\VerificarProveedorAprobado;
 use App\Http\Intermediarios\VerificarSuscripcion;
 use App\Http\Intermediarios\ForzarRespuestaJson;
-use App\Http\Intermediarios\CorsIntermediario;
 use App\Http\Intermediarios\RolIntermediario;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
@@ -38,8 +37,6 @@ return Application::configure(basePath: dirname(__DIR__))
         LiberarPagosProveedorComando::class,
     ])
     ->withMiddleware(function (Middleware $middleware): void {
-        $middleware->append(CorsIntermediario::class);
-
         $middleware->alias([
             'auth.token' => TokenApiIntermediario::class,
             'audit.log' => AuditoriaIntermediario::class,
