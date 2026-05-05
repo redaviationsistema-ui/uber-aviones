@@ -30,6 +30,11 @@ class Proveedor extends Model
         return $this->hasMany(Aeronave::class, 'provider_id');
     }
 
+    public function companyDocuments(): HasMany
+    {
+        return $this->hasMany(DocumentoEmpresa::class, 'provider_id');
+    }
+
     public function quotes(): HasMany
     {
         return $this->hasMany(Cotizacion::class, 'provider_id');

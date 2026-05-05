@@ -7,6 +7,7 @@ use App\Modelos\LineaTiempoOperacion;
 use App\Modelos\Operacion;
 use App\Modelos\SolicitudVuelo;
 use App\Modelos\Comision;
+use App\Modelos\DocumentoEmpresa;
 use App\Modelos\Pago;
 use App\Modelos\PagoProveedor;
 use App\Modelos\Perfil;
@@ -16,6 +17,7 @@ use App\Modelos\Reserva;
 use App\Modelos\Usuario;
 use App\Servicios\ReintentoCoincidenciaSolicitudServicio;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rule;
 
 class ProveedorControlador extends ControladorBase
@@ -140,6 +142,45 @@ class ProveedorControlador extends ControladorBase
             'company' => $this->formatCompanyPayload($request->user()->fresh(['provider', 'profile'])),
             'message' => 'Empresa enviada a revision.',
         ]);
+    }
+
+    public function storeCompanyDocument(Request $request)
+    {
+        $user = $request->user()->loadMissing('provider', 'profile');
+        $provider = $user->provider;
+        abort_if(! $provider, 404, 'Proveedor no encontrado.');
+
+        $data = $request->validate([
+            'file' => ['required_without_all:file_url,document_url', 'nullable', 'file', 'max:20480'],
+            'file_url' => ['required_without_all:file,document_url', 'nullable', 'string', 'max:255'],
+            'document_name' => ['nullable', 'string', 'max:150'],
+            'document_url' => ['required_without_all:file,file_url', 'nullable', 'string'],
+            'expires_at' => ['nullable', 'date'],
+        ]);
+
+        if ($request->hasFile('file')) {
+            $path = $request->file('file')->store('company-documents', 's3');
+            $documentUrl = Storage::disk('s3')->url($path);
+            $data['file_url'] = $documentUrl;
+            $data['document_url'] = $documentUrl;
+            $data['mime_type'] = $request->file('file')->getClientMimeType();
+            $data['file_size_bytes'] = $request->file('file')->getSize();
+            $data['document_name'] = $data['document_name'] ?? $request->file('file')->getClientOriginalName();
+        }
+
+        $data['file_url'] = $data['file_url'] ?? $data['document_url'];
+        $data['document_url'] = $data['document_url'] ?? $data['file_url'];
+        $data['status'] = 'pendiente';
+
+        $document = $provider->companyDocuments()->create($data);
+
+        $this->writeAudit($request, 'upload', 'provider_company_document', 'Documento de empresa cargado.');
+
+        return $this->ok([
+            'document' => $document,
+            'company' => $this->formatCompanyPayload($request->user()->fresh(['provider', 'profile'])),
+            'url' => $document->document_url,
+        ], 201);
     }
 
     public function requests(Request $request)
@@ -475,12 +516,12 @@ class ProveedorControlador extends ControladorBase
     private function formatCompanyPayload(Request|\App\Modelos\Usuario $source): array
     {
         $user = $source instanceof Request
-            ? $source->user()->loadMissing('provider', 'profile')
-            : $source->loadMissing('provider', 'profile');
+            ? $source->user()->loadMissing('provider.companyDocuments', 'profile')
+            : $source->loadMissing('provider.companyDocuments', 'profile');
         $provider = $user->provider;
         $profile = $user->profile;
         $taxData = $profile?->tax_data ?? [];
-        $documents = collect($taxData['documents'] ?? [])
+        $legacyDocuments = collect($taxData['documents'] ?? [])
             ->values()
             ->map(fn ($document, $index) => [
                 'id' => $document['id'] ?? ($index + 1),
@@ -488,6 +529,20 @@ class ProveedorControlador extends ControladorBase
                 'state' => $document['state'] ?? 'pendiente',
             ])
             ->all();
+        $documents = ($provider && $provider->companyDocuments->isNotEmpty())
+            ? $provider->companyDocuments
+                ->sortByDesc('id')
+                ->values()
+                ->map(fn (DocumentoEmpresa $document) => [
+                    'id' => $document->id,
+                    'name' => $document->document_name ?? 'Documento',
+                    'state' => $document->status ?? 'pendiente',
+                    'file_url' => $document->file_url,
+                    'document_url' => $document->document_url,
+                    'expires_at' => optional($document->expires_at)?->toISOString(),
+                ])
+                ->all()
+            : $legacyDocuments;
 
         return [
             'id' => $provider?->id,

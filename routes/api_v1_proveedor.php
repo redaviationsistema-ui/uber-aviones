@@ -13,6 +13,7 @@ Route::prefix('proveedor')->middleware(['auth.token', 'role:provider,admin'])->g
     Route::get('/mi-dashboard', [ProveedorControlador::class, 'dashboard']);
     Route::get('/empresa', [ProveedorControlador::class, 'company']);
     Route::put('/empresa', [ProveedorControlador::class, 'updateCompany']);
+    Route::post('/empresa/documentos', [ProveedorControlador::class, 'storeCompanyDocument']);
     Route::post('/empresa/enviar-revision', [ProveedorControlador::class, 'submitCompanyReview']);
     Route::get('/perfil', [AutenticacionControlador::class, 'me']);
     Route::put('/perfil', [AutenticacionControlador::class, 'updatePerfil']);
