@@ -180,7 +180,7 @@ class AutenticacionControlador extends ControladorBase
             $this->shouldUseSecureCookies($request),
             true,
             false,
-            $this->authCookieSameSite()
+            $this->authCookieSameSite($request)
         );
     }
 
@@ -194,13 +194,21 @@ class AutenticacionControlador extends ControladorBase
         return (int) env('AUTH_TOKEN_TTL_MINUTES', 60 * 24 * 30);
     }
 
-    private function authCookieSameSite(): string
+    private function authCookieSameSite(Request $request): string
     {
+        if ($this->isLocalBrowserRequest($request)) {
+            return 'lax';
+        }
+
         return (string) env('AUTH_TOKEN_SAME_SITE', 'none');
     }
 
     private function shouldUseSecureCookies(Request $request): bool
     {
+        if ($this->isLocalBrowserRequest($request)) {
+            return false;
+        }
+
         if ($request->isSecure()) {
             return true;
         }
@@ -212,5 +220,15 @@ class AutenticacionControlador extends ControladorBase
         }
 
         return app()->environment('production');
+    }
+
+    private function isLocalBrowserRequest(Request $request): bool
+    {
+        $host = strtolower((string) $request->getHost());
+        $origin = strtolower((string) $request->headers->get('origin', ''));
+
+        return in_array($host, ['localhost', '127.0.0.1'], true)
+            || str_contains($origin, 'localhost:')
+            || str_contains($origin, '127.0.0.1:');
     }
 }

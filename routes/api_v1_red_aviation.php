@@ -47,12 +47,23 @@ Route::middleware(['auth.token'])->group(function () {
 
     Route::prefix('sobrecargo')->middleware(['role:sobrecargo,admin'])->group(function () {
         Route::get('/dashboard', [SobrecargoControlador::class, 'dashboard']);
+        Route::get('/profile', [SobrecargoControlador::class, 'profile']);
+        Route::put('/profile', [SobrecargoControlador::class, 'updateProfile']);
         Route::get('/assignments', [SobrecargoControlador::class, 'assignments']);
+        Route::post('/assignments/{operation}/respond', [SobrecargoControlador::class, 'respondAssignment']);
         Route::get('/operations/{operation}', [SobrecargoControlador::class, 'operation']);
         Route::post('/operations/{operation}/start-service', [SobrecargoControlador::class, 'startService']);
         Route::post('/operations/{operation}/complete-service', [SobrecargoControlador::class, 'completeService']);
         Route::post('/checklists/{checklist}/complete', [SobrecargoControlador::class, 'completeChecklist']);
+        Route::get('/documents', [SobrecargoControlador::class, 'documents']);
+        Route::post('/documents', [SobrecargoControlador::class, 'storeDocument']);
+        Route::put('/documents/{documentId}', [SobrecargoControlador::class, 'updateDocument']);
+        Route::get('/availability', [SobrecargoControlador::class, 'availability']);
+        Route::post('/availability', [SobrecargoControlador::class, 'storeAvailability']);
+        Route::delete('/availability/{availabilityId}', [SobrecargoControlador::class, 'destroyAvailability']);
+        Route::get('/incidents', [SobrecargoControlador::class, 'listIncidents']);
         Route::post('/incidents', [SobrecargoControlador::class, 'incidents']);
+        Route::put('/incidents/{timeline}', [SobrecargoControlador::class, 'updateIncident']);
     });
 
     Route::prefix('admin')->middleware(['role:admin'])->group(function () {
@@ -85,4 +96,3 @@ Route::middleware(['auth.token'])->group(function () {
     Route::get('/notifications', [NotificacionControlador::class, 'index']);
     Route::post('/notifications/{notification}/read', [NotificacionControlador::class, 'markAsRead']);
 });
-
