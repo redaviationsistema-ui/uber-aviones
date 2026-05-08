@@ -10,6 +10,7 @@ use Carbon\Carbon;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Str;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 
 class AeronaveControlador extends ControladorBase
@@ -157,25 +158,39 @@ class AeronaveControlador extends ControladorBase
         ]);
 
         $disk = $this->resolveUploadDisk();
-        $path = $request->file('image')->store('aircraft', $disk);
+        $path = $request->file('image')->store(
+            sprintf('provider/%s/aircraft/%s/images', $aircraft->provider_id, $aircraft->id),
+            $disk
+        );
         $imageUrl = $this->resolveUploadedFileUrl($request, $disk, $path);
         $isMain = (bool) ($data['is_main'] ?? false);
 
-        if ($isMain) {
-            $aircraft->images()->update(['is_main' => false]);
-        }
+        try {
+            $image = DB::transaction(function () use ($aircraft, $data, $imageUrl, $isMain) {
+                if ($isMain) {
+                    $aircraft->images()->update(['is_main' => false]);
+                }
 
-        $image = $aircraft->images()->create([
-            'kind' => $data['kind'] ?? ($isMain ? 'main' : 'gallery'),
-            'title' => $data['title'] ?? null,
-            'image_url' => $imageUrl,
-            'sort_order' => $data['sort_order'] ?? 0,
-            'is_main' => $isMain,
-            'visible_to_client' => array_key_exists('visible_to_client', $data) ? (bool) $data['visible_to_client'] : true,
-        ]);
+                return $aircraft->images()->create([
+                    'kind' => $data['kind'] ?? ($isMain ? 'main' : 'gallery'),
+                    'title' => $data['title'] ?? null,
+                    'image_url' => $imageUrl,
+                    'sort_order' => $data['sort_order'] ?? 0,
+                    'is_main' => $isMain,
+                    'visible_to_client' => array_key_exists('visible_to_client', $data) ? (bool) $data['visible_to_client'] : true,
+                ]);
+            });
+        } catch (\Throwable $exception) {
+            if ($path) {
+                Storage::disk($disk)->delete($path);
+            }
+
+            throw $exception;
+        }
 
         return $this->ok([
             'image' => $image,
+            'images' => $aircraft->fresh('images')->images,
             'path' => $path,
             'url' => $imageUrl,
         ], 201);
