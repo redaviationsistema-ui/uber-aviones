@@ -70,10 +70,11 @@ class OperadorControlador extends ControladorBase
         abort_if(! $request->user()->provider_id, 422, 'El usuario proveedor no tiene provider_id asignado.');
 
         $data = $request->validate($this->aircraftRules());
+        $isApproved = $request->user()->provider?->approval_status === 'approved';
 
         $aeronave = Aeronave::create($data + [
             'provider_id' => $request->user()->provider_id,
-            'status' => 'active',
+            'status' => $isApproved ? 'active' : 'blocked',
             'currency' => 'USD',
         ]);
 
@@ -81,6 +82,9 @@ class OperadorControlador extends ControladorBase
             'aircraft' => $this->formatAircraftPayload(
                 $aeronave->fresh(['provider.user.activeSuscripcion.plan', 'availability', 'documents', 'images'])
             ),
+            'message' => $isApproved
+                ? 'La aeronave fue registrada y quedó activa.'
+                : 'La aeronave fue registrada y quedó bloqueada hasta activación admin.',
         ], 201);
     }
 

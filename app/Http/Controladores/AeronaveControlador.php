@@ -33,18 +33,22 @@ class AeronaveControlador extends ControladorBase
     public function store(Request $request)
     {
         $provider = $request->user()->provider;
-
-        if (! $provider || $provider->approval_status !== 'approved') {
-            return response()->json([
-                'success' => false,
-                'message' => 'El proveedor debe estar aprobado para registrar aeronaves.',
-            ], 403);
-        }
+        abort_if(! $provider, 422, 'El usuario proveedor no tiene provider_id asignado.');
 
         $data = $request->validate($this->rules());
-        $aircraft = $provider->aircraft()->create($data);
+        $isApproved = $provider->approval_status === 'approved';
+        $aircraft = $provider->aircraft()->create($data + [
+            'status' => $isApproved ? 'active' : 'blocked',
+        ]);
 
-        return $this->ok(['aircraft' => $this->formatAircraftPayload($aircraft->fresh(['provider.user.activeSuscripcion.plan', 'availability', 'documents', 'images']))], 201);
+        return $this->ok([
+            'aircraft' => $this->formatAircraftPayload(
+                $aircraft->fresh(['provider.user.activeSuscripcion.plan', 'availability', 'documents', 'images'])
+            ),
+            'message' => $isApproved
+                ? 'La aeronave fue registrada y quedó activa.'
+                : 'La aeronave fue registrada y quedó bloqueada hasta activación admin.',
+        ], 201);
     }
 
     public function show(Request $request, Aeronave $aircraft)

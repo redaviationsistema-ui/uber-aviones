@@ -27,10 +27,13 @@ Route::middleware(['auth.token'])->group(function () {
         Route::get('/operations/{operation}/tracking', [ClienteControlador::class, 'tracking']);
     });
 
+    Route::prefix('operator')->middleware(['role:provider,admin'])->group(function () {
+        Route::post('/aircraft', [OperadorControlador::class, 'storeAircraft']);
+    });
+
     Route::prefix('operator')->middleware(['role:provider,admin', 'operator.verified'])->group(function () {
         Route::get('/dashboard', [OperadorControlador::class, 'dashboard']);
         Route::get('/my-dashboard', [OperadorControlador::class, 'dashboard']);
-        Route::post('/aircraft', [OperadorControlador::class, 'storeAircraft']);
         Route::get('/my-aircraft', [OperadorControlador::class, 'indexAircraft']);
         Route::get('/aircraft', [OperadorControlador::class, 'indexAircraft']);
         Route::put('/aircraft/{aircraft}', [OperadorControlador::class, 'updateAircraft']);
