@@ -595,8 +595,28 @@ class AeronaveControlador extends ControladorBase
 
         unset($data['year']);
 
-        if (array_key_exists('amenities', $data) && is_array($data['amenities'])) {
-            $data['amenities'] = implode(', ', array_filter(array_map('trim', $data['amenities'])));
+        if (array_key_exists('manufacturer', $data)) {
+            $data['manufacturer'] = $this->normalizeNullableString($data['manufacturer']);
+        }
+
+        if (array_key_exists('coverage', $data)) {
+            $data['coverage'] = $this->normalizeNullableString($data['coverage']);
+        }
+
+        if (array_key_exists('base_airport', $data)) {
+            $data['base_airport'] = $this->normalizeNullableString($data['base_airport']);
+        }
+
+        if (array_key_exists('registration', $data)) {
+            $data['registration'] = $this->normalizeNullableString($data['registration']);
+        }
+
+        if (array_key_exists('model', $data)) {
+            $data['model'] = $this->normalizeNullableString($data['model']);
+        }
+
+        if (array_key_exists('amenities', $data)) {
+            $data['amenities'] = $this->normalizeAmenities($data['amenities']);
         }
 
         return $data;
@@ -657,6 +677,7 @@ class AeronaveControlador extends ControladorBase
         return [
             ...$aircraft->toArray(),
             'year' => $aircraft->model_year,
+            'amenities' => $this->parseAmenities($aircraft->amenities),
             'main_image' => $images->firstWhere('is_main', true)?->image_url ?? $images->first()?->image_url,
             'images' => $images->map(fn (ImagenAeronave $image) => [
                 'id' => $image->id,
@@ -708,6 +729,9 @@ class AeronaveControlador extends ControladorBase
             'capacity' => $aircraft->capacity,
             'range_km' => $aircraft->range_km,
             'status' => $aircraft->status,
+            'manufacturer' => $aircraft->manufacturer,
+            'coverage' => $aircraft->coverage,
+            'year' => $aircraft->model_year,
             'main_image' => $mainImage,
             'images' => $visibleImages->map(fn (ImagenAeronave $image) => [
                 'id' => $image->id,
@@ -716,12 +740,39 @@ class AeronaveControlador extends ControladorBase
                 'image_url' => $image->image_url,
                 'is_main' => $image->is_main,
             ])->values(),
-            'amenities' => $visibleImages
-                ->whereIn('kind', ['amenities', 'cabin', 'seats'])
-                ->pluck('title')
-                ->filter()
-                ->values(),
+            'amenities' => $this->parseAmenities($aircraft->amenities),
         ];
+    }
+
+    private function normalizeAmenities(mixed $value): ?string
+    {
+        if (is_array($value)) {
+            $items = array_values(array_filter(array_map(
+                fn ($item) => trim((string) $item),
+                $value
+            )));
+
+            return $items === [] ? null : implode(', ', $items);
+        }
+
+        $normalized = $this->normalizeNullableString($value);
+        return $normalized === null ? null : $normalized;
+    }
+
+    private function parseAmenities(mixed $value): array
+    {
+        $normalized = $this->normalizeNullableString($value);
+        if ($normalized === null) {
+            return [];
+        }
+
+        return array_values(array_filter(array_map('trim', explode(',', $normalized))));
+    }
+
+    private function normalizeNullableString(mixed $value): ?string
+    {
+        $trimmed = trim((string) ($value ?? ''));
+        return $trimmed === '' ? null : $trimmed;
     }
 
     private function resolveMainImageUrl(Aeronave $aircraft): ?string

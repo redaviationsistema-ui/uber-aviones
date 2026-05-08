@@ -308,8 +308,28 @@ class OperadorControlador extends ControladorBase
 
         unset($data['year']);
 
-        if (array_key_exists('amenities', $data) && is_array($data['amenities'])) {
-            $data['amenities'] = implode(', ', array_filter(array_map('trim', $data['amenities'])));
+        if (array_key_exists('manufacturer', $data)) {
+            $data['manufacturer'] = $this->normalizeNullableString($data['manufacturer']);
+        }
+
+        if (array_key_exists('coverage', $data)) {
+            $data['coverage'] = $this->normalizeNullableString($data['coverage']);
+        }
+
+        if (array_key_exists('base_airport', $data)) {
+            $data['base_airport'] = $this->normalizeNullableString($data['base_airport']);
+        }
+
+        if (array_key_exists('registration', $data)) {
+            $data['registration'] = $this->normalizeNullableString($data['registration']);
+        }
+
+        if (array_key_exists('model', $data)) {
+            $data['model'] = $this->normalizeNullableString($data['model']);
+        }
+
+        if (array_key_exists('amenities', $data)) {
+            $data['amenities'] = $this->normalizeAmenities($data['amenities']);
         }
 
         return $data;
@@ -337,6 +357,7 @@ class OperadorControlador extends ControladorBase
         return [
             ...$aircraft->toArray(),
             'year' => $aircraft->model_year,
+            'amenities' => $this->parseAmenities($aircraft->amenities),
             'main_image' => $images->firstWhere('is_main', true)?->image_url ?? $images->first()?->image_url,
             'images' => $images->map(fn ($image) => [
                 'id' => $image->id,
@@ -365,5 +386,36 @@ class OperadorControlador extends ControladorBase
                 'within_plan_limit' => $resolvedPlan->max_aircraft ? $aircraftCount <= $resolvedPlan->max_aircraft : true,
             ] : null,
         ];
+    }
+
+    private function normalizeAmenities(mixed $value): ?string
+    {
+        if (is_array($value)) {
+            $items = array_values(array_filter(array_map(
+                fn ($item) => trim((string) $item),
+                $value
+            )));
+
+            return $items === [] ? null : implode(', ', $items);
+        }
+
+        $normalized = $this->normalizeNullableString($value);
+        return $normalized === null ? null : $normalized;
+    }
+
+    private function parseAmenities(mixed $value): array
+    {
+        $normalized = $this->normalizeNullableString($value);
+        if ($normalized === null) {
+            return [];
+        }
+
+        return array_values(array_filter(array_map('trim', explode(',', $normalized))));
+    }
+
+    private function normalizeNullableString(mixed $value): ?string
+    {
+        $trimmed = trim((string) ($value ?? ''));
+        return $trimmed === '' ? null : $trimmed;
     }
 }

@@ -47,6 +47,9 @@ class Aeronave extends Model
     {
         return [
             'model_year' => 'integer',
+            'capacity' => 'integer',
+            'range_km' => 'integer',
+            'speed_kmh' => 'integer',
             'hourly_rate' => 'decimal:2',
             'minimum_hours' => 'decimal:2',
             'operational_cost' => 'decimal:2',
