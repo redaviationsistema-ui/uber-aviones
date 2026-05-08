@@ -171,6 +171,8 @@ class AutenticacionControlador extends ControladorBase
             'user' => $user,
             'access' => $user->accessStatus(),
             'login_context' => $user->loginContext(),
+            'token' => $plainToken,
+            'token_type' => 'Bearer',
         ], $status)->cookie(
             $this->authCookieName(),
             $plainToken,

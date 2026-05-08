@@ -137,11 +137,26 @@ class SobrecargoControlador extends ControladorBase
             ],
         );
 
-        if ($data['response'] === 'Confirmado') {
-            $operation->update(['status' => 'confirmed']);
-        } elseif ($data['response'] === 'Solicitar revision') {
-            $operation->update(['status' => 'revision_requested']);
-        }
+        $crewStatus = match ($data['response']) {
+            'Confirmado' => 'crew_confirmed',
+            'Rechazado' => 'crew_declined',
+            default => 'crew_change_requested',
+        };
+
+        $operation->update([
+            'status' => match ($data['response']) {
+                'Confirmado' => 'confirmed',
+                'Solicitar revision' => 'revision_requested',
+                default => $operation->status,
+            },
+            'crew_status' => $crewStatus,
+            'crew_confirmed_at' => $data['response'] === 'Confirmado' ? now() : null,
+            'crew_decline_reason' => $data['response'] === 'Rechazado' ? ($data['reject_reason'] ?? null) : null,
+            'crew_notes' => $data['comment'] ?? $data['reject_reason'] ?? $operation->crew_notes,
+            'crew_checkin_at' => $data['response'] === 'Confirmado' ? $operation->crew_checkin_at : null,
+            'crew_service_started_at' => $data['response'] === 'Confirmado' ? $operation->crew_service_started_at : null,
+            'crew_service_completed_at' => $data['response'] === 'Confirmado' ? $operation->crew_service_completed_at : null,
+        ]);
 
         $timeline = LineaTiempoOperacion::create([
             'operation_id' => $operation->id,
@@ -168,6 +183,34 @@ class SobrecargoControlador extends ControladorBase
         ]);
     }
 
+    public function checkinOperation(Request $request, Operacion $operation)
+    {
+        abort_if($operation->sobrecargo_user_id !== $request->user()->id, 403);
+
+        $data = $request->validate([
+            'note' => ['nullable', 'string'],
+        ]);
+
+        $operation->update([
+            'crew_status' => 'crew_enroute',
+            'crew_notes' => $data['note'] ?? $operation->crew_notes,
+            'crew_checkin_at' => $operation->crew_checkin_at ?? now(),
+        ]);
+
+        $timeline = LineaTiempoOperacion::create([
+            'operation_id' => $operation->id,
+            'status' => 'crew_checkin',
+            'title' => 'Sobrecargo confirma check-in operativo',
+            'description' => $data['note'] ?: 'El sobrecargo ya reporto llegada a FBO / aeropuerto.',
+            'created_by' => $request->user()->id,
+        ]);
+
+        return $this->ok([
+            'operation' => $this->formatAssignmentPayload($operation->fresh(['solicitudVuelo', 'aeronave', 'proveedor', 'timeline']), $request->user()->id),
+            'timeline_item' => $timeline,
+        ]);
+    }
+
     public function operation(Request $request, Operacion $operation)
     {
         abort_if($operation->sobrecargo_user_id !== $request->user()->id, 403);
@@ -183,6 +226,8 @@ class SobrecargoControlador extends ControladorBase
 
         $operation->update([
             'status' => 'in_progress',
+            'crew_status' => 'crew_active',
+            'crew_service_started_at' => $operation->crew_service_started_at ?? now(),
             'started_at' => now(),
         ]);
 
@@ -206,6 +251,8 @@ class SobrecargoControlador extends ControladorBase
 
         $operation->update([
             'status' => 'completed',
+            'crew_status' => 'crew_completed',
+            'crew_service_completed_at' => now(),
             'completed_at' => now(),
         ]);
 
@@ -434,9 +481,25 @@ class SobrecargoControlador extends ControladorBase
             'created_by' => $request->user()->id,
         ]);
 
-        $operacion->update(['status' => 'incidencia']);
+        $operacion->update([
+            'status' => 'incidencia',
+            'crew_status' => 'crew_incident_reported',
+            'crew_notes' => $data['description'] ?? $operacion->crew_notes,
+        ]);
 
         return $this->ok(['incident' => $timeline], 201);
+    }
+
+    public function storeOperationIncident(Request $request, Operacion $operation)
+    {
+        abort_if($operation->sobrecargo_user_id !== $request->user()->id, 403);
+
+        $payload = new Request(array_merge($request->all(), [
+            'operation_id' => $operation->id,
+        ]));
+        $payload->setUserResolver(fn () => $request->user());
+
+        return $this->incidents($payload);
     }
 
     public function listIncidents(Request $request)
@@ -483,9 +546,15 @@ class SobrecargoControlador extends ControladorBase
         if (! empty($data['status'])) {
             $normalizedStatus = strtolower($data['status']);
             if (in_array($normalizedStatus, ['resuelta por operador', 'cerrada'], true)) {
-                $timeline->operacion->update(['status' => $normalizedStatus === 'cerrada' ? 'completed' : 'confirmed']);
+                $timeline->operacion->update([
+                    'status' => $normalizedStatus === 'cerrada' ? 'completed' : 'confirmed',
+                    'crew_status' => $normalizedStatus === 'cerrada' ? 'crew_completed' : 'crew_confirmed',
+                ]);
             } else {
-                $timeline->operacion->update(['status' => 'incidencia']);
+                $timeline->operacion->update([
+                    'status' => 'incidencia',
+                    'crew_status' => 'crew_incident_reported',
+                ]);
             }
         }
 
@@ -539,13 +608,21 @@ class SobrecargoControlador extends ControladorBase
         return [
             'id' => $operation->id,
             'status' => $operation->status,
+            'crew_status' => $operation->crew_status,
+            'crew_status_label' => $this->humanizeCrewStatus($operation->crew_status),
             'response_status' => $assignment?->status
                 ?? match ($latestResponse?->status) {
                     'confirmada' => 'Confirmado',
                     'rechazada' => 'Rechazado',
                     'revision_solicitada' => 'Solicitar revision',
-                    default => null,
+                    default => $this->responseStatusFromCrewStatus($operation->crew_status),
                 },
+            'crew_confirmed_at' => optional($operation->crew_confirmed_at)?->toISOString(),
+            'crew_decline_reason' => $operation->crew_decline_reason,
+            'crew_notes' => $operation->crew_notes,
+            'crew_checkin_at' => optional($operation->crew_checkin_at)?->toISOString(),
+            'crew_service_started_at' => optional($operation->crew_service_started_at)?->toISOString(),
+            'crew_service_completed_at' => optional($operation->crew_service_completed_at)?->toISOString(),
             'departure_datetime' => $operation->solicitudVuelo?->departure_datetime,
             'origin' => $operation->solicitudVuelo?->origin,
             'destination' => $operation->solicitudVuelo?->destination,
@@ -627,5 +704,30 @@ class SobrecargoControlador extends ControladorBase
         }
 
         return $segments->implode(' | ');
+    }
+
+    private function humanizeCrewStatus(?string $status): string
+    {
+        return match (strtolower((string) $status)) {
+            'pending_crew_response' => 'Sin responder',
+            'crew_confirmed' => 'Confirmado',
+            'crew_declined' => 'Rechazado',
+            'crew_change_requested' => 'Solicita cambio',
+            'crew_enroute' => 'En traslado',
+            'crew_active' => 'En servicio',
+            'crew_completed' => 'Finalizado',
+            'crew_incident_reported' => 'Con incidencia',
+            default => $status ?: 'Pendiente',
+        };
+    }
+
+    private function responseStatusFromCrewStatus(?string $crewStatus): ?string
+    {
+        return match (strtolower((string) $crewStatus)) {
+            'crew_confirmed', 'crew_enroute', 'crew_active', 'crew_completed' => 'Confirmado',
+            'crew_declined' => 'Rechazado',
+            'crew_change_requested' => 'Solicitar revision',
+            default => null,
+        };
     }
 }

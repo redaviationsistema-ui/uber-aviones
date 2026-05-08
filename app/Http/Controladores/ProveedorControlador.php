@@ -265,6 +265,8 @@ class ProveedorControlador extends ControladorBase
         $providerId = $request->user()->provider_id;
         abort_if(! $providerId, 404, 'Proveedor no encontrado.');
 
+        $activeStatuses = ['confirmada', 'confirmed', 'en_preparacion', 'preparacion', 'preparing', 'lista', 'ready', 'en_vuelo', 'in_progress', 'in_flight', 'incidencia'];
+
         $crew = Usuario::query()
             ->with(['roles'])
             ->where('provider_id', $providerId)
@@ -274,16 +276,29 @@ class ProveedorControlador extends ControladorBase
             })
             ->latest()
             ->get()
-            ->map(fn (Usuario $user) => [
-                'id' => $user->id,
-                'name' => $user->name,
-                'role' => $user->operational_role ?: $user->effectiveRole(),
-                'base' => $user->profile?->city,
-                'availability' => $user->status === 'active' ? 'Disponible' : 'No disponible',
-                'phone' => $user->phone,
-                'note' => $user->profile?->business_type ?: 'Sin notas',
-                'email' => $user->email,
-            ])
+            ->map(function (Usuario $user) use ($providerId, $activeStatuses) {
+                $hasActiveOperation = Operacion::query()
+                    ->where('provider_id', $providerId)
+                    ->where('sobrecargo_user_id', $user->id)
+                    ->whereIn('status', $activeStatuses)
+                    ->exists();
+
+                return [
+                    'id' => $user->id,
+                    'name' => $user->name,
+                    'role' => $user->operational_role ?: $user->effectiveRole(),
+                    'base' => $user->profile?->city,
+                    'availability' => $user->status !== 'active'
+                        ? 'No disponible'
+                        : ($hasActiveOperation ? 'Asignado' : 'Disponible'),
+                    'state' => $user->status !== 'active'
+                        ? 'Suspendido'
+                        : ($hasActiveOperation ? 'Asignado' : 'Disponible'),
+                    'phone' => $user->phone,
+                    'note' => $user->profile?->business_type ?: 'Sin notas',
+                    'email' => $user->email,
+                ];
+            })
             ->values();
 
         return $this->ok(['crew' => $crew]);
@@ -317,25 +332,78 @@ class ProveedorControlador extends ControladorBase
         abort_if($operation->provider_id !== $providerId, 403, 'No puedes actualizar esta operacion.');
 
         $data = $request->validate([
-            'status' => ['required', 'string', 'max:100'],
+            'status' => ['nullable', 'string', 'max:100'],
+            'crew_id' => ['nullable', 'exists:users,id'],
+            'sobrecargo_id' => ['nullable', 'exists:users,id'],
+            'crew_name' => ['nullable', 'string', 'max:255'],
+            'crew_label' => ['nullable', 'string', 'max:255'],
+            'note' => ['nullable', 'string'],
         ]);
 
+        abort_if(
+            ! array_key_exists('status', $data)
+            && ! array_key_exists('crew_id', $data)
+            && ! array_key_exists('sobrecargo_id', $data),
+            422,
+            'Debes indicar un estado o un sobrecargo para actualizar la operacion.'
+        );
+
+        $crewId = $data['crew_id'] ?? $data['sobrecargo_id'] ?? null;
+        $assignedCrew = null;
+
+        if ($crewId) {
+            $assignedCrew = Usuario::query()
+                ->where('provider_id', $providerId)
+                ->where(function ($query) {
+                    $query->whereHas('roles', fn ($roles) => $roles->whereIn('code', ['sobrecargo']))
+                        ->orWhere('operational_role', 'sobrecargo');
+                })
+                ->find($crewId);
+
+            abort_if(! $assignedCrew, 422, 'El sobrecargo seleccionado no pertenece a este proveedor o no es valido.');
+        }
+
+        $nextStatus = $data['status'] ?? $operation->status;
+        $assigningCrew = (bool) $crewId;
+
         $operation->update([
-            'status' => $data['status'],
-            'started_at' => in_array($data['status'], ['En vuelo', 'en_vuelo', 'in_progress'], true)
+            'sobrecargo_user_id' => $crewId ?? $operation->sobrecargo_user_id,
+            'status' => $nextStatus,
+            'crew_status' => $assigningCrew ? 'pending_crew_response' : $operation->crew_status,
+            'crew_confirmed_at' => $assigningCrew ? null : $operation->crew_confirmed_at,
+            'crew_decline_reason' => $assigningCrew ? null : $operation->crew_decline_reason,
+            'crew_notes' => $assigningCrew ? ($data['note'] ?? null) : ($data['note'] ?? $operation->crew_notes),
+            'crew_checkin_at' => $assigningCrew ? null : $operation->crew_checkin_at,
+            'crew_service_started_at' => $assigningCrew ? null : $operation->crew_service_started_at,
+            'crew_service_completed_at' => $assigningCrew ? null : $operation->crew_service_completed_at,
+            'started_at' => in_array($nextStatus, ['En vuelo', 'en_vuelo', 'in_progress'], true)
                 ? ($operation->started_at ?? now())
                 : $operation->started_at,
-            'completed_at' => in_array($data['status'], ['Finalizada', 'finalizada', 'completed'], true)
+            'completed_at' => in_array($nextStatus, ['Finalizada', 'finalizada', 'completed'], true)
                 ? now()
                 : $operation->completed_at,
         ]);
 
-        $operation->timeline()->create([
-            'status' => $this->normalizeOperationTimelineStatus($data['status']),
-            'title' => 'Estado operativo actualizado',
-            'description' => 'Proveedor actualizo la operacion a '.$data['status'].'.',
-            'created_by' => $request->user()->id,
-        ]);
+        if ($crewId) {
+            $operation->timeline()->create([
+                'status' => 'sobrecargo_asignado',
+                'title' => 'Sobrecargo asignado por proveedor',
+                'description' => trim(implode(' | ', array_filter([
+                    'Sobrecargo: '.($assignedCrew?->name ?: $data['crew_name'] ?? $data['crew_label'] ?? 'N/D'),
+                    $data['note'] ?? null,
+                ]))),
+                'created_by' => $request->user()->id,
+            ]);
+        }
+
+        if (array_key_exists('status', $data) && $data['status']) {
+            $operation->timeline()->create([
+                'status' => $this->normalizeOperationTimelineStatus($data['status']),
+                'title' => 'Estado operativo actualizado',
+                'description' => 'Proveedor actualizo la operacion a '.$data['status'].'.',
+                'created_by' => $request->user()->id,
+            ]);
+        }
 
         $this->writeAudit($request, 'update', 'provider_operations', 'Operacion actualizada por proveedor.');
 
@@ -578,6 +646,15 @@ class ProveedorControlador extends ControladorBase
             'aircraft' => $aircraft?->model,
             'aircraft_model' => $aircraft?->model,
             'crew' => $operation->sobrecargo?->name,
+            'crew_id' => $operation->sobrecargo_user_id,
+            'crew_status' => $operation->crew_status,
+            'crew_status_label' => $this->humanizeCrewStatus($operation->crew_status),
+            'crew_confirmed_at' => optional($operation->crew_confirmed_at)?->toISOString(),
+            'crew_decline_reason' => $operation->crew_decline_reason,
+            'crew_notes' => $operation->crew_notes,
+            'crew_checkin_at' => optional($operation->crew_checkin_at)?->toISOString(),
+            'crew_service_started_at' => optional($operation->crew_service_started_at)?->toISOString(),
+            'crew_service_completed_at' => optional($operation->crew_service_completed_at)?->toISOString(),
             'departure_datetime' => $flightRequest?->departure_datetime,
             'arrival_datetime' => $operation->completed_at,
             'status' => $this->humanizeOperationStatus($operation->status),
@@ -628,6 +705,21 @@ class ProveedorControlador extends ControladorBase
             'incidencia' => 'Con incidencia',
             'cancelada', 'cancelled' => 'Cancelada',
             default => $status ?: 'Confirmada',
+        };
+    }
+
+    private function humanizeCrewStatus(?string $status): string
+    {
+        return match (strtolower((string) $status)) {
+            'pending_crew_response' => 'Sin responder',
+            'crew_confirmed' => 'Confirmado',
+            'crew_declined' => 'Rechazado',
+            'crew_change_requested' => 'Solicita cambio',
+            'crew_enroute' => 'En traslado',
+            'crew_active' => 'En servicio',
+            'crew_completed' => 'Finalizado',
+            'crew_incident_reported' => 'Con incidencia',
+            default => $status ?: 'Sin tripulacion',
         };
     }
 

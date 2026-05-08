@@ -93,6 +93,13 @@ class VisibilidadServicio
         return [
             'id' => $operacion->id,
             'status' => $operacion->status,
+            'crew_status' => $operacion->crew_status,
+            'crew_confirmed_at' => $operacion->crew_confirmed_at,
+            'crew_decline_reason' => $operacion->crew_decline_reason,
+            'crew_notes' => $operacion->crew_notes,
+            'crew_checkin_at' => $operacion->crew_checkin_at,
+            'crew_service_started_at' => $operacion->crew_service_started_at,
+            'crew_service_completed_at' => $operacion->crew_service_completed_at,
             'briefing' => [
                 'origen' => $solicitud?->origin,
                 'destino' => $solicitud?->destination,

@@ -16,6 +16,13 @@ class Operacion extends Model
         'aircraft_id',
         'sobrecargo_user_id',
         'status',
+        'crew_status',
+        'crew_confirmed_at',
+        'crew_decline_reason',
+        'crew_notes',
+        'crew_checkin_at',
+        'crew_service_started_at',
+        'crew_service_completed_at',
         'started_at',
         'completed_at',
     ];
@@ -23,6 +30,10 @@ class Operacion extends Model
     protected function casts(): array
     {
         return [
+            'crew_confirmed_at' => 'datetime',
+            'crew_checkin_at' => 'datetime',
+            'crew_service_started_at' => 'datetime',
+            'crew_service_completed_at' => 'datetime',
             'started_at' => 'datetime',
             'completed_at' => 'datetime',
         ];
