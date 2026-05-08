@@ -156,8 +156,9 @@ class AeronaveControlador extends ControladorBase
             'visible_to_client' => ['sometimes', 'boolean'],
         ]);
 
-        $path = $request->file('image')->store('aircraft', 's3');
-        $imageUrl = Storage::disk('s3')->url($path);
+        $disk = $this->resolveUploadDisk();
+        $path = $request->file('image')->store('aircraft', $disk);
+        $imageUrl = $this->resolveUploadedFileUrl($request, $disk, $path);
         $isMain = (bool) ($data['is_main'] ?? false);
 
         if ($isMain) {
@@ -618,6 +619,32 @@ class AeronaveControlador extends ControladorBase
             ->values();
 
         return $images->firstWhere('is_main', true)?->image_url ?? $images->first()?->image_url;
+    }
+
+    private function resolveUploadDisk(): string
+    {
+        $defaultDisk = (string) config('filesystems.default', 'public');
+
+        if ($defaultDisk !== 's3') {
+            return $defaultDisk;
+        }
+
+        $hasS3Credentials = filled(env('AWS_ACCESS_KEY_ID')) && filled(env('AWS_SECRET_ACCESS_KEY')) && filled(env('AWS_BUCKET'));
+
+        return $hasS3Credentials ? 's3' : 'public';
+    }
+
+    private function resolveUploadedFileUrl(Request $request, string $disk, string|false $path): string
+    {
+        if (! $path) {
+            return '';
+        }
+
+        if ($disk !== 'public') {
+            return Storage::disk($disk)->url($path);
+        }
+
+        return rtrim($request->getSchemeAndHttpHost(), '/').Storage::disk('public')->url($path);
     }
 
     private function resolveS3Path(string $url): ?string
