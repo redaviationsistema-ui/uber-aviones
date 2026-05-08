@@ -196,6 +196,67 @@ class AeronaveControlador extends ControladorBase
         ], 201);
     }
 
+    public function attachExistingImage(Request $request, Aeronave $aircraft)
+    {
+        $this->authorizeProveedorAeronave($request, $aircraft);
+
+        $data = $request->validate([
+            'image_url' => ['required', 'string', 'max:2048'],
+            'kind' => ['sometimes', 'string', 'in:main,exterior,interior,cabin,seats,amenities,gallery'],
+            'title' => ['nullable', 'string', 'max:150'],
+            'sort_order' => ['sometimes', 'integer', 'min:0'],
+            'is_main' => ['sometimes', 'boolean'],
+            'visible_to_client' => ['sometimes', 'boolean'],
+        ]);
+
+        $imageUrl = trim((string) $data['image_url']);
+        $isMain = (bool) ($data['is_main'] ?? false);
+        $kind = $data['kind'] ?? ($isMain ? 'main' : 'gallery');
+
+        $image = DB::transaction(function () use ($aircraft, $data, $imageUrl, $isMain, $kind) {
+            if ($isMain) {
+                $aircraft->images()->update(['is_main' => false]);
+            }
+
+            $existing = $aircraft->images()
+                ->where('image_url', $imageUrl)
+                ->first();
+
+            if ($existing) {
+                $existing->update([
+                    'kind' => $kind,
+                    'title' => $data['title'] ?? $existing->title,
+                    'sort_order' => $data['sort_order'] ?? $existing->sort_order ?? 0,
+                    'is_main' => $isMain,
+                    'visible_to_client' => array_key_exists('visible_to_client', $data)
+                        ? (bool) $data['visible_to_client']
+                        : $existing->visible_to_client,
+                ]);
+
+                return $existing->fresh();
+            }
+
+            return $aircraft->images()->create([
+                'kind' => $kind,
+                'title' => $data['title'] ?? null,
+                'image_url' => $imageUrl,
+                'sort_order' => $data['sort_order'] ?? 0,
+                'is_main' => $isMain,
+                'visible_to_client' => array_key_exists('visible_to_client', $data) ? (bool) $data['visible_to_client'] : true,
+            ]);
+        });
+
+        return $this->ok([
+            'image' => $image,
+            'aircraft' => $this->formatAircraftPayload($aircraft->fresh([
+                'provider.user.activeSuscripcion.plan',
+                'images',
+                'availability',
+                'documents',
+            ])),
+        ]);
+    }
+
     public function destroyImage(Request $request, Aeronave $aircraft, ImagenAeronave $image)
     {
         $this->authorizeProveedorAeronave($request, $aircraft);
