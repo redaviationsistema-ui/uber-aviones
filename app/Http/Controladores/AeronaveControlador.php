@@ -459,6 +459,7 @@ class AeronaveControlador extends ControladorBase
     {
         if (! function_exists('imagecreatefromstring') || ! function_exists('imagewebp')) {
             $path = $file->storeAs($basePath.'/original', $safeName.'.'.$file->getClientOriginalExtension(), 's3');
+            abort_if(! $path, 500, 'No se pudo subir el documento de imagen al almacenamiento.');
             return [
                 'path' => $path,
                 'url' => Storage::disk('s3')->url($path),
@@ -470,6 +471,7 @@ class AeronaveControlador extends ControladorBase
         $source = @imagecreatefromstring(file_get_contents($file->getRealPath()));
         if (! $source) {
             $path = $file->storeAs($basePath.'/original', $safeName.'.'.$file->getClientOriginalExtension(), 's3');
+            abort_if(! $path, 500, 'No se pudo subir el documento de imagen al almacenamiento.');
             return [
                 'path' => $path,
                 'url' => Storage::disk('s3')->url($path),
@@ -482,7 +484,8 @@ class AeronaveControlador extends ControladorBase
         foreach (['original' => 1600, 'medium' => 800, 'thumb' => 300] as $variant => $maxSide) {
             $binary = $this->resizeImageToWebp($source, $maxSide);
             $path = sprintf('%s/%s/%s-%s.webp', $basePath, $variant, $safeName, $variant);
-            Storage::disk('s3')->put($path, $binary, ['visibility' => 'public', 'ContentType' => 'image/webp']);
+            $stored = Storage::disk('s3')->put($path, $binary, ['visibility' => 'public', 'ContentType' => 'image/webp']);
+            abort_if(! $stored, 500, 'No se pudo subir una variante del documento de imagen al almacenamiento.');
             $paths[$variant] = $path;
         }
 
@@ -523,7 +526,8 @@ class AeronaveControlador extends ControladorBase
     {
         $optimizedPath = $this->optimizePdfIfPossible($file->getRealPath());
         $path = sprintf('%s/original/%s.pdf', $basePath, $safeName);
-        Storage::disk('s3')->put($path, file_get_contents($optimizedPath), ['visibility' => 'public', 'ContentType' => 'application/pdf']);
+        $stored = Storage::disk('s3')->put($path, file_get_contents($optimizedPath), ['visibility' => 'public', 'ContentType' => 'application/pdf']);
+        abort_if(! $stored, 500, 'No se pudo subir el PDF al almacenamiento.');
 
         return [
             'path' => $path,
