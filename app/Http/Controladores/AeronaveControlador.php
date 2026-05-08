@@ -428,7 +428,7 @@ class AeronaveControlador extends ControladorBase
             'file_url' => $stored['url'],
             'document_url' => $stored['url'],
             'thumbnail_url' => $stored['thumbnail_url'] ?? null,
-            'storage_disk' => 's3',
+            'storage_disk' => $stored['disk'] ?? $this->resolveUploadDisk(),
             'storage_path' => $stored['path'],
             'thumbnail_path' => $stored['thumbnail_path'] ?? null,
             'expires_at' => $expiresAt,
@@ -457,12 +457,15 @@ class AeronaveControlador extends ControladorBase
 
     private function storeImageDocumentVariants(UploadedFile $file, string $basePath, string $safeName): array
     {
+        $disk = $this->resolveUploadDisk();
+
         if (! function_exists('imagecreatefromstring') || ! function_exists('imagewebp')) {
-            $path = $file->storeAs($basePath.'/original', $safeName.'.'.$file->getClientOriginalExtension(), 's3');
+            $path = $file->storeAs($basePath.'/original', $safeName.'.'.$file->getClientOriginalExtension(), $disk);
             abort_if(! $path, 500, 'No se pudo subir el documento de imagen al almacenamiento.');
             return [
+                'disk' => $disk,
                 'path' => $path,
-                'url' => Storage::disk('s3')->url($path),
+                'url' => Storage::disk($disk)->url($path),
                 'mime' => $file->getMimeType(),
                 'processed' => false,
             ];
@@ -470,11 +473,12 @@ class AeronaveControlador extends ControladorBase
 
         $source = @imagecreatefromstring(file_get_contents($file->getRealPath()));
         if (! $source) {
-            $path = $file->storeAs($basePath.'/original', $safeName.'.'.$file->getClientOriginalExtension(), 's3');
+            $path = $file->storeAs($basePath.'/original', $safeName.'.'.$file->getClientOriginalExtension(), $disk);
             abort_if(! $path, 500, 'No se pudo subir el documento de imagen al almacenamiento.');
             return [
+                'disk' => $disk,
                 'path' => $path,
-                'url' => Storage::disk('s3')->url($path),
+                'url' => Storage::disk($disk)->url($path),
                 'mime' => $file->getMimeType(),
                 'processed' => false,
             ];
@@ -484,7 +488,7 @@ class AeronaveControlador extends ControladorBase
         foreach (['original' => 1600, 'medium' => 800, 'thumb' => 300] as $variant => $maxSide) {
             $binary = $this->resizeImageToWebp($source, $maxSide);
             $path = sprintf('%s/%s/%s-%s.webp', $basePath, $variant, $safeName, $variant);
-            $stored = Storage::disk('s3')->put($path, $binary, ['visibility' => 'public', 'ContentType' => 'image/webp']);
+            $stored = Storage::disk($disk)->put($path, $binary, ['visibility' => 'public', 'ContentType' => 'image/webp']);
             abort_if(! $stored, 500, 'No se pudo subir una variante del documento de imagen al almacenamiento.');
             $paths[$variant] = $path;
         }
@@ -492,13 +496,14 @@ class AeronaveControlador extends ControladorBase
         imagedestroy($source);
 
         return [
+            'disk' => $disk,
             'path' => $paths['original'],
-            'url' => Storage::disk('s3')->url($paths['original']),
+            'url' => Storage::disk($disk)->url($paths['original']),
             'thumbnail_path' => $paths['thumb'],
-            'thumbnail_url' => Storage::disk('s3')->url($paths['thumb']),
+            'thumbnail_url' => Storage::disk($disk)->url($paths['thumb']),
             'mime' => 'image/webp',
             'processed' => true,
-            'variants' => collect($paths)->map(fn ($path) => Storage::disk('s3')->url($path))->all(),
+            'variants' => collect($paths)->map(fn ($path) => Storage::disk($disk)->url($path))->all(),
         ];
     }
 
@@ -524,14 +529,16 @@ class AeronaveControlador extends ControladorBase
 
     private function storePdfDocument(UploadedFile $file, string $basePath, string $safeName): array
     {
+        $disk = $this->resolveUploadDisk();
         $optimizedPath = $this->optimizePdfIfPossible($file->getRealPath());
         $path = sprintf('%s/original/%s.pdf', $basePath, $safeName);
-        $stored = Storage::disk('s3')->put($path, file_get_contents($optimizedPath), ['visibility' => 'public', 'ContentType' => 'application/pdf']);
+        $stored = Storage::disk($disk)->put($path, file_get_contents($optimizedPath), ['visibility' => 'public', 'ContentType' => 'application/pdf']);
         abort_if(! $stored, 500, 'No se pudo subir el PDF al almacenamiento.');
 
         return [
+            'disk' => $disk,
             'path' => $path,
-            'url' => Storage::disk('s3')->url($path),
+            'url' => Storage::disk($disk)->url($path),
             'mime' => 'application/pdf',
             'processed' => $optimizedPath !== $file->getRealPath(),
         ];
@@ -891,4 +898,7 @@ class AeronaveControlador extends ControladorBase
         return $path;
     }
 }
+
+
+
 
