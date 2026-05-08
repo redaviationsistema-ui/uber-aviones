@@ -5,6 +5,7 @@ namespace App\Http\Controladores\RedAviation;
 use App\Http\Controladores\ControladorBase;
 use App\Modelos\Aeronave;
 use App\Modelos\DisponibilidadAeronave;
+use App\Modelos\DocumentoAeronave;
 use App\Modelos\Operacion;
 use App\Modelos\Plan;
 use App\Modelos\SolicitudVuelo;
@@ -13,6 +14,7 @@ use App\Servicios\ReintentoCoincidenciaSolicitudServicio;
 use App\Servicios\RedAviation\VisibilidadServicio;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
+use Illuminate\Support\Facades\Storage;
 
 class OperadorControlador extends ControladorBase
 {
@@ -358,6 +360,9 @@ class OperadorControlador extends ControladorBase
             ...$aircraft->toArray(),
             'year' => $aircraft->model_year,
             'amenities' => $this->parseAmenities($aircraft->amenities),
+            'documents' => $aircraft->documents
+                ->map(fn (DocumentoAeronave $document) => $this->formatAircraftDocumentPayload($document))
+                ->values(),
             'main_image' => $images->firstWhere('is_main', true)?->image_url ?? $images->first()?->image_url,
             'images' => $images->map(fn ($image) => [
                 'id' => $image->id,
@@ -417,5 +422,52 @@ class OperadorControlador extends ControladorBase
     {
         $trimmed = trim((string) ($value ?? ''));
         return $trimmed === '' ? null : $trimmed;
+    }
+
+    private function formatAircraftDocumentPayload(DocumentoAeronave $document): array
+    {
+        $resolvedUrl = $this->resolveAircraftDocumentUrl($document);
+        $resolvedThumbnailUrl = $this->resolveAircraftDocumentThumbnailUrl($document);
+
+        return [
+            ...$document->toArray(),
+            'file_url' => $resolvedUrl,
+            'document_url' => $resolvedUrl,
+            'url' => $resolvedUrl,
+            'thumbnail_url' => $resolvedThumbnailUrl,
+        ];
+    }
+
+    private function resolveAircraftDocumentUrl(DocumentoAeronave $document): string
+    {
+        $disk = (string) ($document->storage_disk ?: 'public');
+        $path = (string) ($document->storage_path ?: '');
+
+        if ($disk === 's3' && $path !== '') {
+            try {
+                return Storage::disk('s3')->temporaryUrl($path, now()->addMinutes(30));
+            } catch (\Throwable) {
+                return $document->document_url ?: $document->file_url ?: '';
+            }
+        }
+
+        return $document->document_url ?: $document->file_url ?: '';
+    }
+
+    private function resolveAircraftDocumentThumbnailUrl(DocumentoAeronave $document): ?string
+    {
+        $thumbnailPath = (string) ($document->thumbnail_path ?: '');
+        $thumbnailUrl = $document->thumbnail_url ?: null;
+        $disk = (string) ($document->storage_disk ?: 'public');
+
+        if ($disk === 's3' && $thumbnailPath !== '') {
+            try {
+                return Storage::disk('s3')->temporaryUrl($thumbnailPath, now()->addMinutes(30));
+            } catch (\Throwable) {
+                return $thumbnailUrl;
+            }
+        }
+
+        return $thumbnailUrl;
     }
 }
