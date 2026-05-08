@@ -300,6 +300,13 @@ class OperadorControlador extends ControladorBase
         $aircraftCount = max($fleetCount ?? ($aircraft->provider?->aircraft()->count() ?? 1), 1);
         $monthlyBase = (float) ($resolvedPlan?->price_monthly ?? $resolvedPlan?->price_yearly ?? $resolvedPlan?->price ?? 0);
         $monthlyPerAircraft = $monthlyBase > 0 ? round($monthlyBase / $aircraftCount, 2) : null;
+        $images = $aircraft->images
+            ->sortBy([
+                ['is_main', 'desc'],
+                ['sort_order', 'asc'],
+                ['id', 'asc'],
+            ])
+            ->values();
 
         $activeAircraftSub = $aircraft->relationLoaded('suscripcionesAeronave')
             ? $aircraft->suscripcionesAeronave->first()
@@ -307,14 +314,16 @@ class OperadorControlador extends ControladorBase
 
         return [
             ...$aircraft->toArray(),
-            'main_image' => $aircraft->images
-                ->sortBy([
-                    ['is_main', 'desc'],
-                    ['sort_order', 'asc'],
-                    ['id', 'asc'],
-                ])
-                ->values()
-                ->first()?->image_url,
+            'main_image' => $images->firstWhere('is_main', true)?->image_url ?? $images->first()?->image_url,
+            'images' => $images->map(fn ($image) => [
+                'id' => $image->id,
+                'kind' => $image->kind,
+                'title' => $image->title,
+                'image_url' => $image->image_url,
+                'is_main' => $image->is_main,
+                'visible_to_client' => $image->visible_to_client,
+                'sort_order' => $image->sort_order,
+            ])->values(),
             'aircraft_subscription' => $activeAircraftSub ? [
                 'id' => $activeAircraftSub->id,
                 'plan_id' => $activeAircraftSub->plan_id,

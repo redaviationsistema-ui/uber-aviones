@@ -547,10 +547,26 @@ class AeronaveControlador extends ControladorBase
         $monthlyPerAircraft = $providerAircraftCount > 0 && $monthlyBase > 0
             ? round($monthlyBase / $providerAircraftCount, 2)
             : null;
+        $images = $aircraft->images
+            ->sortBy([
+                ['is_main', 'desc'],
+                ['sort_order', 'asc'],
+                ['id', 'asc'],
+            ])
+            ->values();
 
         return [
             ...$aircraft->toArray(),
-            'main_image' => $this->resolveMainImageUrl($aircraft),
+            'main_image' => $images->firstWhere('is_main', true)?->image_url ?? $images->first()?->image_url,
+            'images' => $images->map(fn (ImagenAeronave $image) => [
+                'id' => $image->id,
+                'kind' => $image->kind,
+                'title' => $image->title,
+                'image_url' => $image->image_url,
+                'is_main' => $image->is_main,
+                'visible_to_client' => $image->visible_to_client,
+                'sort_order' => $image->sort_order,
+            ])->values(),
             'membership_context' => $plan ? [
                 'plan_id' => $plan->id,
                 'plan_name' => $plan->name,
