@@ -7,6 +7,8 @@ use App\Modelos\DisponibilidadAeronave;
 use App\Modelos\DocumentoAeronave;
 use App\Modelos\ImagenAeronave;
 use Carbon\Carbon;
+use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Str;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 
@@ -196,31 +198,63 @@ class AeronaveControlador extends ControladorBase
 
         $data = $request->validate([
             'type' => ['required_without:document_type', 'nullable', 'string', 'max:100'],
-            'file' => ['required_without_all:file_url,document_url', 'nullable', 'file', 'max:20480'],
-            'file_url' => ['required_without_all:file,document_url', 'nullable', 'string', 'max:255'],
             'document_type' => ['required_without:type', 'nullable', 'string', 'max:100'],
+            'file' => ['required_without_all:documents,file_url,document_url', 'nullable', 'file', 'max:25600'],
+            'documents' => ['required_without_all:file,file_url,document_url', 'nullable', 'array', 'max:20'],
+            'documents.*' => ['required', 'file', 'max:25600'],
+            'file_url' => ['required_without_all:file,documents,document_url', 'nullable', 'string', 'max:255'],
+            'document_url' => ['required_without_all:file,documents,file_url', 'nullable', 'string'],
             'document_name' => ['nullable', 'string', 'max:150'],
-            'document_url' => ['required_without_all:file,file_url', 'nullable', 'string'],
             'expires_at' => ['nullable', 'date'],
+            'notes' => ['nullable', 'string'],
         ]);
 
+        $documentType = $data['document_type'] ?? $data['type'];
+        $uploadedFiles = $request->file('documents') ?: [];
         if ($request->hasFile('file')) {
-            $path = $request->file('file')->store('aircraft-documents', 's3');
-            $documentUrl = Storage::disk('s3')->url($path);
-            $data['file_url'] = $documentUrl;
-            $data['document_url'] = $documentUrl;
-            $data['document_name'] = $data['document_name'] ?? $request->file('file')->getClientOriginalName();
+            $uploadedFiles[] = $request->file('file');
         }
 
-        $data['type'] = $data['type'] ?? $data['document_type'];
-        $data['file_url'] = $data['file_url'] ?? $data['document_url'];
-        $data['document_type'] = $data['document_type'] ?? $data['type'];
-        $data['document_url'] = $data['document_url'] ?? $data['file_url'];
+        $createdDocuments = [];
 
-        $document = $aircraft->documents()->create($data);
+        foreach ($uploadedFiles as $file) {
+            $createdDocuments[] = $this->storeAircraftDocumentFile(
+                $aircraft,
+                $file,
+                $documentType,
+                $data['expires_at'] ?? null,
+                $data['document_name'] ?? null,
+                $data['notes'] ?? null,
+            );
+        }
+
+        if (! empty($createdDocuments)) {
+            return $this->ok([
+                'documents' => $createdDocuments,
+                'document' => $createdDocuments[0],
+                'uploaded' => count($createdDocuments),
+                'url' => $createdDocuments[0]->document_url,
+            ], 201);
+        }
+
+        $documentUrl = $data['file_url'] ?? $data['document_url'];
+        $document = $aircraft->documents()->create([
+            'provider_id' => $aircraft->provider_id,
+            'type' => $documentType,
+            'document_type' => $documentType,
+            'document_name' => $data['document_name'] ?? basename((string) parse_url($documentUrl, PHP_URL_PATH)),
+            'file_url' => $documentUrl,
+            'document_url' => $documentUrl,
+            'file_type' => $this->guessFileTypeFromUrl($documentUrl),
+            'expires_at' => $data['expires_at'] ?? null,
+            'status' => 'pending',
+            'verified_by_admin' => false,
+            'notes' => $data['notes'] ?? null,
+        ]);
 
         return $this->ok([
             'document' => $document,
+            'uploaded' => 1,
             'url' => $document->document_url,
         ], 201);
     }
@@ -230,9 +264,15 @@ class AeronaveControlador extends ControladorBase
         $this->authorizeProveedorAeronave($request, $aircraft);
         abort_if($document->aircraft_id !== $aircraft->id, 404);
 
-        $path = $this->resolveS3Path($document->document_url ?: $document->file_url);
-        if ($path) {
-            Storage::disk('s3')->delete($path);
+        $paths = array_filter([
+            $document->storage_path,
+            $document->thumbnail_path,
+            $this->resolveS3Path($document->document_url ?: $document->file_url),
+            $this->resolveS3Path($document->thumbnail_url ?: ''),
+        ]);
+
+        if ($paths) {
+            Storage::disk('s3')->delete(array_values(array_unique($paths)));
         }
 
         $document->delete();
@@ -273,6 +313,198 @@ class AeronaveControlador extends ControladorBase
         return $this->ok(['message' => 'Disponibilidad eliminada.']);
     }
 
+
+    private function storeAircraftDocumentFile(Aeronave $aircraft, UploadedFile $file, string $documentType, ?string $expiresAt, ?string $documentName, ?string $notes): DocumentoAeronave
+    {
+        $kind = $this->resolveDocumentFileKind($file);
+        abort_if(! in_array($kind, ['image', 'pdf'], true), 422, 'Formato no permitido. Usa imagen o PDF.');
+        abort_if($kind === 'image' && $file->getSize() > 8 * 1024 * 1024, 422, 'Las imagenes no pueden superar 8MB.');
+        abort_if($kind === 'pdf' && $file->getSize() > 25 * 1024 * 1024, 422, 'Los PDF no pueden superar 25MB.');
+
+        $safeType = Str::slug($documentType, '_') ?: 'documento';
+        $safeName = Str::slug(pathinfo($file->getClientOriginalName(), PATHINFO_FILENAME), '_') ?: 'archivo';
+        $basePath = sprintf('provider/%s/aircraft/%s/documents/%s', $aircraft->provider_id, $aircraft->id, $safeType);
+        $metadata = [
+            'original_name' => $file->getClientOriginalName(),
+            'original_mime' => $file->getMimeType(),
+            'original_size' => $file->getSize(),
+            'variants' => [],
+        ];
+
+        $stored = $kind === 'image'
+            ? $this->storeImageDocumentVariants($file, $basePath, $safeName)
+            : $this->storePdfDocument($file, $basePath, $safeName);
+
+        $metadata['variants'] = $stored['variants'] ?? [];
+        $metadata['processed'] = $stored['processed'] ?? false;
+
+        return $aircraft->documents()->create([
+            'provider_id' => $aircraft->provider_id,
+            'type' => $documentType,
+            'document_type' => $documentType,
+            'document_name' => $documentName ?: $file->getClientOriginalName(),
+            'file_type' => $stored['mime'] ?? $file->getMimeType(),
+            'file_url' => $stored['url'],
+            'document_url' => $stored['url'],
+            'thumbnail_url' => $stored['thumbnail_url'] ?? null,
+            'storage_disk' => 's3',
+            'storage_path' => $stored['path'],
+            'thumbnail_path' => $stored['thumbnail_path'] ?? null,
+            'expires_at' => $expiresAt,
+            'status' => 'pending',
+            'verified_by_admin' => false,
+            'notes' => $notes,
+            'metadata' => $metadata,
+        ]);
+    }
+
+    private function resolveDocumentFileKind(UploadedFile $file): string
+    {
+        $mime = strtolower((string) $file->getMimeType());
+        $extension = strtolower($file->getClientOriginalExtension());
+
+        if ($mime === 'application/pdf' || $extension === 'pdf') {
+            return 'pdf';
+        }
+
+        if (str_starts_with($mime, 'image/') || in_array($extension, ['jpg', 'jpeg', 'png', 'webp', 'heic', 'heif'], true)) {
+            return 'image';
+        }
+
+        return 'other';
+    }
+
+    private function storeImageDocumentVariants(UploadedFile $file, string $basePath, string $safeName): array
+    {
+        if (! function_exists('imagecreatefromstring') || ! function_exists('imagewebp')) {
+            $path = $file->storeAs($basePath.'/original', $safeName.'.'.$file->getClientOriginalExtension(), 's3');
+            return [
+                'path' => $path,
+                'url' => Storage::disk('s3')->url($path),
+                'mime' => $file->getMimeType(),
+                'processed' => false,
+            ];
+        }
+
+        $source = @imagecreatefromstring(file_get_contents($file->getRealPath()));
+        if (! $source) {
+            $path = $file->storeAs($basePath.'/original', $safeName.'.'.$file->getClientOriginalExtension(), 's3');
+            return [
+                'path' => $path,
+                'url' => Storage::disk('s3')->url($path),
+                'mime' => $file->getMimeType(),
+                'processed' => false,
+            ];
+        }
+
+        $paths = [];
+        foreach (['original' => 1600, 'medium' => 800, 'thumb' => 300] as $variant => $maxSide) {
+            $binary = $this->resizeImageToWebp($source, $maxSide);
+            $path = sprintf('%s/%s/%s-%s.webp', $basePath, $variant, $safeName, $variant);
+            Storage::disk('s3')->put($path, $binary, ['visibility' => 'public', 'ContentType' => 'image/webp']);
+            $paths[$variant] = $path;
+        }
+
+        imagedestroy($source);
+
+        return [
+            'path' => $paths['original'],
+            'url' => Storage::disk('s3')->url($paths['original']),
+            'thumbnail_path' => $paths['thumb'],
+            'thumbnail_url' => Storage::disk('s3')->url($paths['thumb']),
+            'mime' => 'image/webp',
+            'processed' => true,
+            'variants' => collect($paths)->map(fn ($path) => Storage::disk('s3')->url($path))->all(),
+        ];
+    }
+
+    private function resizeImageToWebp($source, int $maxSide): string
+    {
+        $width = imagesx($source);
+        $height = imagesy($source);
+        $scale = min(1, $maxSide / max($width, $height));
+        $targetWidth = max(1, (int) round($width * $scale));
+        $targetHeight = max(1, (int) round($height * $scale));
+        $canvas = imagecreatetruecolor($targetWidth, $targetHeight);
+        imagealphablending($canvas, false);
+        imagesavealpha($canvas, true);
+        imagecopyresampled($canvas, $source, 0, 0, 0, 0, $targetWidth, $targetHeight, $width, $height);
+
+        ob_start();
+        imagewebp($canvas, null, 84);
+        $binary = (string) ob_get_clean();
+        imagedestroy($canvas);
+
+        return $binary;
+    }
+
+    private function storePdfDocument(UploadedFile $file, string $basePath, string $safeName): array
+    {
+        $optimizedPath = $this->optimizePdfIfPossible($file->getRealPath());
+        $path = sprintf('%s/original/%s.pdf', $basePath, $safeName);
+        Storage::disk('s3')->put($path, file_get_contents($optimizedPath), ['visibility' => 'public', 'ContentType' => 'application/pdf']);
+
+        return [
+            'path' => $path,
+            'url' => Storage::disk('s3')->url($path),
+            'mime' => 'application/pdf',
+            'processed' => $optimizedPath !== $file->getRealPath(),
+        ];
+    }
+
+    private function optimizePdfIfPossible(string $sourcePath): string
+    {
+        $targetPath = tempnam(sys_get_temp_dir(), 'ra_pdf_').'.pdf';
+
+        if ($this->commandExists('qpdf')) {
+            $command = sprintf('qpdf --linearize %s %s', escapeshellarg($sourcePath), escapeshellarg($targetPath));
+            exec($command, $output, $exitCode);
+            if ($exitCode === 0 && is_file($targetPath) && filesize($targetPath) > 0) {
+                return $targetPath;
+            }
+        }
+
+        if ($this->commandExists('gs')) {
+            $command = sprintf(
+                'gs -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dPDFSETTINGS=/ebook -dNOPAUSE -dQUIET -dBATCH -sOutputFile=%s %s',
+                escapeshellarg($targetPath),
+                escapeshellarg($sourcePath)
+            );
+            exec($command, $output, $exitCode);
+            if ($exitCode === 0 && is_file($targetPath) && filesize($targetPath) > 0) {
+                return $targetPath;
+            }
+        }
+
+        return $sourcePath;
+    }
+
+    private function commandExists(string $command): bool
+    {
+        if (! function_exists('exec')) {
+            return false;
+        }
+
+        $probe = strtoupper(substr(PHP_OS, 0, 3)) === 'WIN'
+            ? sprintf('where %s', escapeshellarg($command))
+            : sprintf('command -v %s', escapeshellarg($command));
+        exec($probe, $output, $exitCode);
+
+        return $exitCode === 0;
+    }
+
+    private function guessFileTypeFromUrl(string $url): ?string
+    {
+        $extension = strtolower(pathinfo((string) parse_url($url, PHP_URL_PATH), PATHINFO_EXTENSION));
+
+        return match ($extension) {
+            'pdf' => 'application/pdf',
+            'webp' => 'image/webp',
+            'jpg', 'jpeg' => 'image/jpeg',
+            'png' => 'image/png',
+            default => null,
+        };
+    }
     private function rules(bool $creating = true): array
     {
         $required = $creating ? 'required' : 'sometimes';
@@ -407,3 +639,4 @@ class AeronaveControlador extends ControladorBase
         return $path;
     }
 }
+
