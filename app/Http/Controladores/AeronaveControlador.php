@@ -36,7 +36,7 @@ class AeronaveControlador extends ControladorBase
         $provider = $request->user()->provider;
         abort_if(! $provider, 422, 'El usuario proveedor no tiene provider_id asignado.');
 
-        $data = $request->validate($this->rules());
+        $data = $this->normalizeAircraftInput($request->validate($this->rules()));
         $isApproved = $provider->approval_status === 'approved';
         $aircraft = $provider->aircraft()->create($data + [
             'status' => $isApproved ? 'active' : 'blocked',
@@ -67,7 +67,7 @@ class AeronaveControlador extends ControladorBase
     {
         $this->authorizeProveedorAeronave($request, $aircraft);
 
-        $aircraft->update($request->validate($this->rules(false)));
+        $aircraft->update($this->normalizeAircraftInput($request->validate($this->rules(false))));
 
         return $this->ok([
             'aircraft' => $this->formatAircraftPayload(
@@ -586,18 +586,41 @@ class AeronaveControlador extends ControladorBase
             default => null,
         };
     }
+
+    private function normalizeAircraftInput(array $data): array
+    {
+        if (! array_key_exists('model_year', $data) && array_key_exists('year', $data)) {
+            $data['model_year'] = $data['year'];
+        }
+
+        unset($data['year']);
+
+        if (array_key_exists('amenities', $data) && is_array($data['amenities'])) {
+            $data['amenities'] = implode(', ', array_filter(array_map('trim', $data['amenities'])));
+        }
+
+        return $data;
+    }
+
     private function rules(bool $creating = true): array
     {
         $required = $creating ? 'required' : 'sometimes';
 
         return [
             'model' => [$required, 'string', 'max:255'],
+            'manufacturer' => ['nullable', 'string', 'max:255'],
+            'model_year' => ['nullable', 'integer', 'min:1900', 'max:2100'],
+            'year' => ['nullable', 'integer', 'min:1900', 'max:2100'],
             'registration' => [$required, 'string', 'max:50'],
             'capacity' => [$required, 'integer', 'min:1'],
             'base_airport' => [$required, 'string', 'max:20'],
             'range_km' => ['nullable', 'integer', 'min:0'],
             'speed_kmh' => ['nullable', 'integer', 'min:0'],
+            'coverage' => ['nullable', 'string', 'max:255'],
+            'amenities' => ['nullable'],
             'hourly_rate' => [$required, 'numeric', 'min:0'],
+            'minimum_hours' => ['nullable', 'numeric', 'min:0'],
+            'operational_cost' => ['nullable', 'numeric', 'min:0'],
             'currency' => ['sometimes', 'string', 'size:3'],
             'status' => ['sometimes', 'in:active,inactive,maintenance,blocked'],
             'security_filter' => ['nullable', 'string', 'max:50'],
@@ -633,6 +656,7 @@ class AeronaveControlador extends ControladorBase
 
         return [
             ...$aircraft->toArray(),
+            'year' => $aircraft->model_year,
             'main_image' => $images->firstWhere('is_main', true)?->image_url ?? $images->first()?->image_url,
             'images' => $images->map(fn (ImagenAeronave $image) => [
                 'id' => $image->id,

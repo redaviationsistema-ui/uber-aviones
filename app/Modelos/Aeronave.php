@@ -16,12 +16,18 @@ class Aeronave extends Model
     protected $fillable = [
         'provider_id',
         'model',
+        'manufacturer',
+        'model_year',
         'registration',
         'capacity',
         'base_airport',
         'range_km',
         'speed_kmh',
+        'coverage',
+        'amenities',
         'hourly_rate',
+        'minimum_hours',
+        'operational_cost',
         'currency',
         'status',
         'security_filter',
@@ -40,7 +46,10 @@ class Aeronave extends Model
     protected function casts(): array
     {
         return [
+            'model_year' => 'integer',
             'hourly_rate' => 'decimal:2',
+            'minimum_hours' => 'decimal:2',
+            'operational_cost' => 'decimal:2',
             'security_score' => 'integer',
             'last_maintenance_at' => 'date',
             'engine_run_at' => 'date',
