@@ -547,12 +547,10 @@ class AeronaveControlador extends ControladorBase
     private function storePdfDocument(UploadedFile $file, string $basePath, string $safeName): array
     {
         $disk = $this->resolveUploadDisk();
-        $optimizedPath = $this->optimizePdfIfPossible($file->getRealPath());
-        $path = sprintf('%s/original/%s.pdf', $basePath, $safeName);
-        [$resolvedDisk, $storedPath] = $this->storeBinaryWithFallback(
-            $path,
-            file_get_contents($optimizedPath),
-            ['visibility' => 'public', 'ContentType' => 'application/pdf'],
+        [$resolvedDisk, $storedPath] = $this->storeUploadedFileWithFallback(
+            $file,
+            $basePath.'/original',
+            $safeName.'.pdf',
             $disk,
             'No se pudo subir el PDF al almacenamiento.'
         );
@@ -562,49 +560,8 @@ class AeronaveControlador extends ControladorBase
             'path' => $storedPath,
             'url' => $this->resolveStoredFileUrl($resolvedDisk, $storedPath),
             'mime' => 'application/pdf',
-            'processed' => $optimizedPath !== $file->getRealPath(),
+            'processed' => false,
         ];
-    }
-
-    private function optimizePdfIfPossible(string $sourcePath): string
-    {
-        $targetPath = tempnam(sys_get_temp_dir(), 'ra_pdf_').'.pdf';
-
-        if ($this->commandExists('qpdf')) {
-            $command = sprintf('qpdf --linearize %s %s', escapeshellarg($sourcePath), escapeshellarg($targetPath));
-            exec($command, $output, $exitCode);
-            if ($exitCode === 0 && is_file($targetPath) && filesize($targetPath) > 0) {
-                return $targetPath;
-            }
-        }
-
-        if ($this->commandExists('gs')) {
-            $command = sprintf(
-                'gs -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dPDFSETTINGS=/ebook -dNOPAUSE -dQUIET -dBATCH -sOutputFile=%s %s',
-                escapeshellarg($targetPath),
-                escapeshellarg($sourcePath)
-            );
-            exec($command, $output, $exitCode);
-            if ($exitCode === 0 && is_file($targetPath) && filesize($targetPath) > 0) {
-                return $targetPath;
-            }
-        }
-
-        return $sourcePath;
-    }
-
-    private function commandExists(string $command): bool
-    {
-        if (! function_exists('exec')) {
-            return false;
-        }
-
-        $probe = strtoupper(substr(PHP_OS, 0, 3)) === 'WIN'
-            ? sprintf('where %s', escapeshellarg($command))
-            : sprintf('command -v %s', escapeshellarg($command));
-        exec($probe, $output, $exitCode);
-
-        return $exitCode === 0;
     }
 
     private function guessFileTypeFromUrl(string $url): ?string
@@ -885,6 +842,7 @@ class AeronaveControlador extends ControladorBase
     private function storeBinaryWithFallback(string $path, string $contents, array $options, ?string $preferredDisk, string $errorMessage): array
     {
         $disk = $preferredDisk ?: $this->resolveUploadDisk();
+        $options = $this->normalizeStorageOptions($disk, $options);
 
         try {
             $stored = Storage::disk($disk)->put($path, $contents, $options);
@@ -921,6 +879,18 @@ class AeronaveControlador extends ControladorBase
 
             abort(500, $errorMessage.' Disco probado: '.$disk);
         }
+    }
+
+    private function normalizeStorageOptions(string $disk, array $options): array
+    {
+        if ($disk !== 's3') {
+            return $options;
+        }
+
+        $normalized = $options;
+        unset($normalized['visibility']);
+
+        return $normalized;
     }
 
     private function resolveUniqueDocumentUploads(Request $request): array
