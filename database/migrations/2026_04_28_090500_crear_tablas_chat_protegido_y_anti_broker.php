@@ -47,7 +47,7 @@ return new class extends Migration
             });
         }
     }
-
+// DEMO
     public function down(): void
     {
         Schema::dropIfExists('anti_broker_flags');
