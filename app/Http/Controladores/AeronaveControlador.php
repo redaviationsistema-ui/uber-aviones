@@ -11,6 +11,7 @@ use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Str;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 
 class AeronaveControlador extends ControladorBase
@@ -906,9 +907,24 @@ class AeronaveControlador extends ControladorBase
             try {
                 $stored = Storage::disk($disk)->put($path, $contents, $options);
                 if ($stored) {
+                    if (! empty($attempted)) {
+                        Log::warning('Archivo almacenado usando disco de respaldo.', [
+                            'preferred_disk' => $preferredDisk ?: $this->resolveUploadDisk(),
+                            'resolved_disk' => $disk,
+                            'path' => $path,
+                            'attempted_disks' => $attempted,
+                        ]);
+                    }
+
                     return [$disk, $path];
                 }
             } catch (\Throwable $exception) {
+                Log::warning('Fallo al almacenar archivo en disco.', [
+                    'disk' => $disk,
+                    'path' => $path,
+                    'message' => $exception->getMessage(),
+                    'exception' => get_class($exception),
+                ]);
             }
 
             $attempted[] = $disk;
@@ -925,9 +941,26 @@ class AeronaveControlador extends ControladorBase
             try {
                 $path = $file->storeAs($directory, $filename, $disk);
                 if ($path) {
+                    if (! empty($attempted)) {
+                        Log::warning('Archivo subido usando disco de respaldo.', [
+                            'preferred_disk' => $preferredDisk ?: $this->resolveUploadDisk(),
+                            'resolved_disk' => $disk,
+                            'directory' => $directory,
+                            'filename' => $filename,
+                            'attempted_disks' => $attempted,
+                        ]);
+                    }
+
                     return [$disk, $path];
                 }
             } catch (\Throwable $exception) {
+                Log::warning('Fallo al subir archivo en disco.', [
+                    'disk' => $disk,
+                    'directory' => $directory,
+                    'filename' => $filename,
+                    'message' => $exception->getMessage(),
+                    'exception' => get_class($exception),
+                ]);
             }
 
             $attempted[] = $disk;
