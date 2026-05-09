@@ -57,3 +57,8 @@ Route::prefix('proveedor')->middleware(['auth.token', 'role:provider,admin'])->g
     Route::get('/historial', [ProveedorControlador::class, 'history']);
     Route::get('/notificaciones', [NotificacionControlador::class, 'index']);
 });
+
+Route::prefix('provider')->middleware(['auth.token', 'role:provider,admin'])->group(function () {
+    Route::post('/aircraft/{aircraft}/documents', [AeronaveControlador::class, 'storeDocument']);
+    Route::delete('/aircraft/{aircraft}/documents/{document}', [AeronaveControlador::class, 'destroyDocument']);
+});

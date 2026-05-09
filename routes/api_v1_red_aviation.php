@@ -29,6 +29,7 @@ Route::middleware(['auth.token'])->group(function () {
 
     Route::prefix('operator')->middleware(['role:provider,admin'])->group(function () {
         Route::post('/aircraft', [OperadorControlador::class, 'storeAircraft']);
+        Route::post('/aircraft/{aircraft}/documents', [AeronaveControlador::class, 'storeDocument']);
     });
 
     Route::prefix('operator')->middleware(['role:provider,admin', 'operator.verified'])->group(function () {
@@ -40,7 +41,6 @@ Route::middleware(['auth.token'])->group(function () {
         Route::post('/aircraft/{aircraft}/subscribe', [OperadorControlador::class, 'subscribeAircraft']);
         Route::post('/aircraft/{aircraft}/images', [AeronaveControlador::class, 'storeImage']);
         Route::post('/aircraft/{aircraft}/images/attach-existing', [AeronaveControlador::class, 'attachExistingImage']);
-        Route::post('/aircraft/{aircraft}/documents', [AeronaveControlador::class, 'storeDocument']);
         Route::delete('/aircraft/{aircraft}/images/{image}', [AeronaveControlador::class, 'destroyImage']);
         Route::post('/availability', [OperadorControlador::class, 'storeAvailability']);
         Route::get('/my-requests', [OperadorControlador::class, 'requests']);

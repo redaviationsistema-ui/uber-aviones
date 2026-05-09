@@ -67,6 +67,56 @@ class AeronaveDocumentoS3Test extends TestCase
         ]);
     }
 
+    public function test_pending_provider_can_upload_aircraft_document_while_aircraft_remains_blocked(): void
+    {
+        Storage::fake('s3');
+        config()->set('filesystems.disks.s3.url', 'https://red-aviation-docs.s3.us-east-1.amazonaws.com');
+
+        $this->seed();
+
+        $user = Usuario::factory()->create([
+            'role' => 'provider',
+            'status' => 'active',
+        ]);
+
+        $user->provider()->create([
+            'company_name' => 'Red Aviation Pending',
+            'commercial_name' => 'Red Aviation Pending',
+            'approval_status' => 'pending',
+        ]);
+
+        $aircraft = Aeronave::factory()->create([
+            'provider_id' => $user->provider->id,
+            'status' => 'blocked',
+        ]);
+
+        $token = TokenApi::issue($user);
+
+        $response = $this->withToken($token)
+            ->post('/api/v1/operator/aircraft/'.$aircraft->id.'/documents', [
+                'file' => UploadedFile::fake()->create('sticker.pdf', 120, 'application/pdf'),
+                'type' => 'maintenance_sticker',
+                'document_name' => 'Sticker de mantenimiento',
+            ]);
+
+        $response->assertCreated()
+            ->assertJsonPath('success', true)
+            ->assertJsonPath('document.aircraft_id', $aircraft->id)
+            ->assertJsonPath('document.document_type', 'maintenance_sticker')
+            ->assertJsonPath('document.document_name', 'Sticker de mantenimiento');
+
+        $this->assertDatabaseHas('aircraft_documents', [
+            'aircraft_id' => $aircraft->id,
+            'document_type' => 'maintenance_sticker',
+            'document_name' => 'Sticker de mantenimiento',
+        ]);
+
+        $this->assertDatabaseHas('aircraft', [
+            'id' => $aircraft->id,
+            'status' => 'blocked',
+        ]);
+    }
+
     public function test_provider_can_delete_aircraft_document_and_remove_file_from_s3(): void
     {
         Storage::fake('s3');
