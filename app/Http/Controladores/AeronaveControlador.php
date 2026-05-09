@@ -940,7 +940,7 @@ class AeronaveControlador extends ControladorBase
     {
         $url = Storage::disk($disk)->url($path);
 
-        if ($disk !== 'public') {
+        if ($disk !== 'public' || preg_match('/^(https?:)?\/\//i', $url)) {
             return $url;
         }
 
@@ -953,11 +953,13 @@ class AeronaveControlador extends ControladorBase
             return '';
         }
 
-        if ($disk !== 'public') {
-            return Storage::disk($disk)->url($path);
+        $url = Storage::disk($disk)->url($path);
+
+        if ($disk !== 'public' || preg_match('/^(https?:)?\/\//i', $url)) {
+            return $url;
         }
 
-        return rtrim($request->getSchemeAndHttpHost(), '/').Storage::disk('public')->url($path);
+        return rtrim($request->getSchemeAndHttpHost(), '/').$url;
     }
 
     private function resolveS3Path(string $url): ?string
