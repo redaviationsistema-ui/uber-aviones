@@ -460,12 +460,17 @@ class AeronaveControlador extends ControladorBase
         $disk = $this->resolveUploadDisk();
 
         if (! function_exists('imagecreatefromstring') || ! function_exists('imagewebp')) {
-            $path = $file->storeAs($basePath.'/original', $safeName.'.'.$file->getClientOriginalExtension(), $disk);
-            abort_if(! $path, 500, 'No se pudo subir el documento de imagen al almacenamiento.');
+            [$resolvedDisk, $path] = $this->storeUploadedFileWithFallback(
+                $file,
+                $basePath.'/original',
+                $safeName.'.'.$file->getClientOriginalExtension(),
+                $disk,
+                'No se pudo subir el documento de imagen al almacenamiento.'
+            );
             return [
-                'disk' => $disk,
+                'disk' => $resolvedDisk,
                 'path' => $path,
-                'url' => Storage::disk($disk)->url($path),
+                'url' => $this->resolveStoredFileUrl($resolvedDisk, $path),
                 'mime' => $file->getMimeType(),
                 'processed' => false,
             ];
@@ -473,37 +478,51 @@ class AeronaveControlador extends ControladorBase
 
         $source = @imagecreatefromstring(file_get_contents($file->getRealPath()));
         if (! $source) {
-            $path = $file->storeAs($basePath.'/original', $safeName.'.'.$file->getClientOriginalExtension(), $disk);
-            abort_if(! $path, 500, 'No se pudo subir el documento de imagen al almacenamiento.');
+            [$resolvedDisk, $path] = $this->storeUploadedFileWithFallback(
+                $file,
+                $basePath.'/original',
+                $safeName.'.'.$file->getClientOriginalExtension(),
+                $disk,
+                'No se pudo subir el documento de imagen al almacenamiento.'
+            );
             return [
-                'disk' => $disk,
+                'disk' => $resolvedDisk,
                 'path' => $path,
-                'url' => Storage::disk($disk)->url($path),
+                'url' => $this->resolveStoredFileUrl($resolvedDisk, $path),
                 'mime' => $file->getMimeType(),
                 'processed' => false,
             ];
         }
 
+        $resolvedDisk = $disk;
         $paths = [];
         foreach (['original' => 1600, 'medium' => 800, 'thumb' => 300] as $variant => $maxSide) {
             $binary = $this->resizeImageToWebp($source, $maxSide);
             $path = sprintf('%s/%s/%s-%s.webp', $basePath, $variant, $safeName, $variant);
-            $stored = Storage::disk($disk)->put($path, $binary, ['visibility' => 'public', 'ContentType' => 'image/webp']);
-            abort_if(! $stored, 500, 'No se pudo subir una variante del documento de imagen al almacenamiento.');
-            $paths[$variant] = $path;
+            [$resolvedDisk, $storedPath] = $this->storeBinaryWithFallback(
+                $path,
+                $binary,
+                ['visibility' => 'public', 'ContentType' => 'image/webp'],
+                $resolvedDisk,
+                'No se pudo subir una variante del documento de imagen al almacenamiento.'
+            );
+            if ($variant === 'original') {
+                $paths = [];
+            }
+            $paths[$variant] = $storedPath;
         }
 
         imagedestroy($source);
 
         return [
-            'disk' => $disk,
+            'disk' => $resolvedDisk,
             'path' => $paths['original'],
-            'url' => Storage::disk($disk)->url($paths['original']),
+            'url' => $this->resolveStoredFileUrl($resolvedDisk, $paths['original']),
             'thumbnail_path' => $paths['thumb'],
-            'thumbnail_url' => Storage::disk($disk)->url($paths['thumb']),
+            'thumbnail_url' => $this->resolveStoredFileUrl($resolvedDisk, $paths['thumb']),
             'mime' => 'image/webp',
             'processed' => true,
-            'variants' => collect($paths)->map(fn ($path) => Storage::disk($disk)->url($path))->all(),
+            'variants' => collect($paths)->map(fn ($path) => $this->resolveStoredFileUrl($resolvedDisk, $path))->all(),
         ];
     }
 
@@ -532,13 +551,18 @@ class AeronaveControlador extends ControladorBase
         $disk = $this->resolveUploadDisk();
         $optimizedPath = $this->optimizePdfIfPossible($file->getRealPath());
         $path = sprintf('%s/original/%s.pdf', $basePath, $safeName);
-        $stored = Storage::disk($disk)->put($path, file_get_contents($optimizedPath), ['visibility' => 'public', 'ContentType' => 'application/pdf']);
-        abort_if(! $stored, 500, 'No se pudo subir el PDF al almacenamiento.');
+        [$resolvedDisk, $storedPath] = $this->storeBinaryWithFallback(
+            $path,
+            file_get_contents($optimizedPath),
+            ['visibility' => 'public', 'ContentType' => 'application/pdf'],
+            $disk,
+            'No se pudo subir el PDF al almacenamiento.'
+        );
 
         return [
-            'disk' => $disk,
-            'path' => $path,
-            'url' => Storage::disk($disk)->url($path),
+            'disk' => $resolvedDisk,
+            'path' => $storedPath,
+            'url' => $this->resolveStoredFileUrl($resolvedDisk, $storedPath),
             'mime' => 'application/pdf',
             'processed' => $optimizedPath !== $file->getRealPath(),
         ];
@@ -860,6 +884,67 @@ class AeronaveControlador extends ControladorBase
         $hasS3Credentials = filled(env('AWS_ACCESS_KEY_ID')) && filled(env('AWS_SECRET_ACCESS_KEY')) && filled(env('AWS_BUCKET'));
 
         return $hasS3Credentials ? 's3' : 'public';
+    }
+
+    private function resolveUploadDiskCandidates(?string $preferredDisk = null): array
+    {
+        $primary = $preferredDisk ?: $this->resolveUploadDisk();
+        $candidates = [$primary];
+
+        if ($primary === 's3') {
+            $candidates[] = 'public';
+        }
+
+        return array_values(array_unique(array_filter($candidates)));
+    }
+
+    private function storeBinaryWithFallback(string $path, string $contents, array $options, ?string $preferredDisk, string $errorMessage): array
+    {
+        $attempted = [];
+
+        foreach ($this->resolveUploadDiskCandidates($preferredDisk) as $disk) {
+            try {
+                $stored = Storage::disk($disk)->put($path, $contents, $options);
+                if ($stored) {
+                    return [$disk, $path];
+                }
+            } catch (\Throwable $exception) {
+            }
+
+            $attempted[] = $disk;
+        }
+
+        abort(500, $errorMessage.' Discos probados: '.implode(', ', $attempted));
+    }
+
+    private function storeUploadedFileWithFallback(UploadedFile $file, string $directory, string $filename, ?string $preferredDisk, string $errorMessage): array
+    {
+        $attempted = [];
+
+        foreach ($this->resolveUploadDiskCandidates($preferredDisk) as $disk) {
+            try {
+                $path = $file->storeAs($directory, $filename, $disk);
+                if ($path) {
+                    return [$disk, $path];
+                }
+            } catch (\Throwable $exception) {
+            }
+
+            $attempted[] = $disk;
+        }
+
+        abort(500, $errorMessage.' Discos probados: '.implode(', ', $attempted));
+    }
+
+    private function resolveStoredFileUrl(string $disk, string $path): string
+    {
+        $url = Storage::disk($disk)->url($path);
+
+        if ($disk !== 'public') {
+            return $url;
+        }
+
+        return rtrim((string) config('app.url'), '/').$url;
     }
 
     private function resolveUploadedFileUrl(Request $request, string $disk, string|false $path): string
