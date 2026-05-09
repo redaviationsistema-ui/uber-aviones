@@ -292,10 +292,7 @@ class AeronaveControlador extends ControladorBase
         ]);
 
         $documentType = $data['document_type'] ?? $data['type'];
-        $uploadedFiles = $request->file('documents') ?: [];
-        if ($request->hasFile('file')) {
-            $uploadedFiles[] = $request->file('file');
-        }
+        $uploadedFiles = $this->resolveUniqueDocumentUploads($request);
 
         $createdDocuments = [];
 
@@ -876,97 +873,86 @@ class AeronaveControlador extends ControladorBase
 
     private function resolveUploadDisk(): string
     {
-        $defaultDisk = (string) config('filesystems.default', 'public');
+        abort_unless(
+            filled(env('AWS_ACCESS_KEY_ID')) && filled(env('AWS_SECRET_ACCESS_KEY')) && filled(env('AWS_BUCKET')),
+            500,
+            'Falta configuracion de AWS S3 en el servidor.'
+        );
 
-        if ($defaultDisk !== 's3') {
-            return $defaultDisk;
-        }
-
-        $hasS3Credentials = filled(env('AWS_ACCESS_KEY_ID')) && filled(env('AWS_SECRET_ACCESS_KEY')) && filled(env('AWS_BUCKET'));
-
-        return $hasS3Credentials ? 's3' : 'public';
-    }
-
-    private function resolveUploadDiskCandidates(?string $preferredDisk = null): array
-    {
-        $primary = $preferredDisk ?: $this->resolveUploadDisk();
-        $candidates = [$primary];
-
-        if ($primary === 's3') {
-            $candidates[] = 'public';
-        }
-
-        return array_values(array_unique(array_filter($candidates)));
+        return 's3';
     }
 
     private function storeBinaryWithFallback(string $path, string $contents, array $options, ?string $preferredDisk, string $errorMessage): array
     {
-        $attempted = [];
+        $disk = $preferredDisk ?: $this->resolveUploadDisk();
 
-        foreach ($this->resolveUploadDiskCandidates($preferredDisk) as $disk) {
-            try {
-                $stored = Storage::disk($disk)->put($path, $contents, $options);
-                if ($stored) {
-                    if (! empty($attempted)) {
-                        Log::warning('Archivo almacenado usando disco de respaldo.', [
-                            'preferred_disk' => $preferredDisk ?: $this->resolveUploadDisk(),
-                            'resolved_disk' => $disk,
-                            'path' => $path,
-                            'attempted_disks' => $attempted,
-                        ]);
-                    }
+        try {
+            $stored = Storage::disk($disk)->put($path, $contents, $options);
+            abort_if(! $stored, 500, $errorMessage.' Disco probado: '.$disk);
+            return [$disk, $path];
+        } catch (\Throwable $exception) {
+            Log::error('Fallo al almacenar archivo en S3.', [
+                'disk' => $disk,
+                'path' => $path,
+                'message' => $exception->getMessage(),
+                'exception' => get_class($exception),
+            ]);
 
-                    return [$disk, $path];
-                }
-            } catch (\Throwable $exception) {
-                Log::warning('Fallo al almacenar archivo en disco.', [
-                    'disk' => $disk,
-                    'path' => $path,
-                    'message' => $exception->getMessage(),
-                    'exception' => get_class($exception),
-                ]);
-            }
-
-            $attempted[] = $disk;
+            abort(500, $errorMessage.' Disco probado: '.$disk);
         }
-
-        abort(500, $errorMessage.' Discos probados: '.implode(', ', $attempted));
     }
 
     private function storeUploadedFileWithFallback(UploadedFile $file, string $directory, string $filename, ?string $preferredDisk, string $errorMessage): array
     {
-        $attempted = [];
+        $disk = $preferredDisk ?: $this->resolveUploadDisk();
 
-        foreach ($this->resolveUploadDiskCandidates($preferredDisk) as $disk) {
-            try {
-                $path = $file->storeAs($directory, $filename, $disk);
-                if ($path) {
-                    if (! empty($attempted)) {
-                        Log::warning('Archivo subido usando disco de respaldo.', [
-                            'preferred_disk' => $preferredDisk ?: $this->resolveUploadDisk(),
-                            'resolved_disk' => $disk,
-                            'directory' => $directory,
-                            'filename' => $filename,
-                            'attempted_disks' => $attempted,
-                        ]);
-                    }
+        try {
+            $path = $file->storeAs($directory, $filename, $disk);
+            abort_if(! $path, 500, $errorMessage.' Disco probado: '.$disk);
+            return [$disk, $path];
+        } catch (\Throwable $exception) {
+            Log::error('Fallo al subir archivo a S3.', [
+                'disk' => $disk,
+                'directory' => $directory,
+                'filename' => $filename,
+                'message' => $exception->getMessage(),
+                'exception' => get_class($exception),
+            ]);
 
-                    return [$disk, $path];
-                }
-            } catch (\Throwable $exception) {
-                Log::warning('Fallo al subir archivo en disco.', [
-                    'disk' => $disk,
-                    'directory' => $directory,
-                    'filename' => $filename,
-                    'message' => $exception->getMessage(),
-                    'exception' => get_class($exception),
-                ]);
+            abort(500, $errorMessage.' Disco probado: '.$disk);
+        }
+    }
+
+    private function resolveUniqueDocumentUploads(Request $request): array
+    {
+        $files = [];
+
+        foreach ((array) $request->file('documents', []) as $file) {
+            if ($file instanceof UploadedFile) {
+                $files[] = $file;
             }
-
-            $attempted[] = $disk;
         }
 
-        abort(500, $errorMessage.' Discos probados: '.implode(', ', $attempted));
+        foreach (['file', 'document'] as $field) {
+            $file = $request->file($field);
+            if ($file instanceof UploadedFile) {
+                $files[] = $file;
+            }
+        }
+
+        $unique = [];
+
+        foreach ($files as $file) {
+            $key = implode('|', [
+                $file->getClientOriginalName(),
+                (string) $file->getSize(),
+                (string) $file->getMimeType(),
+                (string) $file->getRealPath(),
+            ]);
+            $unique[$key] = $file;
+        }
+
+        return array_values($unique);
     }
 
     private function resolveStoredFileUrl(string $disk, string $path): string
