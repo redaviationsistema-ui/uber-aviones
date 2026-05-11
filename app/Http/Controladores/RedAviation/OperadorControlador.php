@@ -276,7 +276,7 @@ class OperadorControlador extends ControladorBase
             'manufacturer' => ['nullable', 'string', 'max:255'],
             'model_year' => ['nullable', 'integer', 'min:1900', 'max:2100'],
             'year' => ['nullable', 'integer', 'min:1900', 'max:2100'],
-            'registration' => [$required, 'string', 'max:50'],
+            'registration' => ['nullable', 'string', 'max:50'],
             'capacity' => [$required, 'integer', 'min:1'],
             'base_airport' => [$required, 'string', 'max:20'],
             'range_km' => ['nullable', 'integer', 'min:0'],
@@ -323,7 +323,7 @@ class OperadorControlador extends ControladorBase
         }
 
         if (array_key_exists('registration', $data)) {
-            $data['registration'] = $this->normalizeNullableString($data['registration']);
+            $data['registration'] = $this->normalizeRegistration($data['registration']);
         }
 
         if (array_key_exists('model', $data)) {
@@ -422,6 +422,16 @@ class OperadorControlador extends ControladorBase
     {
         $trimmed = trim((string) ($value ?? ''));
         return $trimmed === '' ? null : $trimmed;
+    }
+
+    private function normalizeRegistration(mixed $value): ?string
+    {
+        $registration = $this->normalizeNullableString($value);
+        if ($registration === null) {
+            return null;
+        }
+
+        return preg_match('/^PENDIENTE\d*$/i', $registration) ? null : $registration;
     }
 
     private function formatAircraftDocumentPayload(DocumentoAeronave $document): array

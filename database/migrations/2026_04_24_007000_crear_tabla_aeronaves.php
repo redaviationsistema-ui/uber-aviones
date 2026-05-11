@@ -16,7 +16,7 @@ return new class extends Migration
             $table->id();
             $table->foreignId('provider_id')->constrained('providers')->cascadeOnDelete();
             $table->string('model', 150);
-            $table->string('registration', 100)->unique();
+            $table->string('registration', 100)->nullable()->unique();
             $table->unsignedInteger('capacity');
             $table->string('base_airport', 20)->index();
             $table->unsignedInteger('range_km')->nullable();
