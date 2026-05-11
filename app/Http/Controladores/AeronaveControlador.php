@@ -386,7 +386,7 @@ class AeronaveControlador extends ControladorBase
 
             $fileName = $document->document_name ?: basename($path);
 
-            return $storage->download($path, $fileName);
+            return $storage->response($path, $fileName, [], 'inline');
         }
 
         $url = $document->document_url ?: $document->file_url;
@@ -397,7 +397,7 @@ class AeronaveControlador extends ControladorBase
             $storage = Storage::disk('s3');
             abort_unless($storage->exists($s3Path), 404, 'Documento no encontrado.');
 
-            return $storage->download($s3Path, $document->document_name ?: basename($s3Path));
+            return $storage->response($s3Path, $document->document_name ?: basename($s3Path), [], 'inline');
         }
 
         return redirect()->away($url);
