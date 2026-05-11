@@ -13,6 +13,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Validation\Rule;
 
 class AeronaveControlador extends ControladorBase
 {
@@ -68,7 +69,7 @@ class AeronaveControlador extends ControladorBase
     {
         $this->authorizeProveedorAeronave($request, $aircraft);
 
-        $aircraft->update($this->normalizeAircraftInput($request->validate($this->rules(false))));
+        $aircraft->update($this->normalizeAircraftInput($request->validate($this->rules(false, $aircraft))));
 
         return $this->ok([
             'aircraft' => $this->formatAircraftPayload(
@@ -612,7 +613,7 @@ class AeronaveControlador extends ControladorBase
         return $data;
     }
 
-    private function rules(bool $creating = true): array
+    private function rules(bool $creating = true, ?Aeronave $aircraft = null): array
     {
         $required = $creating ? 'required' : 'sometimes';
 
@@ -621,7 +622,12 @@ class AeronaveControlador extends ControladorBase
             'manufacturer' => ['nullable', 'string', 'max:255'],
             'model_year' => ['nullable', 'integer', 'min:1900', 'max:2100'],
             'year' => ['nullable', 'integer', 'min:1900', 'max:2100'],
-            'registration' => ['nullable', 'string', 'max:50'],
+            'registration' => [
+                'nullable',
+                'string',
+                'max:255',
+                Rule::unique('aircraft', 'registration')->ignore($aircraft?->id),
+            ],
             'capacity' => [$required, 'integer', 'min:1'],
             'base_airport' => [$required, 'string', 'max:20'],
             'range_km' => ['nullable', 'integer', 'min:0'],
@@ -991,5 +997,4 @@ class AeronaveControlador extends ControladorBase
         return $path;
     }
 }
-
 
