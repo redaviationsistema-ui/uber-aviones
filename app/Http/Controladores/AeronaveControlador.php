@@ -360,6 +360,49 @@ class AeronaveControlador extends ControladorBase
         return $this->ok(['message' => 'Documento eliminado.']);
     }
 
+    public function downloadDocument(Request $request, Aeronave $aircraft, DocumentoAeronave $document)
+    {
+        $this->authorizeProveedorAeronave($request, $aircraft);
+        abort_if((int) $document->aircraft_id !== (int) $aircraft->id, 404);
+
+        return $this->streamAircraftDocument($document);
+    }
+
+    public function downloadAdminDocument(Request $request, DocumentoAeronave $document)
+    {
+        abort_unless($request->user()?->hasRole('admin'), 403);
+
+        return $this->streamAircraftDocument($document);
+    }
+
+    private function streamAircraftDocument(DocumentoAeronave $document)
+    {
+        $disk = (string) ($document->storage_disk ?: 's3');
+        $path = (string) ($document->storage_path ?: '');
+
+        if ($path !== '') {
+            $storage = Storage::disk($disk);
+            abort_unless($storage->exists($path), 404, 'Documento no encontrado.');
+
+            $fileName = $document->document_name ?: basename($path);
+
+            return $storage->download($path, $fileName);
+        }
+
+        $url = $document->document_url ?: $document->file_url;
+        abort_unless($url, 404, 'Documento sin archivo asociado.');
+
+        $s3Path = $this->resolveS3Path($url);
+        if ($s3Path) {
+            $storage = Storage::disk('s3');
+            abort_unless($storage->exists($s3Path), 404, 'Documento no encontrado.');
+
+            return $storage->download($s3Path, $document->document_name ?: basename($s3Path));
+        }
+
+        return redirect()->away($url);
+    }
+
     public function availability(Request $request)
     {
         $query = DisponibilidadAeronave::with('aircraft');
@@ -997,4 +1040,3 @@ class AeronaveControlador extends ControladorBase
         return $path;
     }
 }
-

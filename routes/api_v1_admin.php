@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controladores\AdministradorControlador;
+use App\Http\Controladores\AeronaveControlador;
 use Illuminate\Support\Facades\Route;
 
 Route::prefix('admin')->middleware(['auth.token', 'role:admin'])->group(function () {
@@ -20,6 +21,8 @@ Route::prefix('admin')->middleware(['auth.token', 'role:admin'])->group(function
 
     Route::get('/aeronaves', [AdministradorControlador::class, 'aircraft']);
     Route::get('/aeronaves/{aircraft}', [AdministradorControlador::class, 'showAeronave']);
+    Route::get('/aircraft-documents/{document}/download', [AeronaveControlador::class, 'downloadAdminDocument']);
+    Route::get('/aeronaves/documentos/{document}/descargar', [AeronaveControlador::class, 'downloadAdminDocument']);
     Route::post('/aeronaves/{aircraft}/bloquear', [AdministradorControlador::class, 'blockAeronave']);
     Route::post('/aeronaves/{aircraft}/activar', [AdministradorControlador::class, 'activateAeronave']);
 
