@@ -703,14 +703,21 @@ class AeronaveControlador extends ControladorBase
 
     private function formatPublicAircraftPayload(Aeronave $aircraft): array
     {
-        $visibleImages = $aircraft->images
-            ->where('visible_to_client', true)
+        $sortedImages = $aircraft->images
+            ->filter(fn (ImagenAeronave $image) => filled($image->image_url))
             ->sortBy([
                 ['is_main', 'desc'],
                 ['sort_order', 'asc'],
                 ['id', 'asc'],
             ])
             ->values();
+        $visibleImages = $sortedImages
+            ->where('visible_to_client', true)
+            ->values();
+
+        if ($visibleImages->isEmpty()) {
+            $visibleImages = $sortedImages;
+        }
 
         $mainImage = $visibleImages->firstWhere('is_main', true)?->image_url
             ?? $visibleImages->first()?->image_url;
@@ -974,7 +981,6 @@ class AeronaveControlador extends ControladorBase
         return $path;
     }
 }
-
 
 
 
