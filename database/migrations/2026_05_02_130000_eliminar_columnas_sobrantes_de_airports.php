@@ -13,6 +13,14 @@ return new class extends Migration
         }
 
         Schema::table('airports', function (Blueprint $table) {
+            foreach (['icao_code', 'iata_code'] as $column) {
+                if (Schema::hasColumn('airports', $column)) {
+                    $table->dropIndex([$column]);
+                }
+            }
+        });
+
+        Schema::table('airports', function (Blueprint $table) {
             $columns = [];
 
             foreach (['icao_code', 'iata_code', 'created_at', 'updated_at'] as $column) {
