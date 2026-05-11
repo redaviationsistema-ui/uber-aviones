@@ -21,6 +21,7 @@ Route::middleware(['auth.token'])->group(function () {
 
     Route::prefix('client')->middleware(['role:client,admin', 'subscription.active'])->group(function () {
         Route::get('/dashboard', [ClienteControlador::class, 'dashboard']);
+        Route::post('/quotes/preview', [ClienteControlador::class, 'previewQuotes']);
         Route::post('/flight-requests', [ClienteControlador::class, 'storeFlightRequest'])->middleware('plan.limit');
         Route::get('/flight-requests', [ClienteControlador::class, 'indexFlightRequests']);
         Route::get('/flight-requests/{flightRequest}', [ClienteControlador::class, 'showFlightRequest']);
