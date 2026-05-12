@@ -13,6 +13,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Validation\Rule;
 
 class AeronaveControlador extends ControladorBase
 {
@@ -68,7 +69,7 @@ class AeronaveControlador extends ControladorBase
     {
         $this->authorizeProveedorAeronave($request, $aircraft);
 
-        $aircraft->update($this->normalizeAircraftInput($request->validate($this->rules(false))));
+        $aircraft->update($this->normalizeAircraftInput($request->validate($this->rules(false, $aircraft))));
 
         return $this->ok([
             'aircraft' => $this->formatAircraftPayload(
@@ -359,6 +360,49 @@ class AeronaveControlador extends ControladorBase
         return $this->ok(['message' => 'Documento eliminado.']);
     }
 
+    public function downloadDocument(Request $request, Aeronave $aircraft, DocumentoAeronave $document)
+    {
+        $this->authorizeProveedorAeronave($request, $aircraft);
+        abort_if((int) $document->aircraft_id !== (int) $aircraft->id, 404);
+
+        return $this->streamAircraftDocument($document);
+    }
+
+    public function downloadAdminDocument(Request $request, DocumentoAeronave $document)
+    {
+        abort_unless($request->user()?->hasRole('admin'), 403);
+
+        return $this->streamAircraftDocument($document);
+    }
+
+    private function streamAircraftDocument(DocumentoAeronave $document)
+    {
+        $disk = (string) ($document->storage_disk ?: 's3');
+        $path = (string) ($document->storage_path ?: '');
+
+        if ($path !== '') {
+            $storage = Storage::disk($disk);
+            abort_unless($storage->exists($path), 404, 'Documento no encontrado.');
+
+            $fileName = $document->document_name ?: basename($path);
+
+            return $storage->download($path, $fileName);
+        }
+
+        $url = $document->document_url ?: $document->file_url;
+        abort_unless($url, 404, 'Documento sin archivo asociado.');
+
+        $s3Path = $this->resolveS3Path($url);
+        if ($s3Path) {
+            $storage = Storage::disk('s3');
+            abort_unless($storage->exists($s3Path), 404, 'Documento no encontrado.');
+
+            return $storage->download($s3Path, $document->document_name ?: basename($s3Path));
+        }
+
+        return redirect()->away($url);
+    }
+
     public function availability(Request $request)
     {
         $query = DisponibilidadAeronave::with('aircraft');
@@ -598,7 +642,7 @@ class AeronaveControlador extends ControladorBase
         }
 
         if (array_key_exists('registration', $data)) {
-            $data['registration'] = $this->normalizeNullableString($data['registration']);
+            $data['registration'] = $this->normalizeRegistration($data['registration']);
         }
 
         if (array_key_exists('model', $data)) {
@@ -612,7 +656,7 @@ class AeronaveControlador extends ControladorBase
         return $data;
     }
 
-    private function rules(bool $creating = true): array
+    private function rules(bool $creating = true, ?Aeronave $aircraft = null): array
     {
         $required = $creating ? 'required' : 'sometimes';
 
@@ -621,7 +665,12 @@ class AeronaveControlador extends ControladorBase
             'manufacturer' => ['nullable', 'string', 'max:255'],
             'model_year' => ['nullable', 'integer', 'min:1900', 'max:2100'],
             'year' => ['nullable', 'integer', 'min:1900', 'max:2100'],
-            'registration' => [$required, 'string', 'max:50'],
+            'registration' => [
+                'nullable',
+                'string',
+                'max:255',
+                Rule::unique('aircraft', 'registration')->ignore($aircraft?->id),
+            ],
             'capacity' => [$required, 'integer', 'min:1'],
             'base_airport' => [$required, 'string', 'max:20'],
             'range_km' => ['nullable', 'integer', 'min:0'],
@@ -703,14 +752,21 @@ class AeronaveControlador extends ControladorBase
 
     private function formatPublicAircraftPayload(Aeronave $aircraft): array
     {
-        $visibleImages = $aircraft->images
-            ->where('visible_to_client', true)
+        $sortedImages = $aircraft->images
+            ->filter(fn (ImagenAeronave $image) => filled($image->image_url))
             ->sortBy([
                 ['is_main', 'desc'],
                 ['sort_order', 'asc'],
                 ['id', 'asc'],
             ])
             ->values();
+        $visibleImages = $sortedImages
+            ->where('visible_to_client', true)
+            ->values();
+
+        if ($visibleImages->isEmpty()) {
+            $visibleImages = $sortedImages;
+        }
 
         $mainImage = $visibleImages->firstWhere('is_main', true)?->image_url
             ?? $visibleImages->first()?->image_url;
@@ -766,6 +822,16 @@ class AeronaveControlador extends ControladorBase
     {
         $trimmed = trim((string) ($value ?? ''));
         return $trimmed === '' ? null : $trimmed;
+    }
+
+    private function normalizeRegistration(mixed $value): ?string
+    {
+        $registration = $this->normalizeNullableString($value);
+        if ($registration === null) {
+            return null;
+        }
+
+        return preg_match('/^PENDIENTE\d*$/i', $registration) ? null : $registration;
     }
 
     private function formatAircraftDocumentPayload(DocumentoAeronave $document): array
@@ -974,7 +1040,3 @@ class AeronaveControlador extends ControladorBase
         return $path;
     }
 }
-
-
-
-

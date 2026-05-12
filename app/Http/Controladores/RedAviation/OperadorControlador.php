@@ -15,6 +15,7 @@ use App\Servicios\RedAviation\VisibilidadServicio;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Validation\Rule;
 
 class OperadorControlador extends ControladorBase
 {
@@ -122,7 +123,7 @@ class OperadorControlador extends ControladorBase
     {
         abort_if($aircraft->provider_id !== $request->user()->provider_id, 403);
 
-        $aircraft->update($this->normalizeAircraftInput($request->validate($this->aircraftRules(false))));
+        $aircraft->update($this->normalizeAircraftInput($request->validate($this->aircraftRules(false, $aircraft))));
 
         $user = $request->user()->loadMissing('activeSuscripcion.plan');
 
@@ -267,7 +268,7 @@ class OperadorControlador extends ControladorBase
         ], 201);
     }
 
-    private function aircraftRules(bool $creating = true): array
+    private function aircraftRules(bool $creating = true, ?Aeronave $aircraft = null): array
     {
         $required = $creating ? 'required' : 'sometimes';
 
@@ -276,7 +277,12 @@ class OperadorControlador extends ControladorBase
             'manufacturer' => ['nullable', 'string', 'max:255'],
             'model_year' => ['nullable', 'integer', 'min:1900', 'max:2100'],
             'year' => ['nullable', 'integer', 'min:1900', 'max:2100'],
-            'registration' => [$required, 'string', 'max:50'],
+            'registration' => [
+                'nullable',
+                'string',
+                'max:255',
+                Rule::unique('aircraft', 'registration')->ignore($aircraft?->id),
+            ],
             'capacity' => [$required, 'integer', 'min:1'],
             'base_airport' => [$required, 'string', 'max:20'],
             'range_km' => ['nullable', 'integer', 'min:0'],
@@ -323,7 +329,7 @@ class OperadorControlador extends ControladorBase
         }
 
         if (array_key_exists('registration', $data)) {
-            $data['registration'] = $this->normalizeNullableString($data['registration']);
+            $data['registration'] = $this->normalizeRegistration($data['registration']);
         }
 
         if (array_key_exists('model', $data)) {
@@ -422,6 +428,16 @@ class OperadorControlador extends ControladorBase
     {
         $trimmed = trim((string) ($value ?? ''));
         return $trimmed === '' ? null : $trimmed;
+    }
+
+    private function normalizeRegistration(mixed $value): ?string
+    {
+        $registration = $this->normalizeNullableString($value);
+        if ($registration === null) {
+            return null;
+        }
+
+        return preg_match('/^PENDIENTE\d*$/i', $registration) ? null : $registration;
     }
 
     private function formatAircraftDocumentPayload(DocumentoAeronave $document): array

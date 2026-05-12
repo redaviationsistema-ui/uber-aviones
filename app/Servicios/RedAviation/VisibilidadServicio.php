@@ -123,16 +123,22 @@ class VisibilidadServicio
 
     private function aeronaveVisibleParaCliente(Aeronave $aircraft, ?string $fallbackCategory = null): array
     {
-        $visibleImages = $aircraft->relationLoaded('images')
-            ? $aircraft->images
-                ->where('visible_to_client', true)
-                ->sortBy([
-                    ['is_main', 'desc'],
-                    ['sort_order', 'asc'],
-                    ['id', 'asc'],
-                ])
-                ->values()
-            : collect();
+        $loadedImages = $aircraft->relationLoaded('images') ? $aircraft->images : collect();
+        $sortedImages = $loadedImages
+            ->filter(fn (ImagenAeronave $image) => filled($image->image_url))
+            ->sortBy([
+                ['is_main', 'desc'],
+                ['sort_order', 'asc'],
+                ['id', 'asc'],
+            ])
+            ->values();
+        $visibleImages = $sortedImages
+            ->where('visible_to_client', true)
+            ->values();
+
+        if ($visibleImages->isEmpty()) {
+            $visibleImages = $sortedImages;
+        }
 
         $mainImage = $visibleImages->firstWhere('is_main', true)?->image_url
             ?? $visibleImages->first()?->image_url;

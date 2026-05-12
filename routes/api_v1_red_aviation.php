@@ -12,6 +12,7 @@ use App\Http\Controladores\NotificacionControlador;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/plans', [PlanControlador::class, 'index']);
+Route::post('/client/quotes/preview', [ClienteControlador::class, 'previewQuotes']);
 
 Route::middleware(['auth.token'])->group(function () {
     Route::post('/subscriptions/start-trial', [SuscripcionControlador::class, 'startTrial']);

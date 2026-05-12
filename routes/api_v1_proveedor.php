@@ -25,6 +25,7 @@ Route::prefix('proveedor')->middleware(['auth.token', 'role:provider,admin'])->g
     Route::post('/aeronaves/{aircraft}/imagenes/reasociar', [AeronaveControlador::class, 'attachExistingImage']);
     Route::delete('/aeronaves/{aircraft}/imagenes/{image}', [AeronaveControlador::class, 'destroyImage']);
     Route::post('/aeronaves/{aircraft}/documentos', [AeronaveControlador::class, 'storeDocument']);
+    Route::get('/aeronaves/{aircraft}/documentos/{document}/descargar', [AeronaveControlador::class, 'downloadDocument']);
     Route::delete('/aeronaves/{aircraft}/documentos/{document}', [AeronaveControlador::class, 'destroyDocument']);
 
     Route::get('/disponibilidad', [AeronaveControlador::class, 'availability']);
@@ -60,5 +61,6 @@ Route::prefix('proveedor')->middleware(['auth.token', 'role:provider,admin'])->g
 
 Route::prefix('provider')->middleware(['auth.token', 'role:provider,admin'])->group(function () {
     Route::post('/aircraft/{aircraft}/documents', [AeronaveControlador::class, 'storeDocument']);
+    Route::get('/aircraft/{aircraft}/documents/{document}/download', [AeronaveControlador::class, 'downloadDocument']);
     Route::delete('/aircraft/{aircraft}/documents/{document}', [AeronaveControlador::class, 'destroyDocument']);
 });
