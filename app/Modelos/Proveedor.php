@@ -13,7 +13,25 @@ class Proveedor extends Model
 
     use HasFactory;
 
-    protected $fillable = ['user_id', 'company_name', 'commercial_name', 'approval_status', 'notes'];
+    protected $fillable = [
+        'user_id',
+        'company_name',
+        'commercial_name',
+        'jet_a_price',
+        'margin_percent',
+        'fixed_fee',
+        'approval_status',
+        'notes',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'jet_a_price' => 'decimal:2',
+            'margin_percent' => 'decimal:4',
+            'fixed_fee' => 'decimal:2',
+        ];
+    }
 
     public function user(): BelongsTo
     {

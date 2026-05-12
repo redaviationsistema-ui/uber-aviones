@@ -57,28 +57,18 @@ class ClienteControlador extends ControladorBase
         abort_if(! $destinationAirport->latitude || ! $destinationAirport->longitude, 422, 'El aeropuerto de destino no tiene coordenadas.');
 
         $legs = $this->quoteLegs($data, $originAirport, $destinationAirport);
-        $distanceKm = collect($legs)->sum('distance_km');
+        $distanceKm = (float) collect($legs)->sum('distance_km');
+        $distanceNm = (float) collect($legs)->sum('distance_nm');
         $passengers = (int) $data['passengers'];
-        $marginPercent = (float) config('red_aviation.preview_margin_percent', 0.12);
-        $taxPercent = (float) config('red_aviation.preview_tax_percent', 0.16);
-
-        $quotes = Aeronave::with('images')
+        $tripType = $this->normalizeTripType($data['trip_type'] ?? $data['trip_label'] ?? null);
+        $maxLegDistanceKm = (float) collect($legs)->max('distance_km');
+        $quotes = Aeronave::with(['images', 'provider'])
             ->whereIn('status', ['active', 'trial_active', 'aprobada', 'available', 'disponible'])
             ->where('capacity', '>=', $passengers)
             ->get()
-            ->filter(fn (Aeronave $aircraft) => $this->aircraftCanQuote($aircraft, $distanceKm))
-            ->map(function (Aeronave $aircraft) use ($data, $distanceKm, $marginPercent, $taxPercent) {
-                $speedKmh = max((float) $aircraft->speed_kmh, 1);
-                $estimatedHours = $distanceKm / $speedKmh;
-                $minimumHours = max((float) $aircraft->minimum_hours, 0);
-                $billableHours = max($estimatedHours, $minimumHours);
-                $hourlyRate = (float) $aircraft->hourly_rate;
-                $operationalCost = (float) $aircraft->operational_cost;
-                $subtotal = $billableHours * $hourlyRate;
-                $margin = $subtotal * $marginPercent;
-                $taxBase = $subtotal + $operationalCost + $margin;
-                $taxes = $taxBase * $taxPercent;
-                $total = $taxBase + $taxes;
+            ->filter(fn (Aeronave $aircraft) => $this->aircraftCanQuote($aircraft, $maxLegDistanceKm))
+            ->map(function (Aeronave $aircraft) use ($data, $distanceKm, $distanceNm, $legs, $tripType) {
+                $pricing = $this->previewPricingForAircraft($aircraft, $tripType, $legs);
                 $currency = $aircraft->currency ?: 'USD';
 
                 return [
@@ -88,22 +78,46 @@ class ClienteControlador extends ControladorBase
                     'model' => $aircraft->model,
                     'cabin' => $aircraft->category ?? $data['aircraft_type'] ?? 'Jet privado',
                     'capacity' => $aircraft->capacity,
-                    'time' => $this->formatHours($estimatedHours),
-                    'flight_time' => $this->formatHours($estimatedHours),
+                    'time' => $this->formatHours($pricing['client_flight_hours']),
+                    'flight_time' => $this->formatHours($pricing['client_flight_hours']),
                     'distance_km' => round($distanceKm),
-                    'estimated_hours' => round($estimatedHours, 2),
-                    'billable_hours' => round($billableHours, 2),
-                    'hourly_rate' => round($hourlyRate, 2),
-                    'operational_cost' => round($operationalCost, 2),
-                    'subtotal' => round($subtotal, 2),
-                    'margin' => round($margin, 2),
-                    'taxes' => round($taxes, 2),
-                    'total' => round($total, 2),
+                    'distance_nm' => round($distanceNm),
+                    'estimated_hours' => round($pricing['client_air_time_hours'], 2),
+                    'billable_hours' => round($pricing['client_flight_hours'], 2),
+                    'final_hours' => round($pricing['total_billed_hours'], 2),
+                    'hourly_rate' => round($pricing['hourly_rate'], 2),
+                    'operational_cost' => round($pricing['operational_expenses'], 2),
+                    'fuel_burn_gph' => round($pricing['fuel_burn_gph'], 2),
+                    'engine_reserve_rate' => round($pricing['engine_reserve_rate'], 2),
+                    'insurance_rate' => round($pricing['insurance_rate'], 2),
+                    'maintenance_rate' => round($pricing['maintenance_rate'], 2),
+                    'crew_rate' => round($pricing['crew_rate'], 2),
+                    'repositioning_fee' => round($pricing['initial_repositioning_cost'] + $pricing['return_to_base_cost'], 2),
+                    'overnight_fee' => round($pricing['overnight_fee'], 2),
+                    'jet_a_price' => round($pricing['jet_a_price'], 2),
+                    'fixed_fee' => round($pricing['fixed_fee'], 2),
+                    'fixed_fee_total' => round($pricing['fixed_fee_total'], 2),
+                    'segment_count' => max(count($pricing['client_legs']), 1),
+                    'subtotal' => round($pricing['subtotal'], 2),
+                    'utility' => 0,
+                    'margin' => 0,
+                    'margin_percent' => round($pricing['margin_percent'], 4),
+                    'taxes' => round($pricing['tax'], 2),
+                    'total' => round($pricing['total'], 2),
                     'currency' => $currency,
-                    'final_price' => $this->formatMoney($total, $currency),
+                    'final_price' => $this->formatMoney($pricing['total'], $currency),
+                    'pricing_breakdown' => $pricing,
                     'source_origin' => $aircraft->base_airport,
                     'match_reason' => $this->matchReason($aircraft, $data['origin']),
                     'response_time' => $this->responseTime($aircraft, $data['origin']),
+                    'provider' => [
+                        'id' => $aircraft->provider?->id,
+                        'company_name' => $aircraft->provider?->company_name,
+                        'commercial_name' => $aircraft->provider?->commercial_name,
+                        'jet_a_price' => round($pricing['jet_a_price'], 2),
+                        'margin_percent' => round($pricing['margin_percent'], 4),
+                        'fixed_fee' => round($pricing['fixed_fee'], 2),
+                    ],
                     'aircraft' => $this->aircraftPreviewPayload($aircraft, $data['aircraft_type'] ?? null),
                 ];
             })
@@ -119,7 +133,8 @@ class ClienteControlador extends ControladorBase
             'origin_airport' => $this->airportPreviewPayload($originAirport),
             'destination_airport' => $this->airportPreviewPayload($destinationAirport),
             'distance_km' => round($distanceKm),
-            'trip_type' => $data['trip_type'] ?? 'one_way',
+            'distance_nm' => round($distanceNm),
+            'trip_type' => $tripType,
             'trip_label' => $data['trip_label'] ?? $data['notes'] ?? 'Ida',
             'segment_count' => count($legs),
             'legs' => $legs,
@@ -233,10 +248,24 @@ class ClienteControlador extends ControladorBase
         return $earthRadiusKm * 2 * atan2(sqrt($angle), sqrt(1 - $angle));
     }
 
+    private function distanceNm(float $originLat, float $originLng, float $destinationLat, float $destinationLng): float
+    {
+        $earthRadiusNm = 3440.065;
+        $latDelta = deg2rad($destinationLat - $originLat);
+        $lngDelta = deg2rad($destinationLng - $originLng);
+        $originLat = deg2rad($originLat);
+        $destinationLat = deg2rad($destinationLat);
+
+        $angle = sin($latDelta / 2) ** 2
+            + cos($originLat) * cos($destinationLat) * sin($lngDelta / 2) ** 2;
+
+        return $earthRadiusNm * 2 * atan2(sqrt($angle), sqrt(1 - $angle));
+    }
+
     private function quoteLegs(array $data, Aeropuerto $originAirport, Aeropuerto $destinationAirport): array
     {
         $legs = [
-            $this->quoteLegPayload(1, $originAirport, $destinationAirport),
+            $this->quoteLegPayload(1, $originAirport, $destinationAirport, $data['departure_datetime'] ?? null),
         ];
 
         foreach (($data['requirements'] ?? []) as $index => $requirement) {
@@ -255,13 +284,17 @@ class ClienteControlador extends ControladorBase
             abort_if(! $extraOrigin->latitude || ! $extraOrigin->longitude, 422, "El origen del tramo ".($index + 2)." no tiene coordenadas.");
             abort_if(! $extraDestination->latitude || ! $extraDestination->longitude, 422, "El destino del tramo ".($index + 2)." no tiene coordenadas.");
 
-            $legs[] = $this->quoteLegPayload($index + 2, $extraOrigin, $extraDestination);
+            $legs[] = $this->quoteLegPayload($index + 2, $extraOrigin, $extraDestination, $requirement['departure_datetime'] ?? null);
+        }
+
+        if ($this->normalizeTripType($data['trip_type'] ?? $data['trip_label'] ?? null) === 'round_trip' && count($legs) === 1) {
+            $legs[] = $this->quoteLegPayload(2, $destinationAirport, $originAirport);
         }
 
         return $legs;
     }
 
-    private function quoteLegPayload(int $position, Aeropuerto $originAirport, Aeropuerto $destinationAirport): array
+    private function quoteLegPayload(int $position, Aeropuerto $originAirport, Aeropuerto $destinationAirport, ?string $departureDatetime = null): array
     {
         $distanceKm = $this->distanceKm(
             (float) $originAirport->latitude,
@@ -269,12 +302,24 @@ class ClienteControlador extends ControladorBase
             (float) $destinationAirport->latitude,
             (float) $destinationAirport->longitude
         );
+        $distanceNm = $this->distanceNm(
+            (float) $originAirport->latitude,
+            (float) $originAirport->longitude,
+            (float) $destinationAirport->latitude,
+            (float) $destinationAirport->longitude
+        );
+        $international = $this->isInternationalLeg($originAirport, $destinationAirport);
 
         return [
             'position' => $position,
             'origin' => $originAirport->icao ?: $originAirport->iata,
             'destination' => $destinationAirport->icao ?: $destinationAirport->iata,
+            'origin_airport' => $this->airportPreviewPayload($originAirport),
+            'destination_airport' => $this->airportPreviewPayload($destinationAirport),
             'distance_km' => round($distanceKm),
+            'distance_nm' => round($distanceNm),
+            'international' => $international,
+            'departure_datetime' => $departureDatetime,
         ];
     }
 
@@ -303,6 +348,257 @@ class ClienteControlador extends ControladorBase
     private function formatMoney(float $amount, string $currency): string
     {
         return '$'.number_format(round($amount), 0, '.', ',').' '.strtoupper($currency);
+    }
+
+    private function previewPricingForAircraft(Aeronave $aircraft, string $tripType, array $legs): array
+    {
+        $provider = $aircraft->provider;
+        $hourlyRate = (float) $aircraft->hourly_rate;
+        $fuelBurn = (float) $aircraft->fuel_burn_gph;
+        $engineReserveRate = (float) $aircraft->engine_reserve_rate;
+        $insuranceRate = (float) $aircraft->insurance_rate;
+        $maintenanceRate = (float) $aircraft->maintenance_rate;
+        $crewRate = (float) $aircraft->crew_rate;
+        $overnightFee = max((float) $aircraft->overnight_fee, 800);
+        $parkingFee = max((float) $aircraft->repositioning_fee, 0);
+        $operationalExpenses = max((float) $aircraft->operational_cost, 0);
+        $jetAPrice = (float) ($provider?->jet_a_price ?? 0);
+        $fixedFee = (float) ($provider?->fixed_fee ?? 0);
+        $marginPercent = (float) ($provider?->margin_percent ?? 0);
+
+        $baseAirport = $this->findActiveAirport((string) $aircraft->base_airport);
+        $clientLegs = $legs;
+        $initialOriginAirport = $legs[0]['origin_airport'] ?? null;
+        $finalDestinationAirport = $legs[count($legs) - 1]['destination_airport'] ?? null;
+        $initialRepositioning = $baseAirport && $initialOriginAirport
+            ? $this->calculateLegPricing($aircraft, $baseAirport, $this->airportFromPayload($initialOriginAirport), false)
+            : $this->emptyLegPricing();
+        $returnToBase = $baseAirport && $finalDestinationAirport
+            ? $this->calculateLegPricing($aircraft, $this->airportFromPayload($finalDestinationAirport), $baseAirport, false)
+            : $this->emptyLegPricing();
+        $clientLegPricings = collect($clientLegs)
+            ->map(function (array $leg) use ($aircraft) {
+                return $this->calculateLegPricing(
+                    $aircraft,
+                    $this->airportFromPayload($leg['origin_airport']),
+                    $this->airportFromPayload($leg['destination_airport'])
+                );
+            })
+            ->values()
+            ->all();
+
+        $clientFlightCost = (float) collect($clientLegPricings)->sum('leg_cost');
+        $clientFlightHours = (float) collect($clientLegPricings)->sum('final_hours');
+        $clientAirTimeHours = (float) collect($clientLegPricings)->sum('air_time_hours');
+        $nightCount = $this->calculateOvernightNights($clientLegs);
+        $overnightCost = $nightCount * $overnightFee;
+        $airportFees = 500 * $this->countAirportsForFees($clientLegs);
+        $fixedFeeTotal = $fixedFee * max(count($clientLegs), 1);
+        $isInternationalRoute = collect($clientLegs)->contains(fn (array $leg) => (bool) ($leg['international'] ?? false));
+        $taxRate = $isInternationalRoute ? 0.04 : 0.16;
+        $selectedExtraHours = $initialRepositioning['final_hours'] + $returnToBase['final_hours'];
+
+        if ($tripType === 'round_trip' && count($clientLegPricings) >= 2) {
+            $waitOptionSubtotal = $clientFlightCost
+                + $initialRepositioning['leg_cost']
+                + $returnToBase['leg_cost']
+                + $overnightCost
+                + $parkingFee
+                + $operationalExpenses
+                + $airportFees
+                + $fixedFeeTotal;
+            $returnOptionSubtotal = $clientFlightCost + $initialRepositioning['leg_cost'] + $returnToBase['leg_cost'];
+
+            $middleAirport = $this->airportFromPayload($clientLegs[0]['destination_airport']);
+            $backToPickup = $baseAirport
+                ? $this->calculateLegPricing($aircraft, $baseAirport, $middleAirport, false)
+                : $this->emptyLegPricing();
+            $returnOptionSubtotal += $backToPickup['leg_cost'] + $operationalExpenses + $airportFees + $fixedFeeTotal;
+
+            $subtotal = min($waitOptionSubtotal, $returnOptionSubtotal);
+            $quoteStrategy = $waitOptionSubtotal <= $returnOptionSubtotal ? 'wait_option' : 'return_to_base_option';
+            $selectedRepositioning = $quoteStrategy === 'return_to_base_option'
+                ? $initialRepositioning['leg_cost'] + $backToPickup['leg_cost']
+                : $initialRepositioning['leg_cost'];
+            $selectedReturnToBase = $returnToBase['leg_cost'];
+            $selectedExtraHours = $initialRepositioning['final_hours'] + $returnToBase['final_hours'];
+
+            if ($quoteStrategy === 'return_to_base_option') {
+                $selectedExtraHours += $backToPickup['final_hours'];
+            }
+        } else {
+            $subtotal = $clientFlightCost
+                + $initialRepositioning['leg_cost']
+                + $returnToBase['leg_cost']
+                + $overnightCost
+                + $operationalExpenses
+                + $airportFees
+                + $fixedFeeTotal;
+            $quoteStrategy = $tripType;
+            $selectedRepositioning = $initialRepositioning['leg_cost'];
+            $selectedReturnToBase = $returnToBase['leg_cost'];
+        }
+
+        $tax = $subtotal * $taxRate;
+        $total = $subtotal + $tax;
+
+        return [
+            'trip_type' => $tripType,
+            'quote_strategy' => $quoteStrategy,
+            'hourly_rate' => $hourlyRate,
+            'fuel_burn_gph' => $fuelBurn,
+            'engine_reserve_rate' => $engineReserveRate,
+            'insurance_rate' => $insuranceRate,
+            'maintenance_rate' => $maintenanceRate,
+            'crew_rate' => $crewRate,
+            'overnight_fee' => $overnightFee,
+            'parking_fee' => $parkingFee,
+            'operational_expenses' => $operationalExpenses,
+            'jet_a_price' => $jetAPrice,
+            'fixed_fee' => $fixedFee,
+            'fixed_fee_total' => $fixedFeeTotal,
+            'margin_percent' => $marginPercent,
+            'client_legs' => $clientLegs,
+            'client_leg_pricing' => $clientLegPricings,
+            'client_flight_hours' => $clientFlightHours,
+            'client_air_time_hours' => $clientAirTimeHours,
+            'total_billed_hours' => $clientFlightHours + $selectedExtraHours,
+            'client_flight_cost' => $clientFlightCost,
+            'initial_repositioning_cost' => $selectedRepositioning,
+            'return_to_base_cost' => $selectedReturnToBase,
+            'overnight_nights' => $nightCount,
+            'overnight_cost' => $overnightCost,
+            'airport_fees' => $airportFees,
+            'tax_rate' => $taxRate,
+            'tax' => $tax,
+            'subtotal' => $subtotal,
+            'utility' => 0,
+            'total' => $total,
+        ];
+    }
+
+    private function calculateLegPricing(Aeronave $aircraft, Aeropuerto $originAirport, Aeropuerto $destinationAirport, bool $applyMinimumHours = true): array
+    {
+        $distanceNm = $this->distanceNm(
+            (float) $originAirport->latitude,
+            (float) $originAirport->longitude,
+            (float) $destinationAirport->latitude,
+            (float) $destinationAirport->longitude
+        );
+        $adjustmentFactor = $this->isInternationalLeg($originAirport, $destinationAirport) ? 1.15 : 1.12;
+        $adjustedDistanceNm = $distanceNm * $adjustmentFactor;
+        $speedKnots = max(((float) $aircraft->speed_kmh) / 1.852, 1);
+        $airTime = $adjustedDistanceNm / $speedKnots;
+        $buffer = $this->operationalBufferHours($distanceNm);
+        $billableHours = $this->roundUpQuarterHours($airTime + $buffer);
+        $minimumHours = $applyMinimumHours ? max((float) $aircraft->minimum_hours, 0) : 0;
+        $finalHours = max($billableHours, $minimumHours);
+        $hourlyRate = (float) $aircraft->hourly_rate;
+
+        return [
+            'origin' => $originAirport->icao ?: $originAirport->iata,
+            'destination' => $destinationAirport->icao ?: $destinationAirport->iata,
+            'distance_nm' => $distanceNm,
+            'adjusted_distance_nm' => $adjustedDistanceNm,
+            'air_time_hours' => $airTime,
+            'buffer_hours' => $buffer,
+            'billable_hours' => $billableHours,
+            'final_hours' => $finalHours,
+            'leg_cost' => $finalHours * $hourlyRate,
+            'international' => $this->isInternationalLeg($originAirport, $destinationAirport),
+        ];
+    }
+
+    private function emptyLegPricing(): array
+    {
+        return [
+            'distance_nm' => 0,
+            'adjusted_distance_nm' => 0,
+            'air_time_hours' => 0,
+            'buffer_hours' => 0,
+            'billable_hours' => 0,
+            'final_hours' => 0,
+            'leg_cost' => 0,
+            'international' => false,
+        ];
+    }
+
+    private function airportFromPayload(array $payload): Aeropuerto
+    {
+        return new Aeropuerto($payload);
+    }
+
+    private function countAirportsForFees(array $legs): int
+    {
+        if ($legs === []) {
+            return 0;
+        }
+
+        $airports = [data_get($legs, '0.origin')];
+        foreach ($legs as $leg) {
+            $airports[] = $leg['destination'] ?? null;
+        }
+
+        return count(array_filter($airports));
+    }
+
+    private function calculateOvernightNights(array $legs): int
+    {
+        $nights = 0;
+
+        for ($index = 0; $index < count($legs) - 1; $index++) {
+            $current = $legs[$index]['departure_datetime'] ?? null;
+            $next = $legs[$index + 1]['departure_datetime'] ?? null;
+
+            if (! $current || ! $next) {
+                continue;
+            }
+
+            $currentDate = Carbon::parse($current)->startOfDay();
+            $nextDate = Carbon::parse($next)->startOfDay();
+
+            if ($nextDate->greaterThan($currentDate)) {
+                $nights += $currentDate->diffInDays($nextDate);
+            }
+        }
+
+        return $nights;
+    }
+
+    private function operationalBufferHours(float $distanceNm): float
+    {
+        if ($distanceNm < 300) {
+            return 0.25;
+        }
+
+        if ($distanceNm < 600) {
+            return 0.35;
+        }
+
+        if ($distanceNm < 1000) {
+            return 0.45;
+        }
+
+        return 0.50;
+    }
+
+    private function roundUpQuarterHours(float $hours): float
+    {
+        return ceil($hours * 4) / 4;
+    }
+
+    private function isInternationalLeg(Aeropuerto $originAirport, Aeropuerto $destinationAirport): bool
+    {
+        return strtoupper((string) $originAirport->country) !== strtoupper((string) $destinationAirport->country);
+    }
+
+    private function normalizeTripType(?string $tripType): string
+    {
+        return match (strtolower((string) $tripType)) {
+            'redondo', 'round_trip', 'roundtrip' => 'round_trip',
+            'multi-destino', 'multidestino', 'multi_city', 'multi_leg' => 'multi_leg',
+            default => 'one_way',
+        };
     }
 
     private function matchReason(Aeronave $aircraft, string $origin): string
@@ -358,6 +654,24 @@ class ClienteControlador extends ControladorBase
             'category' => $aircraft->category ?? $fallbackCategory ?? 'Jet privado',
             'range_km' => $aircraft->range_km,
             'base_airport' => $aircraft->base_airport,
+            'hourly_rate' => $aircraft->hourly_rate,
+            'minimum_hours' => $aircraft->minimum_hours,
+            'operational_cost' => $aircraft->operational_cost,
+            'fuel_burn_gph' => $aircraft->fuel_burn_gph,
+            'engine_reserve_rate' => $aircraft->engine_reserve_rate,
+            'insurance_rate' => $aircraft->insurance_rate,
+            'maintenance_rate' => $aircraft->maintenance_rate,
+            'crew_rate' => $aircraft->crew_rate,
+            'repositioning_fee' => $aircraft->repositioning_fee,
+            'overnight_fee' => $aircraft->overnight_fee,
+            'provider' => $aircraft->provider ? [
+                'id' => $aircraft->provider->id,
+                'company_name' => $aircraft->provider->company_name,
+                'commercial_name' => $aircraft->provider->commercial_name,
+                'jet_a_price' => $aircraft->provider->jet_a_price,
+                'margin_percent' => $aircraft->provider->margin_percent,
+                'fixed_fee' => $aircraft->provider->fixed_fee,
+            ] : null,
             'main_image' => $visibleImages->firstWhere('is_main', true)?->image_url ?? $visibleImages->first()?->image_url,
             'images' => $visibleImages->map(fn (ImagenAeronave $image) => [
                 'id' => $image->id,

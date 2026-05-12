@@ -623,6 +623,12 @@ class AeronaveControlador extends ControladorBase
 
     private function normalizeAircraftInput(array $data): array
     {
+        if (! array_key_exists('speed_kmh', $data) && array_key_exists('speed_knots', $data)) {
+            $data['speed_kmh'] = (int) round(((float) $data['speed_knots']) * 1.852);
+        }
+
+        unset($data['speed_knots']);
+
         if (! array_key_exists('model_year', $data) && array_key_exists('year', $data)) {
             $data['model_year'] = $data['year'];
         }
@@ -680,6 +686,7 @@ class AeronaveControlador extends ControladorBase
             'base_airport' => [$required, 'string', 'max:20'],
             'range_km' => ['nullable', 'integer', 'min:0'],
             'speed_kmh' => ['nullable', 'integer', 'min:0'],
+            'speed_knots' => ['nullable', 'numeric', 'min:0'],
             'coverage' => ['nullable', 'string', 'max:255'],
             'amenities' => ['nullable'],
             'hourly_rate' => [$required, 'numeric', 'min:0'],

@@ -79,6 +79,9 @@ class ProveedorControlador extends ControladorBase
             'email' => ['nullable', 'email', 'max:255', Rule::unique('users', 'email')->ignore($user->id)],
             'address' => ['nullable', 'string', 'max:255'],
             'legal_representative' => ['nullable', 'string', 'max:255'],
+            'jet_a_price' => ['nullable', 'numeric', 'min:0'],
+            'margin_percent' => ['nullable', 'numeric', 'min:0'],
+            'fixed_fee' => ['nullable', 'numeric', 'min:0'],
             'admin_notes' => ['nullable', 'string'],
             'documents' => ['nullable', 'array'],
             'documents.*.name' => ['nullable', 'string', 'max:255'],
@@ -115,6 +118,9 @@ class ProveedorControlador extends ControladorBase
         $provider->update([
             'company_name' => $data['legal_name'] ?? $data['company_name'] ?? $provider->company_name,
             'commercial_name' => $data['commercial_name'] ?? $data['trade_name'] ?? $provider->commercial_name,
+            'jet_a_price' => $data['jet_a_price'] ?? $provider->jet_a_price,
+            'margin_percent' => $data['margin_percent'] ?? $provider->margin_percent,
+            'fixed_fee' => $data['fixed_fee'] ?? $provider->fixed_fee,
             'notes' => $data['admin_notes'] ?? $provider->notes,
         ]);
 
@@ -618,6 +624,9 @@ class ProveedorControlador extends ControladorBase
             'company_name' => $provider?->company_name,
             'commercial_name' => $provider?->commercial_name,
             'trade_name' => $provider?->commercial_name,
+            'jet_a_price' => (float) ($provider?->jet_a_price ?? 0),
+            'margin_percent' => (float) ($provider?->margin_percent ?? 0),
+            'fixed_fee' => (float) ($provider?->fixed_fee ?? 0),
             'rfc' => $taxData['rfc'] ?? null,
             'phone' => $user->phone,
             'email' => $user->email,

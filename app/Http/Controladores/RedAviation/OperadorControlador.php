@@ -48,6 +48,9 @@ class OperadorControlador extends ControladorBase
                 'id' => $provider?->id,
                 'company_name' => $provider?->company_name,
                 'commercial_name' => $provider?->commercial_name,
+                'jet_a_price' => $provider?->jet_a_price,
+                'margin_percent' => $provider?->margin_percent,
+                'fixed_fee' => $provider?->fixed_fee,
                 'approval_status' => $provider?->approval_status,
             ],
             'membership' => $plan ? [
@@ -288,11 +291,19 @@ class OperadorControlador extends ControladorBase
             'base_airport' => [$required, 'string', 'max:20'],
             'range_km' => ['nullable', 'integer', 'min:0'],
             'speed_kmh' => ['nullable', 'integer', 'min:0'],
+            'speed_knots' => ['nullable', 'numeric', 'min:0'],
             'coverage' => ['nullable', 'string', 'max:255'],
             'amenities' => ['nullable'],
             'hourly_rate' => ['nullable', 'numeric', 'min:0'],
             'minimum_hours' => ['nullable', 'numeric', 'min:0'],
             'operational_cost' => ['nullable', 'numeric', 'min:0'],
+            'fuel_burn_gph' => ['nullable', 'numeric', 'min:0'],
+            'engine_reserve_rate' => ['nullable', 'numeric', 'min:0'],
+            'insurance_rate' => ['nullable', 'numeric', 'min:0'],
+            'maintenance_rate' => ['nullable', 'numeric', 'min:0'],
+            'crew_rate' => ['nullable', 'numeric', 'min:0'],
+            'repositioning_fee' => ['nullable', 'numeric', 'min:0'],
+            'overnight_fee' => ['nullable', 'numeric', 'min:0'],
             'currency' => ['sometimes', 'string', 'size:3'],
             'status' => ['sometimes', 'in:active,inactive,maintenance,blocked'],
             'security_filter' => ['nullable', 'string', 'max:50'],
@@ -311,6 +322,12 @@ class OperadorControlador extends ControladorBase
 
     private function normalizeAircraftInput(array $data): array
     {
+        if (! array_key_exists('speed_kmh', $data) && array_key_exists('speed_knots', $data)) {
+            $data['speed_kmh'] = (int) round(((float) $data['speed_knots']) * 1.852);
+        }
+
+        unset($data['speed_knots']);
+
         if (! array_key_exists('model_year', $data) && array_key_exists('year', $data)) {
             $data['model_year'] = $data['year'];
         }
