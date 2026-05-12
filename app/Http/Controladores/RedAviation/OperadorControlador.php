@@ -275,6 +275,7 @@ class OperadorControlador extends ControladorBase
         return [
             'model' => [$required, 'string', 'max:255'],
             'manufacturer' => ['nullable', 'string', 'max:255'],
+            'category' => ['nullable', 'string', 'max:100'],
             'model_year' => ['nullable', 'integer', 'min:1900', 'max:2100'],
             'year' => ['nullable', 'integer', 'min:1900', 'max:2100'],
             'registration' => [
@@ -318,6 +319,10 @@ class OperadorControlador extends ControladorBase
 
         if (array_key_exists('manufacturer', $data)) {
             $data['manufacturer'] = $this->normalizeNullableString($data['manufacturer']);
+        }
+
+        if (array_key_exists('category', $data)) {
+            $data['category'] = $this->normalizeNullableString($data['category']);
         }
 
         if (array_key_exists('coverage', $data)) {
