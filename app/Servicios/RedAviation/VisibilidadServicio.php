@@ -6,6 +6,7 @@ use App\Modelos\Aeronave;
 use App\Modelos\ImagenAeronave;
 use App\Modelos\Operacion;
 use App\Modelos\SolicitudVuelo;
+use App\Modelos\TramoSolicitudVuelo;
 use App\Modelos\Usuario;
 
 class VisibilidadServicio
@@ -32,8 +33,10 @@ class VisibilidadServicio
             'destination' => $solicitud->destination,
             'departure_datetime' => $solicitud->departure_datetime,
             'passengers' => $solicitud->passengers,
+            'trip_type' => $solicitud->trip_type,
             'aircraft_type' => $solicitud->aircraft_type,
             'requirements' => $solicitud->requirements,
+            'legs' => $this->visibleLegs($solicitud),
             'notes' => $solicitud->notes,
             'status' => $solicitud->workflow_status ?? $solicitud->status,
             'chat' => $chat ? [
@@ -77,8 +80,10 @@ class VisibilidadServicio
             'destination' => $solicitud->destination,
             'departure_datetime' => $solicitud->departure_datetime,
             'passengers' => $solicitud->passengers,
+            'trip_type' => $solicitud->trip_type,
             'aircraft_type' => $solicitud->aircraft_type,
             'requirements' => $solicitud->requirements,
+            'legs' => $this->visibleLegs($solicitud),
             'status' => $solicitud->workflow_status ?? $solicitud->status,
             'client' => [
                 'display_name' => 'Cliente Red Aviation #'.$solicitud->client_id,
@@ -161,5 +166,23 @@ class VisibilidadServicio
                 ->filter()
                 ->values(),
         ];
+    }
+
+    private function visibleLegs(SolicitudVuelo $solicitud)
+    {
+        $legs = $solicitud->relationLoaded('legs')
+            ? $solicitud->legs->sortBy('leg_order')->values()
+            : $solicitud->legs()->orderBy('leg_order')->get();
+
+        return $legs->map(fn (TramoSolicitudVuelo $leg) => [
+            'id' => $leg->id,
+            'leg_order' => $leg->leg_order,
+            'origin' => $leg->origin,
+            'destination' => $leg->destination,
+            'departure_datetime' => $leg->departure_datetime,
+            'arrival_datetime' => $leg->arrival_datetime,
+            'passengers' => $leg->passengers,
+            'distance_km' => $leg->distance_km,
+        ])->values();
     }
 }

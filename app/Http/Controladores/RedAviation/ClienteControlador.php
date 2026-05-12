@@ -150,6 +150,7 @@ class ClienteControlador extends ControladorBase
             'destination' => ['required', 'string', 'max:20'],
             'departure_datetime' => ['required', 'date'],
             'passengers' => ['required', 'integer', 'min:1'],
+            'trip_type' => ['nullable', 'string', 'max:50'],
             'aircraft_type' => ['nullable', 'string', 'max:100'],
             'requirements' => ['nullable', 'array'],
             'notes' => ['nullable', 'string'],
@@ -159,6 +160,7 @@ class ClienteControlador extends ControladorBase
         $data['departure_date'] = $departure->format('Y-m-d');
         $data['departure_time'] = $departure->format('H:i');
         $data['requirements'] = $data['requirements'] ?? [];
+        $data['trip_type'] = $this->normalizeTripType($data['trip_type'] ?? null);
 
         $solicitud = SolicitudVuelo::create($data + [
             'client_id' => $request->user()->id,
@@ -169,6 +171,7 @@ class ClienteControlador extends ControladorBase
                 'demo' => $request->user()->demo?->status === 'active',
             ],
         ]);
+        $this->storeFlightRequestLegs($solicitud, $data);
 
         $this->matchingServicio->ejecutar($solicitud);
         $chat = $solicitud->chatsProtegidos()->create([
@@ -180,7 +183,7 @@ class ClienteControlador extends ControladorBase
 
         return $this->ok([
             'flight_request' => $this->visibilidadServicio->solicitudParaCliente(
-                $solicitud->fresh(['matches.aircraft.images', 'chatsProtegidos', 'operaciones.timeline'])
+                $solicitud->fresh(['matches.aircraft.images', 'chatsProtegidos', 'operaciones.timeline', 'legs'])
             ),
             'chat_id' => $chat->id,
         ], 201);
@@ -188,7 +191,7 @@ class ClienteControlador extends ControladorBase
 
     public function indexFlightRequests(Request $request)
     {
-        $solicitudes = SolicitudVuelo::with(['matches.aircraft.images', 'chatsProtegidos', 'operaciones.timeline'])
+        $solicitudes = SolicitudVuelo::with(['matches.aircraft.images', 'chatsProtegidos', 'operaciones.timeline', 'legs'])
             ->where('client_id', $request->user()->id)
             ->latest()
             ->get()
@@ -203,7 +206,7 @@ class ClienteControlador extends ControladorBase
 
         return $this->ok([
             'flight_request' => $this->visibilidadServicio->solicitudParaCliente(
-                $flightRequest->load(['matches.aircraft.images', 'chatsProtegidos', 'operaciones.timeline'])
+                $flightRequest->load(['matches.aircraft.images', 'chatsProtegidos', 'operaciones.timeline', 'legs'])
             ),
         ]);
     }
@@ -599,6 +602,77 @@ class ClienteControlador extends ControladorBase
             'multi-destino', 'multidestino', 'multi_city', 'multi_leg' => 'multi_leg',
             default => 'one_way',
         };
+    }
+
+    private function storeFlightRequestLegs(SolicitudVuelo $solicitud, array $data): void
+    {
+        $allLegs = array_merge([
+            [
+                'origin' => $data['origin'],
+                'destination' => $data['destination'],
+                'departure_datetime' => $data['departure_datetime'],
+                'passengers' => $data['passengers'] ?? 1,
+            ],
+        ], $data['requirements'] ?? []);
+
+        foreach ($allLegs as $index => $leg) {
+            $origin = strtoupper(trim((string) ($leg['origin'] ?? '')));
+            $destination = strtoupper(trim((string) ($leg['destination'] ?? '')));
+
+            if (! $origin || ! $destination) {
+                continue;
+            }
+
+            $departureDatetime = $this->resolveLegDepartureDatetime($leg, $data['departure_datetime']);
+            $distanceKm = $this->resolveLegDistanceKm($origin, $destination);
+
+            $solicitud->legs()->create([
+                'leg_order' => $index + 1,
+                'origin' => $origin,
+                'destination' => $destination,
+                'departure_datetime' => $departureDatetime,
+                'passengers' => (int) ($leg['passengers'] ?? $data['passengers'] ?? 1),
+                'distance_km' => $distanceKm,
+            ]);
+        }
+    }
+
+    private function resolveLegDepartureDatetime(array $leg, string $fallbackDepartureDatetime): string
+    {
+        if (! empty($leg['departure_datetime'])) {
+            return Carbon::parse($leg['departure_datetime'])->toDateTimeString();
+        }
+
+        if (! empty($leg['date'])) {
+            $time = ! empty($leg['time']) ? $leg['time'] : '09:00';
+            return Carbon::parse($leg['date'].' '.$time)->toDateTimeString();
+        }
+
+        return Carbon::parse($fallbackDepartureDatetime)->toDateTimeString();
+    }
+
+    private function resolveLegDistanceKm(string $originCode, string $destinationCode): ?int
+    {
+        $originAirport = $this->findActiveAirport($originCode);
+        $destinationAirport = $this->findActiveAirport($destinationCode);
+
+        if (
+            ! $originAirport ||
+            ! $destinationAirport ||
+            ! $originAirport->latitude ||
+            ! $originAirport->longitude ||
+            ! $destinationAirport->latitude ||
+            ! $destinationAirport->longitude
+        ) {
+            return null;
+        }
+
+        return (int) round($this->distanceKm(
+            (float) $originAirport->latitude,
+            (float) $originAirport->longitude,
+            (float) $destinationAirport->latitude,
+            (float) $destinationAirport->longitude
+        ));
     }
 
     private function matchReason(Aeronave $aircraft, string $origin): string
