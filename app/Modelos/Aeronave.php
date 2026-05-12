@@ -17,6 +17,7 @@ class Aeronave extends Model
         'provider_id',
         'model',
         'manufacturer',
+        'category',
         'model_year',
         'registration',
         'capacity',
