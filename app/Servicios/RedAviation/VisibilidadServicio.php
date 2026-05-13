@@ -74,6 +74,8 @@ class VisibilidadServicio
 
     public function solicitudParaOperador(SolicitudVuelo $solicitud): array
     {
+        $match = $this->matchPreferidoParaOperador($solicitud);
+
         return [
             'id' => $solicitud->id,
             'origin' => $solicitud->origin,
@@ -82,6 +84,12 @@ class VisibilidadServicio
             'passengers' => $solicitud->passengers,
             'trip_type' => $solicitud->trip_type,
             'aircraft_type' => $solicitud->aircraft_type,
+            'aircraft_model' => $match?->aircraft?->model
+                ?? $match?->visibility_payload['aircraft_model']
+                ?? null,
+            'aircraft_id' => $match?->aircraft_id,
+            'quote_total' => $match?->estimated_price,
+            'response_deadline' => $match?->response_deadline,
             'requirements' => $solicitud->requirements,
             'legs' => $this->visibleLegs($solicitud),
             'status' => $solicitud->workflow_status ?? $solicitud->status,
@@ -166,6 +174,17 @@ class VisibilidadServicio
                 ->filter()
                 ->values(),
         ];
+    }
+
+    private function matchPreferidoParaOperador(SolicitudVuelo $solicitud)
+    {
+        $matches = $solicitud->relationLoaded('matches')
+            ? $solicitud->matches->values()
+            : $solicitud->matches()->with('aircraft')->get()->values();
+
+        return $matches->first(fn ($match) => $match->status === 'accepted')
+            ?? $matches->first(fn ($match) => in_array($match->status, ['sent_to_provider', 'pending'], true))
+            ?? $matches->first();
     }
 
     private function visibleLegs(SolicitudVuelo $solicitud)
