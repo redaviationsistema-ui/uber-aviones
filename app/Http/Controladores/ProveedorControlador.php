@@ -16,13 +16,17 @@ use App\Modelos\RegistroAuditoria;
 use App\Modelos\Reserva;
 use App\Modelos\Usuario;
 use App\Servicios\ReintentoCoincidenciaSolicitudServicio;
+use App\Servicios\RedAviation\VisibilidadServicio;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rule;
 
 class ProveedorControlador extends ControladorBase
 {
-    public function __construct(private readonly ReintentoCoincidenciaSolicitudServicio $reintentoServicio)
+    public function __construct(
+        private readonly ReintentoCoincidenciaSolicitudServicio $reintentoServicio,
+        private readonly VisibilidadServicio $visibilidadServicio,
+    )
     {
     }
 
@@ -194,12 +198,21 @@ class ProveedorControlador extends ControladorBase
         $providerId = $request->user()->provider_id;
         abort_if(! $providerId, 404, 'Proveedor no encontrado.');
 
-        $requests = SolicitudVuelo::whereHas('matches', fn ($query) => $query->where('provider_id', $providerId))
-            ->with(['matches' => fn ($query) => $query->where('provider_id', $providerId), 'client'])
+        $requests = SolicitudVuelo::with([
+                'matches' => fn ($query) => $query->where('provider_id', $providerId),
+                'matches.aircraft',
+                'assignedAircraft',
+            ])
+            ->whereHas('matches', fn ($query) => $query->where('provider_id', $providerId))
             ->latest()
-            ->paginate(20);
+            ->get()
+            ->map(fn ($solicitud) => $this->visibilidadServicio->solicitudParaOperador($solicitud))
+            ->values();
 
-        return $this->ok(['flight_requests' => $requests]);
+        return $this->ok([
+            'requests' => $requests,
+            'flight_requests' => $requests,
+        ]);
     }
 
     public function showRequest(Request $request, SolicitudVuelo $flightRequest)
