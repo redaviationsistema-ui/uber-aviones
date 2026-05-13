@@ -215,6 +215,8 @@ class ProveedorControlador extends ControladorBase
         $providerId = $request->user()->provider_id;
         abort_if(! $providerId, 404);
 
+        $match = $flightRequest->matches()->where('provider_id', $providerId)->first();
+
         $flightRequest->matches()->where('provider_id', $providerId)->update([
             'status' => 'accepted',
             'accepted_at' => now(),
@@ -223,6 +225,8 @@ class ProveedorControlador extends ControladorBase
         $flightRequest->update([
             'status' => 'matched',
             'workflow_status' => 'aceptada',
+            'assigned_provider_id' => $providerId,
+            'assigned_aircraft_id' => $match?->aircraft_id,
         ]);
 
         return $this->ok(['message' => 'Solicitud aceptada para cotizar.']);
@@ -237,6 +241,14 @@ class ProveedorControlador extends ControladorBase
             'status' => 'rejected',
             'rejected_at' => now(),
         ]);
+
+        if ((int) $flightRequest->assigned_provider_id === (int) $providerId) {
+            $flightRequest->update([
+                'assigned_provider_id' => null,
+                'assigned_aircraft_id' => null,
+            ]);
+        }
+
         $retry = $this->reintentoServicio->manejarRechazo($flightRequest);
 
         return $this->ok([

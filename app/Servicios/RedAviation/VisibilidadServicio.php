@@ -75,6 +75,9 @@ class VisibilidadServicio
     public function solicitudParaOperador(SolicitudVuelo $solicitud): array
     {
         $match = $this->matchPreferidoParaOperador($solicitud);
+        $assignedAircraft = $solicitud->relationLoaded('assignedAircraft')
+            ? $solicitud->assignedAircraft
+            : $solicitud->assignedAircraft()->first();
 
         return [
             'id' => $solicitud->id,
@@ -84,10 +87,12 @@ class VisibilidadServicio
             'passengers' => $solicitud->passengers,
             'trip_type' => $solicitud->trip_type,
             'aircraft_type' => $solicitud->aircraft_type,
-            'aircraft_model' => $match?->aircraft?->model
+            'aircraft_model' => $assignedAircraft?->model
+                ?? $match?->aircraft?->model
                 ?? $match?->visibility_payload['aircraft_model']
                 ?? null,
-            'aircraft_id' => $match?->aircraft_id,
+            'aircraft_id' => $solicitud->assigned_aircraft_id ?? $match?->aircraft_id,
+            'provider_id' => $solicitud->assigned_provider_id ?? $match?->provider_id,
             'quote_total' => $match?->estimated_price,
             'response_deadline' => $match?->response_deadline,
             'requirements' => $solicitud->requirements,

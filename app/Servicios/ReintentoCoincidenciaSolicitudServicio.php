@@ -37,6 +37,8 @@ class ReintentoCoincidenciaSolicitudServicio
             $flightRequest->update([
                 'status' => 'matched',
                 'workflow_status' => 'buscando_operador',
+                'assigned_provider_id' => null,
+                'assigned_aircraft_id' => null,
             ]);
 
             return [
@@ -52,6 +54,8 @@ class ReintentoCoincidenciaSolicitudServicio
             $flightRequest->update([
                 'status' => 'matched',
                 'workflow_status' => 'buscando_operador',
+                'assigned_provider_id' => null,
+                'assigned_aircraft_id' => null,
             ]);
 
             return [
@@ -64,6 +68,8 @@ class ReintentoCoincidenciaSolicitudServicio
         $flightRequest->update([
             'status' => 'unmatched',
             'workflow_status' => 'sin_opciones_disponibles',
+            'assigned_provider_id' => null,
+            'assigned_aircraft_id' => null,
         ]);
 
         return [

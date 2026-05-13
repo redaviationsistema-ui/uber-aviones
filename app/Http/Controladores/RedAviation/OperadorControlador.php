@@ -161,7 +161,11 @@ class OperadorControlador extends ControladorBase
     {
         $providerId = $request->user()->provider_id;
         abort_if(! $providerId, 422, 'El usuario proveedor no tiene provider_id asignado.');
-        $solicitudes = SolicitudVuelo::with(['matches' => fn ($query) => $query->where('provider_id', $providerId), 'matches.aircraft'])
+        $solicitudes = SolicitudVuelo::with([
+                'matches' => fn ($query) => $query->where('provider_id', $providerId),
+                'matches.aircraft',
+                'assignedAircraft',
+            ])
             ->whereHas('matches', fn ($query) => $query->where('provider_id', $providerId))
             ->latest()
             ->get()
@@ -181,7 +185,11 @@ class OperadorControlador extends ControladorBase
             'accepted_at' => now(),
         ]);
 
-        $flightRequest->update(['workflow_status' => 'aceptada']);
+        $flightRequest->update([
+            'workflow_status' => 'aceptada',
+            'assigned_provider_id' => $providerId,
+            'assigned_aircraft_id' => $match->aircraft_id,
+        ]);
 
         $operacion = Operacion::create([
             'flight_request_id' => $flightRequest->id,
@@ -214,6 +222,13 @@ class OperadorControlador extends ControladorBase
             'status' => 'rejected',
             'rejected_at' => now(),
         ]);
+
+        if ((int) $flightRequest->assigned_provider_id === (int) $providerId) {
+            $flightRequest->update([
+                'assigned_provider_id' => null,
+                'assigned_aircraft_id' => null,
+            ]);
+        }
 
         return $this->ok([
             'match' => $match->fresh(),

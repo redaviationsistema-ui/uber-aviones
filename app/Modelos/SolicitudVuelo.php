@@ -15,6 +15,8 @@ class SolicitudVuelo extends Model
 
     protected $fillable = [
         'client_id',
+        'assigned_provider_id',
+        'assigned_aircraft_id',
         'origin',
         'destination',
         'departure_datetime',
@@ -51,6 +53,16 @@ class SolicitudVuelo extends Model
     public function client(): BelongsTo
     {
         return $this->belongsTo(Usuario::class, 'client_id');
+    }
+
+    public function assignedProvider(): BelongsTo
+    {
+        return $this->belongsTo(Proveedor::class, 'assigned_provider_id');
+    }
+
+    public function assignedAircraft(): BelongsTo
+    {
+        return $this->belongsTo(Aeronave::class, 'assigned_aircraft_id');
     }
 
     public function matches(): HasMany
