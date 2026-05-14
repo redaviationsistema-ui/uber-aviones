@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Modelos\Aeronave;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
@@ -72,6 +73,69 @@ class PlataformaVuelosApiTest extends TestCase
             ->assertJsonPath('flight_request.status', 'operador_asignado');
 
         $this->assertNotNull($response->json('chat_id'));
+    }
+
+    public function test_selected_provider_receives_request_in_provider_queue(): void
+    {
+        $this->seed();
+
+        $aircraft = Aeronave::where('registration', 'XA-LJ45')->firstOrFail();
+
+        $providerLogin = $this->postJson('/api/v1/auth/login', [
+            'email' => 'proveedor@privateflights.test',
+            'password' => 'password',
+        ])->assertOk();
+
+        $providerCookie = $providerLogin->getCookie('red_aviation_session');
+
+        $register = $this->postJson('/api/v1/auth/register', [
+            'name' => 'Cliente Cola',
+            'email' => 'cliente.cola@test.com',
+            'password' => 'password123',
+            'role' => 'client',
+        ])->assertCreated();
+
+        $clientCookie = $register->getCookie('red_aviation_session');
+
+        $this->withCookie($clientCookie->getName(), $clientCookie->getValue())
+            ->postJson('/api/v1/subscriptions/start-trial')
+            ->assertCreated();
+
+        $requestResponse = $this->withCookie($clientCookie->getName(), $clientCookie->getValue())
+            ->postJson('/api/v1/client/flight-requests', [
+                'origin' => 'MMMX',
+                'destination' => 'MMUN',
+                'departure_datetime' => now()->addDays(3)->toISOString(),
+                'passengers' => 4,
+                'aircraft_type' => 'light_jet',
+                'provider_id' => $aircraft->provider_id,
+                'aircraft_id' => $aircraft->id,
+                'requirements' => ['wifi' => true],
+            ])
+            ->assertCreated()
+            ->assertJsonPath('success', true);
+
+        $flightRequestId = $requestResponse->json('flight_request.id');
+
+        $this->assertDatabaseHas('flight_requests', [
+            'id' => $flightRequestId,
+            'assigned_provider_id' => $aircraft->provider_id,
+            'assigned_aircraft_id' => $aircraft->id,
+        ]);
+
+        $this->assertDatabaseHas('request_matches', [
+            'flight_request_id' => $flightRequestId,
+            'provider_id' => $aircraft->provider_id,
+            'aircraft_id' => $aircraft->id,
+            'status' => 'sent_to_provider',
+        ]);
+
+        $this->withCookie($providerCookie->getName(), $providerCookie->getValue())
+            ->getJson('/api/v1/proveedor/mis-solicitudes')
+            ->assertOk()
+            ->assertJsonPath('requests.0.id', $flightRequestId)
+            ->assertJsonPath('requests.0.provider_id', $aircraft->provider_id)
+            ->assertJsonPath('requests.0.aircraft_id', $aircraft->id);
     }
 
     public function test_red_aviation_chat_blocks_contact_leaks(): void

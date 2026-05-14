@@ -202,8 +202,13 @@ class ProveedorControlador extends ControladorBase
                 'matches' => fn ($query) => $query->where('provider_id', $providerId),
                 'matches.aircraft',
                 'assignedAircraft',
+                'legs',
             ])
-            ->whereHas('matches', fn ($query) => $query->where('provider_id', $providerId))
+            ->where(function ($query) use ($providerId) {
+                $query
+                    ->where('assigned_provider_id', $providerId)
+                    ->orWhereHas('matches', fn ($matchQuery) => $matchQuery->where('provider_id', $providerId));
+            })
             ->latest()
             ->get()
             ->map(fn ($solicitud) => $this->visibilidadServicio->solicitudParaOperador($solicitud))
@@ -218,7 +223,11 @@ class ProveedorControlador extends ControladorBase
     public function showRequest(Request $request, SolicitudVuelo $flightRequest)
     {
         $providerId = $request->user()->provider_id;
-        abort_if(! $providerId || ! $flightRequest->matches()->where('provider_id', $providerId)->exists(), 403);
+        $hasAccess = $providerId && (
+            (int) $flightRequest->assigned_provider_id === (int) $providerId ||
+            $flightRequest->matches()->where('provider_id', $providerId)->exists()
+        );
+        abort_if(! $hasAccess, 403);
 
         return $this->ok(['flight_request' => $flightRequest->load(['matches.aircraft', 'quotes'])]);
     }
@@ -297,9 +306,15 @@ class ProveedorControlador extends ControladorBase
         abort_if(! $providerId, 404, 'Proveedor no encontrado.');
 
         $activeStatuses = ['confirmada', 'confirmed', 'en_preparacion', 'preparacion', 'preparing', 'lista', 'ready', 'en_vuelo', 'in_progress', 'in_flight', 'incidencia'];
+        $assignedCrewIds = Operacion::query()
+            ->where('provider_id', $providerId)
+            ->whereIn('status', $activeStatuses)
+            ->whereNotNull('sobrecargo_user_id')
+            ->pluck('sobrecargo_user_id')
+            ->all();
 
         $crew = Usuario::query()
-            ->with(['roles'])
+            ->with(['roles', 'profile'])
             ->where('provider_id', $providerId)
             ->where(function ($query) {
                 $query->whereHas('roles', fn ($roles) => $roles->whereIn('code', ['sobrecargo']))
@@ -307,12 +322,8 @@ class ProveedorControlador extends ControladorBase
             })
             ->latest()
             ->get()
-            ->map(function (Usuario $user) use ($providerId, $activeStatuses) {
-                $hasActiveOperation = Operacion::query()
-                    ->where('provider_id', $providerId)
-                    ->where('sobrecargo_user_id', $user->id)
-                    ->whereIn('status', $activeStatuses)
-                    ->exists();
+            ->map(function (Usuario $user) use ($assignedCrewIds) {
+                $hasActiveOperation = in_array($user->id, $assignedCrewIds, true);
 
                 return [
                     'id' => $user->id,

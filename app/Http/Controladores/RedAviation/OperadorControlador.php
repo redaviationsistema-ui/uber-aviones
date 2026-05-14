@@ -166,7 +166,11 @@ class OperadorControlador extends ControladorBase
                 'matches.aircraft',
                 'assignedAircraft',
             ])
-            ->whereHas('matches', fn ($query) => $query->where('provider_id', $providerId))
+            ->where(function ($query) use ($providerId) {
+                $query
+                    ->where('assigned_provider_id', $providerId)
+                    ->orWhereHas('matches', fn ($matchQuery) => $matchQuery->where('provider_id', $providerId));
+            })
             ->latest()
             ->get()
             ->map(fn ($solicitud) => $this->visibilidadServicio->solicitudParaOperador($solicitud));

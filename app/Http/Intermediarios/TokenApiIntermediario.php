@@ -28,7 +28,11 @@ class TokenApiIntermediario
             return $this->unauthenticated();
         }
 
-        $token->forceFill(['last_used_at' => now()])->save();
+        if ($this->shouldRefreshLastUsedAt($token->last_used_at)) {
+            $token->timestamps = false;
+            $token->forceFill(['last_used_at' => now()])->saveQuietly();
+        }
+
         $request->setUserResolver(fn () => $token->user);
 
         return $next($request);
@@ -37,6 +41,14 @@ class TokenApiIntermediario
     private function authCookieName(): string
     {
         return (string) env('AUTH_TOKEN_COOKIE', 'red_aviation_session');
+    }
+
+    private function shouldRefreshLastUsedAt($lastUsedAt): bool
+    {
+        $refreshEveryMinutes = max((int) env('AUTH_TOKEN_REFRESH_MINUTES', 5), 1);
+
+        return $lastUsedAt === null
+            || $lastUsedAt->lte(now()->subMinutes($refreshEveryMinutes));
     }
 
     private function unauthenticated(): Response

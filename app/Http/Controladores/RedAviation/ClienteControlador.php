@@ -152,6 +152,10 @@ class ClienteControlador extends ControladorBase
             'passengers' => ['required', 'integer', 'min:1'],
             'trip_type' => ['nullable', 'string', 'max:50'],
             'aircraft_type' => ['nullable', 'string', 'max:100'],
+            'provider_id' => ['nullable', 'exists:providers,id'],
+            'aircraft_id' => ['nullable', 'exists:aircraft,id'],
+            'match_id' => ['nullable'],
+            'matched_option_id' => ['nullable'],
             'requirements' => ['nullable', 'array'],
             'notes' => ['nullable', 'string'],
         ]);
@@ -174,6 +178,7 @@ class ClienteControlador extends ControladorBase
         $this->storeFlightRequestLegs($solicitud, $data);
 
         $this->matchingServicio->ejecutar($solicitud);
+        $this->assignSelectedMatchToFlightRequest($solicitud, $data);
         $chat = $solicitud->chatsProtegidos()->create([
             'client_id' => $request->user()->id,
             'status' => 'activo',
@@ -187,6 +192,55 @@ class ClienteControlador extends ControladorBase
             ),
             'chat_id' => $chat->id,
         ], 201);
+    }
+
+    private function assignSelectedMatchToFlightRequest(SolicitudVuelo $solicitud, array $data): void
+    {
+        $selectedProviderId = (int) ($data['provider_id'] ?? 0);
+        $selectedAircraftId = (int) ($data['aircraft_id'] ?? 0);
+
+        if (! $selectedProviderId && ! $selectedAircraftId) {
+            return;
+        }
+
+        $selectedMatch = $solicitud->matches()
+            ->when($selectedProviderId > 0, fn ($query) => $query->where('provider_id', $selectedProviderId))
+            ->when($selectedAircraftId > 0, fn ($query) => $query->where('aircraft_id', $selectedAircraftId))
+            ->first();
+
+        if (! $selectedMatch && $selectedAircraftId > 0) {
+            $selectedMatch = $solicitud->matches()
+                ->where('aircraft_id', $selectedAircraftId)
+                ->first();
+        }
+
+        if (! $selectedMatch && $selectedProviderId > 0) {
+            $selectedMatch = $solicitud->matches()
+                ->where('provider_id', $selectedProviderId)
+                ->orderByDesc('match_score')
+                ->first();
+        }
+
+        if (! $selectedMatch) {
+            return;
+        }
+
+        $selectedMatch->update([
+            'status' => 'sent_to_provider',
+        ]);
+
+        $visibilityPayload = $solicitud->visibility_payload ?? [];
+
+        $solicitud->update([
+            'assigned_provider_id' => $selectedMatch->provider_id,
+            'assigned_aircraft_id' => $selectedMatch->aircraft_id,
+            'workflow_status' => 'operador_asignado',
+            'visibility_payload' => [
+                ...$visibilityPayload,
+                'selected_provider_id' => $selectedMatch->provider_id,
+                'selected_aircraft_id' => $selectedMatch->aircraft_id,
+            ],
+        ]);
     }
 
     public function indexFlightRequests(Request $request)
