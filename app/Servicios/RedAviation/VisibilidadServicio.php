@@ -13,6 +13,12 @@ class VisibilidadServicio
 {
     public function solicitudParaCliente(SolicitudVuelo $solicitud): array
     {
+        $preferredMatch = $this->matchPreferidoParaCliente($solicitud);
+        $visibilityPayload = $solicitud->visibility_payload ?? [];
+        $assignedAircraft = $solicitud->relationLoaded('assignedAircraft')
+            ? $solicitud->assignedAircraft
+            : $solicitud->assignedAircraft()->with('images')->first();
+
         $chat = $solicitud->relationLoaded('chatsProtegidos')
             ? $solicitud->chatsProtegidos->sortByDesc('id')->first()
             : $solicitud->chatsProtegidos()->latest('id')->first();
@@ -35,6 +41,26 @@ class VisibilidadServicio
             'passengers' => $solicitud->passengers,
             'trip_type' => $solicitud->trip_type,
             'aircraft_type' => $solicitud->aircraft_type,
+            'assigned_provider_id' => $solicitud->assigned_provider_id,
+            'assigned_aircraft_id' => $solicitud->assigned_aircraft_id,
+            'aircraft_model' => $assignedAircraft?->model
+                ?? $solicitud->assigned_aircraft_model
+                ?? $preferredMatch?->aircraft?->model
+                ?? $visibilityPayload['aircraft_model']
+                ?? null,
+            'aircraft_category' => $assignedAircraft?->category
+                ?? $preferredMatch?->aircraft?->category
+                ?? $visibilityPayload['aircraft_category']
+                ?? $solicitud->aircraft_type,
+            'aircraft_capacity' => $assignedAircraft?->capacity
+                ?? $preferredMatch?->aircraft?->capacity
+                ?? $visibilityPayload['aircraft_capacity']
+                ?? null,
+            'aircraft_image' => $assignedAircraft
+                ? $this->aeronaveVisibleParaCliente($assignedAircraft, $solicitud->aircraft_type)['main_image']
+                : ($preferredMatch?->aircraft
+                    ? $this->aeronaveVisibleParaCliente($preferredMatch->aircraft, $solicitud->aircraft_type)['main_image']
+                    : null),
             'requirements' => $solicitud->requirements,
             'legs' => $this->visibleLegs($solicitud),
             'notes' => $solicitud->notes,
@@ -75,6 +101,7 @@ class VisibilidadServicio
     public function solicitudParaOperador(SolicitudVuelo $solicitud): array
     {
         $match = $this->matchPreferidoParaOperador($solicitud);
+        $visibilityPayload = $solicitud->visibility_payload ?? [];
         $assignedAircraft = $solicitud->relationLoaded('assignedAircraft')
             ? $solicitud->assignedAircraft
             : $solicitud->assignedAircraft()->first();
@@ -88,7 +115,9 @@ class VisibilidadServicio
             'trip_type' => $solicitud->trip_type,
             'aircraft_type' => $solicitud->aircraft_type,
             'aircraft_model' => $assignedAircraft?->model
+                ?? $solicitud->assigned_aircraft_model
                 ?? $match?->aircraft?->model
+                ?? $visibilityPayload['aircraft_model']
                 ?? $match?->visibility_payload['aircraft_model']
                 ?? null,
             'aircraft_id' => $solicitud->assigned_aircraft_id ?? $match?->aircraft_id,
@@ -190,6 +219,24 @@ class VisibilidadServicio
         return $matches->first(fn ($match) => $match->status === 'accepted')
             ?? $matches->first(fn ($match) => in_array($match->status, ['sent_to_provider', 'pending'], true))
             ?? $matches->first();
+    }
+
+    private function matchPreferidoParaCliente(SolicitudVuelo $solicitud)
+    {
+        $matches = $solicitud->relationLoaded('matches')
+            ? $solicitud->matches->values()
+            : $solicitud->matches()->with('aircraft')->get()->values();
+
+        if ($solicitud->assigned_aircraft_id) {
+            $assignedMatch = $matches->first(
+                fn ($match) => (int) $match->aircraft_id === (int) $solicitud->assigned_aircraft_id
+            );
+            if ($assignedMatch) {
+                return $assignedMatch;
+            }
+        }
+
+        return $this->matchPreferidoParaOperador($solicitud);
     }
 
     private function visibleLegs(SolicitudVuelo $solicitud)

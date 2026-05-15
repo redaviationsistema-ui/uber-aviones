@@ -20,11 +20,15 @@ Route::middleware(['auth.token'])->group(function () {
     Route::get('/subscriptions/current', [SuscripcionControlador::class, 'current']);
     Route::post('/subscriptions/cancel', [SuscripcionControlador::class, 'cancel']);
 
-    Route::prefix('client')->middleware(['role:client,admin', 'subscription.active'])->group(function () {
-        Route::get('/dashboard', [ClienteControlador::class, 'dashboard']);
-        Route::post('/flight-requests', [ClienteControlador::class, 'storeFlightRequest'])->middleware('plan.limit');
+    Route::prefix('client')->middleware(['role:client,admin'])->group(function () {
         Route::get('/flight-requests', [ClienteControlador::class, 'indexFlightRequests']);
         Route::get('/flight-requests/{flightRequest}', [ClienteControlador::class, 'showFlightRequest']);
+    });
+
+    Route::prefix('client')->middleware(['role:client,admin', 'subscription.active'])->group(function () {
+        Route::get('/dashboard', [ClienteControlador::class, 'dashboard']);
+        Route::get('/aircraft', [ClienteControlador::class, 'indexAircraft']);
+        Route::post('/flight-requests', [ClienteControlador::class, 'storeFlightRequest'])->middleware('plan.limit');
         Route::get('/operations/{operation}/tracking', [ClienteControlador::class, 'tracking']);
     });
 
@@ -84,6 +88,7 @@ Route::middleware(['auth.token'])->group(function () {
         Route::delete('/users/{user}', [AdminControlador::class, 'destroyUser']);
         Route::post('/users/{user}/block', [AdminControlador::class, 'blockUser']);
         Route::post('/users/{user}/activate', [AdminControlador::class, 'activateUser']);
+        Route::post('/users/{user}/grant-trial', [AdminControlador::class, 'grantUserTrial']);
         Route::post('/users/{user}/reset-password', [AdminControlador::class, 'resetUserPassword']);
         Route::get('/operators', [AdminControlador::class, 'operators']);
         Route::get('/sobrecargos', [AdminControlador::class, 'sobrecargos']);

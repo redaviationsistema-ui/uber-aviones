@@ -238,17 +238,28 @@ class ProveedorControlador extends ControladorBase
         abort_if(! $providerId, 404);
 
         $match = $flightRequest->matches()->where('provider_id', $providerId)->first();
+        $match?->loadMissing('aircraft');
 
         $flightRequest->matches()->where('provider_id', $providerId)->update([
             'status' => 'accepted',
             'accepted_at' => now(),
             'rejected_at' => null,
         ]);
+        $visibilityPayload = $flightRequest->visibility_payload ?? [];
         $flightRequest->update([
             'status' => 'matched',
             'workflow_status' => 'aceptada',
             'assigned_provider_id' => $providerId,
             'assigned_aircraft_id' => $match?->aircraft_id,
+            'assigned_aircraft_model' => $match?->aircraft?->model,
+            'visibility_payload' => [
+                ...$visibilityPayload,
+                'selected_provider_id' => $providerId,
+                'selected_aircraft_id' => $match?->aircraft_id,
+                'aircraft_model' => $match?->aircraft?->model,
+                'aircraft_category' => $match?->aircraft?->category,
+                'aircraft_capacity' => $match?->aircraft?->capacity,
+            ],
         ]);
 
         return $this->ok(['message' => 'Solicitud aceptada para cotizar.']);
@@ -265,9 +276,19 @@ class ProveedorControlador extends ControladorBase
         ]);
 
         if ((int) $flightRequest->assigned_provider_id === (int) $providerId) {
+            $visibilityPayload = $flightRequest->visibility_payload ?? [];
             $flightRequest->update([
                 'assigned_provider_id' => null,
                 'assigned_aircraft_id' => null,
+                'assigned_aircraft_model' => null,
+                'visibility_payload' => [
+                    ...$visibilityPayload,
+                    'selected_provider_id' => null,
+                    'selected_aircraft_id' => null,
+                    'aircraft_model' => null,
+                    'aircraft_category' => null,
+                    'aircraft_capacity' => null,
+                ],
             ]);
         }
 

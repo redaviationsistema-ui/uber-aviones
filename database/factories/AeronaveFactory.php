@@ -16,6 +16,7 @@ class AeronaveFactory extends Factory
         return [
             'provider_id' => Proveedor::factory(),
             'model' => 'Citation '.fake()->word(),
+            'category' => fake()->randomElement(['Helicoptero', 'Turboprop', 'Light Jet', 'Mid Jet', 'Heavy Jet']),
             'registration' => fake()->unique()->bothify('XA-???'),
             'capacity' => fake()->numberBetween(4, 14),
             'base_airport' => 'MMMX',

@@ -17,6 +17,7 @@ class SolicitudVuelo extends Model
         'client_id',
         'assigned_provider_id',
         'assigned_aircraft_id',
+        'assigned_aircraft_model',
         'origin',
         'destination',
         'departure_datetime',
@@ -32,6 +33,13 @@ class SolicitudVuelo extends Model
         'requirements',
         'package_snapshot',
         'visibility_payload',
+        'base_price',
+        'operational_fee',
+        'priority_price',
+        'final_price',
+        'currency',
+        'pricing_formula_version',
+        'pricing_context',
         'notes',
         'status',
         'workflow_status',
@@ -47,6 +55,11 @@ class SolicitudVuelo extends Model
             'requirements' => 'array',
             'package_snapshot' => 'array',
             'visibility_payload' => 'array',
+            'base_price' => 'decimal:2',
+            'operational_fee' => 'decimal:2',
+            'priority_price' => 'decimal:2',
+            'final_price' => 'decimal:2',
+            'pricing_context' => 'array',
         ];
     }
 

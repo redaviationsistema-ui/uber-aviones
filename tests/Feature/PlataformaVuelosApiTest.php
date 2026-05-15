@@ -75,6 +75,55 @@ class PlataformaVuelosApiTest extends TestCase
         $this->assertNotNull($response->json('chat_id'));
     }
 
+    public function test_admin_can_grant_trial_to_client_and_unlock_flight_requests(): void
+    {
+        $this->seed();
+
+        $adminLogin = $this->postJson('/api/v1/auth/login', [
+            'email' => 'admin@privateflights.test',
+            'password' => 'password',
+        ])->assertOk();
+
+        $adminCookie = $adminLogin->getCookie('red_aviation_session');
+
+        $register = $this->postJson('/api/v1/auth/register', [
+            'name' => 'Cliente Bloqueado',
+            'email' => 'cliente.bloqueado@test.com',
+            'password' => 'password123',
+            'role' => 'client',
+        ])->assertCreated();
+
+        $clientCookie = $register->getCookie('red_aviation_session');
+        $clientId = $register->json('user.id');
+
+        $this->withCookie($clientCookie->getName(), $clientCookie->getValue())
+            ->postJson('/api/v1/client/flight-requests', [
+                'origin' => 'MMMX',
+                'destination' => 'MMUN',
+                'departure_datetime' => now()->addDays(3)->toISOString(),
+                'passengers' => 4,
+            ])
+            ->assertStatus(402)
+            ->assertJsonPath('message', 'Necesitas demo activa o suscripcion vigente.');
+
+        $this->withCookie($adminCookie->getName(), $adminCookie->getValue())
+            ->postJson("/api/v1/admin/users/{$clientId}/grant-trial")
+            ->assertCreated()
+            ->assertJsonPath('message', 'Demo comercial activada correctamente.')
+            ->assertJsonPath('access.has_access', true)
+            ->assertJsonPath('access.demo.status', 'active');
+
+        $this->withCookie($clientCookie->getName(), $clientCookie->getValue())
+            ->postJson('/api/v1/client/flight-requests', [
+                'origin' => 'MMMX',
+                'destination' => 'MMUN',
+                'departure_datetime' => now()->addDays(3)->toISOString(),
+                'passengers' => 4,
+            ])
+            ->assertCreated()
+            ->assertJsonPath('success', true);
+    }
+
     public function test_selected_provider_receives_request_in_provider_queue(): void
     {
         $this->seed();

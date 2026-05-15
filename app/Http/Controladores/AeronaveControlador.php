@@ -17,6 +17,14 @@ use Illuminate\Validation\Rule;
 
 class AeronaveControlador extends ControladorBase
 {
+    private const AIRCRAFT_CATEGORIES = [
+        'Helicoptero',
+        'Turboprop',
+        'Light Jet',
+        'Mid Jet',
+        'Heavy Jet',
+    ];
+
     public function index(Request $request)
     {
         $query = Aeronave::with(['provider.user.activeSuscripcion.plan', 'images', 'availability', 'documents']);
@@ -640,7 +648,7 @@ class AeronaveControlador extends ControladorBase
         }
 
         if (array_key_exists('category', $data)) {
-            $data['category'] = $this->normalizeNullableString($data['category']);
+            $data['category'] = $this->normalizeAircraftCategory($data['category']);
         }
 
         if (array_key_exists('coverage', $data)) {
@@ -673,7 +681,7 @@ class AeronaveControlador extends ControladorBase
         return [
             'model' => [$required, 'string', 'max:255'],
             'manufacturer' => ['nullable', 'string', 'max:255'],
-            'category' => ['nullable', 'string', 'max:100'],
+            'category' => ['nullable', 'string', Rule::in(self::AIRCRAFT_CATEGORIES)],
             'model_year' => ['nullable', 'integer', 'min:1900', 'max:2100'],
             'year' => ['nullable', 'integer', 'min:1900', 'max:2100'],
             'registration' => [
@@ -691,6 +699,7 @@ class AeronaveControlador extends ControladorBase
             'amenities' => ['nullable'],
             'hourly_rate' => [$required, 'numeric', 'min:0'],
             'minimum_hours' => ['nullable', 'numeric', 'min:0'],
+            'minimum_route_price' => ['nullable', 'numeric', 'min:0'],
             'operational_cost' => ['nullable', 'numeric', 'min:0'],
             'currency' => ['sometimes', 'string', 'size:3'],
             'status' => ['sometimes', 'in:active,inactive,maintenance,blocked'],
@@ -786,7 +795,7 @@ class AeronaveControlador extends ControladorBase
         return [
             'id' => $aircraft->id,
             'model' => $aircraft->model,
-            'category' => $aircraft->category ?? 'Cabina ejecutiva',
+            'category' => $this->normalizeAircraftCategory($aircraft->category) ?? 'Cabina ejecutiva',
             'capacity' => $aircraft->capacity,
             'range_km' => $aircraft->range_km,
             'status' => $aircraft->status,
@@ -828,6 +837,21 @@ class AeronaveControlador extends ControladorBase
         }
 
         return array_values(array_filter(array_map('trim', explode(',', $normalized))));
+    }
+
+    private function normalizeAircraftCategory(mixed $value): ?string
+    {
+        $normalized = mb_strtolower(trim((string) ($value ?? '')));
+
+        return match ($normalized) {
+            'helicoptero', 'helicóptero', 'helicopter' => 'Helicoptero',
+            'turboprop', 'turbo prop' => 'Turboprop',
+            'light jet', 'light_jet', 'lightjet' => 'Light Jet',
+            'mid jet', 'mid_jet', 'midjet', 'midsize jet', 'midsize_jet', 'super mid', 'super_mid' => 'Mid Jet',
+            'heavy jet', 'heavy_jet', 'heavyjet', 'long range', 'long_range', 'ultra long', 'ultra_long' => 'Heavy Jet',
+            '' => null,
+            default => trim((string) $value),
+        };
     }
 
     private function normalizeNullableString(mixed $value): ?string

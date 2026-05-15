@@ -19,6 +19,14 @@ use Illuminate\Validation\Rule;
 
 class OperadorControlador extends ControladorBase
 {
+    private const AIRCRAFT_CATEGORIES = [
+        'Helicoptero',
+        'Turboprop',
+        'Light Jet',
+        'Mid Jet',
+        'Heavy Jet',
+    ];
+
     public function __construct(
         private readonly VisibilidadServicio $visibilidadServicio,
         private readonly ReintentoCoincidenciaSolicitudServicio $reintentoServicio,
@@ -126,7 +134,7 @@ class OperadorControlador extends ControladorBase
     {
         abort_if($aircraft->provider_id !== $request->user()->provider_id, 403);
 
-        $aircraft->update($this->normalizeAircraftInput($request->validate($this->aircraftRules(false, $aircraft))));
+        $aircraft->update($this->normalizeAircraftInput($request->validate($this->aircraftRules(false, $aircraft)), $aircraft));
 
         $user = $request->user()->loadMissing('activeSuscripcion.plan');
 
@@ -183,16 +191,27 @@ class OperadorControlador extends ControladorBase
         $providerId = $request->user()->provider_id;
         abort_if(! $providerId, 422, 'El usuario proveedor no tiene provider_id asignado.');
         $match = $flightRequest->matches()->where('provider_id', $providerId)->firstOrFail();
+        $match->loadMissing('aircraft');
 
         $match->update([
             'status' => 'accepted',
             'accepted_at' => now(),
         ]);
 
+        $visibilityPayload = $flightRequest->visibility_payload ?? [];
         $flightRequest->update([
             'workflow_status' => 'aceptada',
             'assigned_provider_id' => $providerId,
             'assigned_aircraft_id' => $match->aircraft_id,
+            'assigned_aircraft_model' => $match->aircraft?->model,
+            'visibility_payload' => [
+                ...$visibilityPayload,
+                'selected_provider_id' => $providerId,
+                'selected_aircraft_id' => $match->aircraft_id,
+                'aircraft_model' => $match->aircraft?->model,
+                'aircraft_category' => $match->aircraft?->category,
+                'aircraft_capacity' => $match->aircraft?->capacity,
+            ],
         ]);
 
         $operacion = Operacion::create([
@@ -228,9 +247,19 @@ class OperadorControlador extends ControladorBase
         ]);
 
         if ((int) $flightRequest->assigned_provider_id === (int) $providerId) {
+            $visibilityPayload = $flightRequest->visibility_payload ?? [];
             $flightRequest->update([
                 'assigned_provider_id' => null,
                 'assigned_aircraft_id' => null,
+                'assigned_aircraft_model' => null,
+                'visibility_payload' => [
+                    ...$visibilityPayload,
+                    'selected_provider_id' => null,
+                    'selected_aircraft_id' => null,
+                    'aircraft_model' => null,
+                    'aircraft_category' => null,
+                    'aircraft_capacity' => null,
+                ],
             ]);
         }
 
@@ -297,7 +326,7 @@ class OperadorControlador extends ControladorBase
         return [
             'model' => [$required, 'string', 'max:255'],
             'manufacturer' => ['nullable', 'string', 'max:255'],
-            'category' => ['nullable', 'string', 'max:100'],
+            'category' => ['nullable', 'string', Rule::in(self::AIRCRAFT_CATEGORIES)],
             'model_year' => ['nullable', 'integer', 'min:1900', 'max:2100'],
             'year' => ['nullable', 'integer', 'min:1900', 'max:2100'],
             'registration' => [
@@ -339,7 +368,7 @@ class OperadorControlador extends ControladorBase
         ];
     }
 
-    private function normalizeAircraftInput(array $data): array
+    private function normalizeAircraftInput(array $data, ?Aeronave $aircraft = null): array
     {
         if (! array_key_exists('speed_kmh', $data) && array_key_exists('speed_knots', $data)) {
             $data['speed_kmh'] = (int) round(((float) $data['speed_knots']) * 1.852);
@@ -358,7 +387,12 @@ class OperadorControlador extends ControladorBase
         }
 
         if (array_key_exists('category', $data)) {
-            $data['category'] = $this->normalizeNullableString($data['category']);
+            $data['category'] = $this->normalizeAircraftCategory($data['category']);
+        }
+
+        $resolvedCategory = $data['category'] ?? $this->normalizeAircraftCategory($aircraft?->category);
+        if ($resolvedCategory) {
+            $data['minimum_hours'] = $this->resolveMinimumHoursForCategory($resolvedCategory);
         }
 
         if (array_key_exists('coverage', $data)) {
@@ -384,6 +418,16 @@ class OperadorControlador extends ControladorBase
         return $data;
     }
 
+    private function resolveMinimumHoursForCategory(?string $category): float
+    {
+        return match ($this->normalizeAircraftCategory($category)) {
+            'Turboprop' => 1.5,
+            'Heavy Jet' => 3.0,
+            'Light Jet', 'Mid Jet', 'Helicoptero', null => 2.0,
+            default => 2.0,
+        };
+    }
+
     private function formatAircraftPayload(Aeronave $aircraft, $plan = null, ?int $fleetCount = null): array
     {
         $providerUser = $aircraft->provider?->user;
@@ -406,6 +450,7 @@ class OperadorControlador extends ControladorBase
         return [
             ...$aircraft->toArray(),
             'year' => $aircraft->model_year,
+            'minimum_hours' => $aircraft->minimum_hours ?: $this->resolveMinimumHoursForCategory($aircraft->category),
             'amenities' => $this->parseAmenities($aircraft->amenities),
             'documents' => $aircraft->documents
                 ->map(fn (DocumentoAeronave $document) => $this->formatAircraftDocumentPayload($document))
@@ -463,6 +508,21 @@ class OperadorControlador extends ControladorBase
         }
 
         return array_values(array_filter(array_map('trim', explode(',', $normalized))));
+    }
+
+    private function normalizeAircraftCategory(mixed $value): ?string
+    {
+        $normalized = mb_strtolower(trim((string) ($value ?? '')));
+
+        return match ($normalized) {
+            'helicoptero', 'helicóptero', 'helicopter' => 'Helicoptero',
+            'turboprop', 'turbo prop' => 'Turboprop',
+            'light jet', 'light_jet', 'lightjet' => 'Light Jet',
+            'mid jet', 'mid_jet', 'midjet', 'midsize jet', 'midsize_jet', 'super mid', 'super_mid' => 'Mid Jet',
+            'heavy jet', 'heavy_jet', 'heavyjet', 'long range', 'long_range', 'ultra long', 'ultra_long' => 'Heavy Jet',
+            '' => null,
+            default => trim((string) $value),
+        };
     }
 
     private function normalizeNullableString(mixed $value): ?string

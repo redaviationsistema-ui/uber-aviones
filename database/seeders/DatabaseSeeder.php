@@ -7,6 +7,7 @@ use App\Modelos\DisponibilidadAeronave;
 use App\Modelos\Aeropuerto;
 use App\Modelos\Plan;
 use App\Modelos\Proveedor;
+use App\Modelos\ReglaPrecioCategoria;
 use App\Modelos\ConfiguracionSistema;
 use App\Modelos\Usuario;
 use Illuminate\Database\Seeder;
@@ -99,6 +100,19 @@ class DatabaseSeeder extends Seeder
             ['group' => 'payments', 'value' => ['mode' => 'saas', 'commission_rate' => 0]]
         );
 
+        foreach ([
+            ['category' => 'Helicoptero', 'minimum_route_price' => 2200, 'redsky_markup' => 20],
+            ['category' => 'Turboprop', 'minimum_route_price' => 2800, 'redsky_markup' => 20],
+            ['category' => 'Light Jet', 'minimum_route_price' => 3800, 'redsky_markup' => 22],
+            ['category' => 'Mid Jet', 'minimum_route_price' => 4800, 'redsky_markup' => 25],
+            ['category' => 'Heavy Jet', 'minimum_route_price' => 7000, 'redsky_markup' => 30],
+        ] as $rule) {
+            ReglaPrecioCategoria::updateOrCreate(
+                ['category' => $rule['category']],
+                $rule + ['is_active' => true]
+            );
+        }
+
         Plan::firstOrCreate(
             ['slug' => 'premium-yearly'],
             [
@@ -150,6 +164,7 @@ class DatabaseSeeder extends Seeder
             [
                 'provider_id' => $provider->id,
                 'model' => 'Learjet 45XR',
+                'category' => 'Light Jet',
                 'capacity' => 8,
                 'base_airport' => 'MMMX',
                 'range_km' => 3700,
@@ -165,6 +180,7 @@ class DatabaseSeeder extends Seeder
             [
                 'provider_id' => $provider->id,
                 'model' => 'Hawker 800XP',
+                'category' => 'Mid Jet',
                 'capacity' => 8,
                 'base_airport' => 'MMMX',
                 'range_km' => 4300,
@@ -224,6 +240,7 @@ class DatabaseSeeder extends Seeder
             [
                 'provider_id' => $kevinProvider->id,
                 'model' => 'Citation Latitude',
+                'category' => 'Mid Jet',
                 'capacity' => 9,
                 'base_airport' => 'MMTO',
                 'range_km' => 5000,

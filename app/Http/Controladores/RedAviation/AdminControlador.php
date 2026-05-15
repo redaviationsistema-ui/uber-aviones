@@ -4,6 +4,7 @@ namespace App\Http\Controladores\RedAviation;
 
 use App\Http\Controladores\ControladorBase;
 use App\Modelos\BanderaAntiBroker;
+use App\Modelos\Demo;
 use App\Modelos\Operacion;
 use App\Modelos\Proveedor;
 use App\Modelos\Rol;
@@ -40,7 +41,7 @@ class AdminControlador extends ControladorBase
     public function users()
     {
         return $this->ok([
-            'users' => Usuario::with(['roles', 'profile', 'provider'])
+            'users' => Usuario::with(['roles', 'profile', 'provider', 'demo', 'activeSuscripcion.plan'])
                 ->latest()
                 ->paginate(20),
         ]);
@@ -92,7 +93,7 @@ class AdminControlador extends ControladorBase
         ));
 
         return $this->ok([
-            'user' => $user->fresh(['roles', 'profile', 'provider']),
+            'user' => $user->fresh(['roles', 'profile', 'provider', 'demo', 'activeSuscripcion.plan']),
             'temporary_password' => $plainPassword,
         ], 201);
     }
@@ -128,7 +129,7 @@ class AdminControlador extends ControladorBase
         ));
 
         return $this->ok([
-            'user' => $user->fresh(['roles', 'profile', 'provider']),
+            'user' => $user->fresh(['roles', 'profile', 'provider', 'demo', 'activeSuscripcion.plan']),
         ]);
     }
 
@@ -164,7 +165,7 @@ class AdminControlador extends ControladorBase
         ));
 
         return $this->ok([
-            'user' => $user->fresh(['roles', 'profile', 'provider']),
+            'user' => $user->fresh(['roles', 'profile', 'provider', 'demo', 'activeSuscripcion.plan']),
         ]);
     }
 
@@ -178,8 +179,40 @@ class AdminControlador extends ControladorBase
         ));
 
         return $this->ok([
-            'user' => $user->fresh(['roles', 'profile', 'provider']),
+            'user' => $user->fresh(['roles', 'profile', 'provider', 'demo', 'activeSuscripcion.plan']),
         ]);
+    }
+
+    public function grantUserTrial(Request $request, Usuario $user)
+    {
+        if (! $user->hasRole(Usuario::ROLE_CLIENT)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Solo los usuarios cliente pueden recibir demo comercial.',
+            ], 422);
+        }
+
+        $demo = Demo::updateOrCreate(
+            ['user_id' => $user->id],
+            [
+                'started_at' => now(),
+                'expires_at' => now()->addDays(15),
+                'status' => 'active',
+            ]
+        );
+
+        $this->writeAudit($request, 'admin_user_trial_granted', 'admin_users', sprintf(
+            'Admin activo demo comercial para el usuario %s hasta %s.',
+            $user->email,
+            optional($demo->expires_at)?->toDateTimeString() ?? 'sin fecha'
+        ));
+
+        return $this->ok([
+            'message' => 'Demo comercial activada correctamente.',
+            'demo' => $demo,
+            'access' => $user->fresh(['demo', 'activeSuscripcion.plan'])->accessStatus(),
+            'user' => $user->fresh(['roles', 'profile', 'provider', 'demo', 'activeSuscripcion.plan']),
+        ], 201);
     }
 
     public function resetUserPassword(Request $request, Usuario $user)
@@ -197,7 +230,7 @@ class AdminControlador extends ControladorBase
         return $this->ok([
             'message' => 'Contrasena reiniciada correctamente.',
             'temporary_password' => $plainPassword,
-            'user' => $user->fresh(['roles', 'profile', 'provider']),
+            'user' => $user->fresh(['roles', 'profile', 'provider', 'demo', 'activeSuscripcion.plan']),
         ]);
     }
 
@@ -245,7 +278,23 @@ class AdminControlador extends ControladorBase
             'created_by' => $request->user()->id,
         ]);
 
-        $flightRequest->update(['workflow_status' => 'operador_asignado']);
+        $aircraft = Aeronave::find($data['aircraft_id']);
+        $visibilityPayload = $flightRequest->visibility_payload ?? [];
+
+        $flightRequest->update([
+            'workflow_status' => 'operador_asignado',
+            'assigned_provider_id' => $data['provider_id'],
+            'assigned_aircraft_id' => $data['aircraft_id'],
+            'assigned_aircraft_model' => $aircraft?->model,
+            'visibility_payload' => [
+                ...$visibilityPayload,
+                'selected_provider_id' => $data['provider_id'],
+                'selected_aircraft_id' => $data['aircraft_id'],
+                'aircraft_model' => $aircraft?->model,
+                'aircraft_category' => $aircraft?->category,
+                'aircraft_capacity' => $aircraft?->capacity,
+            ],
+        ]);
 
         return $this->ok(['operation' => $operacion->load('timeline')]);
     }
@@ -663,5 +712,3 @@ class AdminControlador extends ControladorBase
         }
     }
 }
-
-

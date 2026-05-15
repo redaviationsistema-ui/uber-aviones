@@ -34,11 +34,21 @@ class ReintentoCoincidenciaSolicitudServicio
             ->count();
 
         if ($pendingCount > 0) {
+            $visibilityPayload = $flightRequest->visibility_payload ?? [];
             $flightRequest->update([
                 'status' => 'matched',
                 'workflow_status' => 'buscando_operador',
                 'assigned_provider_id' => null,
                 'assigned_aircraft_id' => null,
+                'assigned_aircraft_model' => null,
+                'visibility_payload' => [
+                    ...$visibilityPayload,
+                    'selected_provider_id' => null,
+                    'selected_aircraft_id' => null,
+                    'aircraft_model' => null,
+                    'aircraft_category' => null,
+                    'aircraft_capacity' => null,
+                ],
             ]);
 
             return [
@@ -51,11 +61,21 @@ class ReintentoCoincidenciaSolicitudServicio
         $newMatches = $this->buscarNuevasOpciones($flightRequest);
 
         if ($newMatches > 0) {
+            $visibilityPayload = $flightRequest->visibility_payload ?? [];
             $flightRequest->update([
                 'status' => 'matched',
                 'workflow_status' => 'buscando_operador',
                 'assigned_provider_id' => null,
                 'assigned_aircraft_id' => null,
+                'assigned_aircraft_model' => null,
+                'visibility_payload' => [
+                    ...$visibilityPayload,
+                    'selected_provider_id' => null,
+                    'selected_aircraft_id' => null,
+                    'aircraft_model' => null,
+                    'aircraft_category' => null,
+                    'aircraft_capacity' => null,
+                ],
             ]);
 
             return [
@@ -65,11 +85,21 @@ class ReintentoCoincidenciaSolicitudServicio
             ];
         }
 
+        $visibilityPayload = $flightRequest->visibility_payload ?? [];
         $flightRequest->update([
             'status' => 'unmatched',
             'workflow_status' => 'sin_opciones_disponibles',
             'assigned_provider_id' => null,
             'assigned_aircraft_id' => null,
+            'assigned_aircraft_model' => null,
+            'visibility_payload' => [
+                ...$visibilityPayload,
+                'selected_provider_id' => null,
+                'selected_aircraft_id' => null,
+                'aircraft_model' => null,
+                'aircraft_category' => null,
+                'aircraft_capacity' => null,
+            ],
         ]);
 
         return [
