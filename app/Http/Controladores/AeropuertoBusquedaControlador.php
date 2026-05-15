@@ -22,6 +22,7 @@ class AeropuertoBusquedaControlador extends ControladorBase
                 'name',
                 'city',
                 'country',
+                'climb_descent_adjustment_minutes',
             ])
             ->where('status', 'active');
 
@@ -79,6 +80,7 @@ class AeropuertoBusquedaControlador extends ControladorBase
                 'name' => $airport->name,
                 'city' => $airport->city,
                 'country' => $airport->country,
+                'climb_descent_adjustment_minutes' => (int) ($airport->climb_descent_adjustment_minutes ?? 0),
             ])
             ->values();
 

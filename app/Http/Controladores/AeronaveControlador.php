@@ -25,6 +25,14 @@ class AeronaveControlador extends ControladorBase
         'Heavy Jet',
     ];
 
+    private const CATEGORY_CLIMB_DESCENT_MINUTES = [
+        'Helicoptero' => 25,
+        'Turboprop' => 25,
+        'Light Jet' => 30,
+        'Mid Jet' => 35,
+        'Heavy Jet' => 45,
+    ];
+
     public function index(Request $request)
     {
         $query = Aeronave::with(['provider.user.activeSuscripcion.plan', 'images', 'availability', 'documents']);
@@ -651,6 +659,11 @@ class AeronaveControlador extends ControladorBase
             $data['category'] = $this->normalizeAircraftCategory($data['category']);
         }
 
+        $resolvedCategory = $data['category'] ?? $this->normalizeAircraftCategory($aircraft?->category);
+        if ($resolvedCategory && (! array_key_exists('climb_descent_minutes', $data) || (int) ($data['climb_descent_minutes'] ?? 0) <= 0)) {
+            $data['climb_descent_minutes'] = $this->resolveClimbDescentMinutesForCategory($resolvedCategory);
+        }
+
         if (array_key_exists('coverage', $data)) {
             $data['coverage'] = $this->normalizeNullableString($data['coverage']);
         }
@@ -700,6 +713,7 @@ class AeronaveControlador extends ControladorBase
             'hourly_rate' => [$required, 'numeric', 'min:0'],
             'minimum_hours' => ['nullable', 'numeric', 'min:0'],
             'minimum_route_price' => ['nullable', 'numeric', 'min:0'],
+            'climb_descent_minutes' => ['nullable', 'integer', 'min:0'],
             'operational_cost' => ['nullable', 'numeric', 'min:0'],
             'currency' => ['sometimes', 'string', 'size:3'],
             'status' => ['sometimes', 'in:active,inactive,maintenance,blocked'],
@@ -737,6 +751,7 @@ class AeronaveControlador extends ControladorBase
         return [
             ...$aircraft->toArray(),
             'year' => $aircraft->model_year,
+            'climb_descent_minutes' => $aircraft->climb_descent_minutes ?: $this->resolveClimbDescentMinutesForCategory($aircraft->category),
             'amenities' => $this->parseAmenities($aircraft->amenities),
             'documents' => $aircraft->documents
                 ->map(fn (DocumentoAeronave $document) => $this->formatAircraftDocumentPayload($document))
@@ -798,6 +813,7 @@ class AeronaveControlador extends ControladorBase
             'category' => $this->normalizeAircraftCategory($aircraft->category) ?? 'Cabina ejecutiva',
             'capacity' => $aircraft->capacity,
             'range_km' => $aircraft->range_km,
+            'climb_descent_minutes' => $aircraft->climb_descent_minutes ?: $this->resolveClimbDescentMinutesForCategory($aircraft->category),
             'status' => $aircraft->status,
             'manufacturer' => $aircraft->manufacturer,
             'coverage' => $aircraft->coverage,
@@ -837,6 +853,11 @@ class AeronaveControlador extends ControladorBase
         }
 
         return array_values(array_filter(array_map('trim', explode(',', $normalized))));
+    }
+
+    private function resolveClimbDescentMinutesForCategory(?string $category): int
+    {
+        return self::CATEGORY_CLIMB_DESCENT_MINUTES[$this->normalizeAircraftCategory($category) ?? ''] ?? 30;
     }
 
     private function normalizeAircraftCategory(mixed $value): ?string

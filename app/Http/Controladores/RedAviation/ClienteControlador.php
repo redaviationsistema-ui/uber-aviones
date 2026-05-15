@@ -37,6 +37,15 @@ class ClienteControlador extends ControladorBase
         'Ultra Long Range' => 0.92,
     ];
 
+    private const CATEGORY_CLIMB_DESCENT_MINUTES = [
+        'Helicoptero' => 15,
+        'Turboprop' => 25,
+        'Light Jet' => 30,
+        'Mid Jet' => 35,
+        'Heavy Jet' => 45,
+        'Ultra Long Range' => 45,
+    ];
+
     public function __construct(
         private readonly MatchingRedAviationServicio $matchingServicio,
         private readonly VisibilidadServicio $visibilidadServicio,
@@ -70,12 +79,15 @@ class ClienteControlador extends ControladorBase
         $aircraft = Aeronave::with(['images', 'provider'])
             ->whereIn('status', ['active', 'trial_active', 'aprobada', 'available', 'disponible'])
             ->when($passengers > 0, fn ($query) => $query->where('capacity', '>=', $passengers))
+            ->when($origin !== '', function ($query) use ($origin) {
+                $query->orderByRaw(
+                    'case when upper(coalesce(base_airport, \'\')) = ? then 0 else 1 end',
+                    [$origin],
+                );
+            })
+            ->orderByRaw('upper(coalesce(base_airport, \'\')) asc')
+            ->orderByRaw('coalesce(hourly_rate, 0) asc')
             ->get()
-            ->sortBy([
-                fn (Aeronave $aircraft) => $origin !== '' && strtoupper((string) $aircraft->base_airport) === $origin ? 0 : 1,
-                fn (Aeronave $aircraft) => strtoupper((string) ($aircraft->base_airport ?? '')),
-                fn (Aeronave $aircraft) => (float) ($aircraft->hourly_rate ?? 0),
-            ])
             ->values();
 
         return $this->ok([
@@ -129,12 +141,15 @@ class ClienteControlador extends ControladorBase
                     'model' => $aircraft->model,
                     'cabin' => $this->normalizeAircraftCategory($aircraft->category) ?? 'Jet privado',
                     'capacity' => $aircraft->capacity,
-                    'time' => $this->formatHours($pricing['client_flight_hours']),
-                    'flight_time' => $this->formatHours($pricing['client_flight_hours']),
+                    'time' => $this->formatHours($pricing['total_billed_hours']),
+                    'flight_time' => $this->formatHours($pricing['client_display_flight_hours']),
                     'distance_km' => round($distanceKm),
                     'distance_nm' => round($distanceNm),
                     'estimated_hours' => round($pricing['client_direct_flight_hours'], 2),
-                    'billable_hours' => round($pricing['client_flight_hours'], 2),
+                    'real_flight_hours' => round($pricing['client_display_flight_hours'], 2),
+                    'climb_descent_minutes' => (int) round($pricing['client_climb_descent_minutes']),
+                    'climb_descent_hours' => round($pricing['client_climb_descent_hours'], 2),
+                    'billable_hours' => round($pricing['total_billed_hours'], 2),
                     'final_hours' => round($pricing['total_billed_hours'], 2),
                     'hourly_rate' => round($pricing['hourly_rate'], 2),
                     'minimum_hours' => round($pricing['minimum_hours'], 2),
@@ -502,10 +517,15 @@ class ClienteControlador extends ControladorBase
             ->all();
 
         $distanceTotal = (float) collect($clientLegPricings)->sum('distance_km');
-        $clientFlightHours = (float) collect($clientLegPricings)->sum('final_hours');
+        $clientDisplayFlightHours = (float) collect($clientLegPricings)->sum('display_flight_hours');
         $clientDirectFlightHours = (float) collect($clientLegPricings)->sum('direct_air_time_hours');
+        $clientClimbDescentMinutes = (int) round((float) collect($clientLegPricings)->sum('climb_descent_minutes'));
+        $clientClimbDescentHours = (float) collect($clientLegPricings)->sum('climb_descent_hours');
+        $clientReserveHours = (float) collect($clientLegPricings)->sum('reserve_hours');
         $clientAirTimeHours = (float) collect($clientLegPricings)->sum('air_time_hours');
-        $basePrice = $clientFlightHours * $hourlyRate;
+        $minimumHours = (float) collect($clientLegPricings)->sum('minimum_hours');
+        $billableHours = (float) collect($clientLegPricings)->sum('billable_hours');
+        $basePrice = $billableHours * $hourlyRate;
         $subtotal = $basePrice;
         $total = $basePrice;
 
@@ -513,7 +533,7 @@ class ClienteControlador extends ControladorBase
             'trip_type' => $tripType,
             'quote_strategy' => 'distance_total_per_hour',
             'hourly_rate' => $hourlyRate,
-            'minimum_hours' => 0,
+            'minimum_hours' => $minimumHours,
             'minimum_route_price' => 0,
             'redsky_markup_percent' => 0,
             'redsky_markup_factor' => 1,
@@ -532,10 +552,14 @@ class ClienteControlador extends ControladorBase
             'client_legs' => $clientLegs,
             'client_leg_pricing' => $clientLegPricings,
             'distance_total' => $distanceTotal,
-            'client_flight_hours' => $clientFlightHours,
+            'client_flight_hours' => $clientDisplayFlightHours,
+            'client_display_flight_hours' => $clientDisplayFlightHours,
             'client_direct_flight_hours' => $clientDirectFlightHours,
+            'client_climb_descent_minutes' => $clientClimbDescentMinutes,
+            'client_climb_descent_hours' => $clientClimbDescentHours,
+            'client_reserve_hours' => $clientReserveHours,
             'client_air_time_hours' => $clientAirTimeHours,
-            'total_billed_hours' => $clientFlightHours,
+            'total_billed_hours' => $billableHours,
             'client_flight_base_cost' => $basePrice,
             'client_flight_cost' => $basePrice,
             'operator_subtotal' => $basePrice,
@@ -564,12 +588,16 @@ class ClienteControlador extends ControladorBase
         );
         $speedKnots = max($this->resolveCruiseSpeedKmh($aircraft) / 1.852, 1);
         $directAirTime = $distanceNm / $speedKnots;
-        $airTime = $directAirTime;
-        $buffer = 0;
-        $billableHours = $directAirTime;
-        $finalHours = $directAirTime;
-        $hourlyRate = (float) $aircraft->hourly_rate;
         $distanceKm = $distanceNm * 1.852;
+        $climbDescentMinutes = $this->calculateClimbDescentMinutes($aircraft, $originAirport, $destinationAirport);
+        $climbDescentHours = $climbDescentMinutes / 60;
+        $displayFlightHours = $directAirTime + $climbDescentHours;
+        $reserveHours = $this->operationalBufferHours($distanceNm);
+        $realFlightHours = $directAirTime + $climbDescentHours + $reserveHours;
+        $minimumHours = $applyMinimumHours ? $this->resolveMinimumHours($aircraft->category) : 0.0;
+        $billableHours = max($realFlightHours, $minimumHours);
+        $finalHours = $billableHours;
+        $hourlyRate = (float) $aircraft->hourly_rate;
         $rawLegCost = $finalHours * $hourlyRate;
 
         return [
@@ -579,8 +607,15 @@ class ClienteControlador extends ControladorBase
             'distance_km' => $distanceKm,
             'adjusted_distance_nm' => $distanceNm,
             'direct_air_time_hours' => $directAirTime,
-            'air_time_hours' => $airTime,
-            'buffer_hours' => $buffer,
+            'air_time_hours' => $displayFlightHours,
+            'climb_descent_minutes' => $climbDescentMinutes,
+            'climb_descent_hours' => $climbDescentHours,
+            'reserve_hours' => $reserveHours,
+            'display_flight_hours' => $displayFlightHours,
+            'commercial_flight_hours' => $realFlightHours,
+            'real_flight_hours' => $realFlightHours,
+            'minimum_hours' => $minimumHours,
+            'buffer_hours' => $reserveHours,
             'billable_hours' => $billableHours,
             'final_hours' => $finalHours,
             'raw_leg_cost' => $rawLegCost,
@@ -621,6 +656,56 @@ class ClienteControlador extends ControladorBase
         };
     }
 
+    private function calculateClimbDescentMinutes(
+        Aeronave $aircraft,
+        Aeropuerto $originAirport,
+        Aeropuerto $destinationAirport
+    ): int {
+        $baseMinutes = $this->resolveAircraftClimbDescentBaseMinutes($aircraft);
+
+        $originAdjustment = (int) ($originAirport->climb_descent_adjustment_minutes ?? 0);
+        $destinationAdjustment = (int) ($destinationAirport->climb_descent_adjustment_minutes ?? 0);
+
+        return max(15, $baseMinutes + $originAdjustment + $destinationAdjustment);
+    }
+
+    private function normalizePricingCategory(mixed $value): string
+    {
+        $normalized = mb_strtolower(trim((string) ($value ?? '')));
+
+        return match ($normalized) {
+            'helicoptero', 'helicóptero', 'helicopter' => 'helicopter',
+            'turboprop', 'turbo prop', 'turbo_prop' => 'turboprop',
+            'light jet', 'light_jet', 'lightjet' => 'light_jet',
+            'mid jet', 'mid_jet', 'midjet', 'midsize jet', 'midsize_jet', 'super mid', 'super_mid' => 'mid_jet',
+            'heavy jet', 'heavy_jet', 'heavyjet', 'long range', 'long_range', 'ultra long', 'ultra_long', 'ultra long range', 'ultra_long_range' => 'heavy_jet',
+            default => 'default',
+        };
+    }
+
+    private function resolveAircraftClimbDescentBaseMinutes(Aeronave $aircraft): int
+    {
+        $explicitMinutes = (int) ($aircraft->climb_descent_minutes ?? 0);
+        if ($explicitMinutes > 0) {
+            return $explicitMinutes;
+        }
+
+        $normalizedCategory = $this->normalizeAircraftCategory($aircraft->category);
+
+        return self::CATEGORY_CLIMB_DESCENT_MINUTES[$normalizedCategory ?? ''] ?? 30;
+    }
+
+    private function resolveMinimumHours(mixed $aircraftCategory): float
+    {
+        return match ($this->normalizePricingCategory($aircraftCategory)) {
+            'helicopter' => 1.0,
+            'turboprop' => 1.5,
+            'heavy_jet' => 3.0,
+            'light_jet', 'mid_jet' => 2.0,
+            default => 2.0,
+        };
+    }
+
     private function emptyLegPricing(): array
     {
         return [
@@ -628,6 +713,13 @@ class ClienteControlador extends ControladorBase
             'adjusted_distance_nm' => 0,
             'direct_air_time_hours' => 0,
             'air_time_hours' => 0,
+            'climb_descent_minutes' => 0,
+            'climb_descent_hours' => 0,
+            'reserve_hours' => 0,
+            'display_flight_hours' => 0,
+            'commercial_flight_hours' => 0,
+            'real_flight_hours' => 0,
+            'minimum_hours' => 0,
             'buffer_hours' => 0,
             'billable_hours' => 0,
             'final_hours' => 0,
@@ -810,6 +902,7 @@ class ClienteControlador extends ControladorBase
             'country' => $airport->country,
             'latitude' => $airport->latitude,
             'longitude' => $airport->longitude,
+            'climb_descent_adjustment_minutes' => (int) ($airport->climb_descent_adjustment_minutes ?? 0),
         ];
     }
 
@@ -844,6 +937,7 @@ class ClienteControlador extends ControladorBase
             'hourly_rate' => $aircraft->hourly_rate,
             'minimum_hours' => $aircraft->minimum_hours,
             'minimum_route_price' => $categoryPricingRule['minimum_route_price'],
+            'climb_descent_minutes' => $this->resolveAircraftClimbDescentBaseMinutes($aircraft),
             'redsky_markup' => $categoryPricingRule['redsky_markup'],
             'operational_cost' => $aircraft->operational_cost,
             'fuel_burn_gph' => $aircraft->fuel_burn_gph,

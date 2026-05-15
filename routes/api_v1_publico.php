@@ -15,3 +15,5 @@ Route::prefix('public')->group(function () {
     ]));
     Route::get('/aircraft-preview', [AeronaveControlador::class, 'preview']);
 });
+
+Route::get('/airports/search', AeropuertoBusquedaControlador::class);

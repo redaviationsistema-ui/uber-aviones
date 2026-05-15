@@ -64,6 +64,7 @@ class DatabaseSeeder extends Seeder
                 'utc_offset' => -6,
                 'timezone' => 'America/Mexico_City',
                 'type' => 'airport',
+                'climb_descent_adjustment_minutes' => 10,
             ],
             [
                 'icao' => 'MMUN',
@@ -77,6 +78,7 @@ class DatabaseSeeder extends Seeder
                 'utc_offset' => -5,
                 'timezone' => 'America/Cancun',
                 'type' => 'airport',
+                'climb_descent_adjustment_minutes' => 0,
             ],
             [
                 'icao' => 'MMTO',
@@ -90,6 +92,21 @@ class DatabaseSeeder extends Seeder
                 'utc_offset' => -6,
                 'timezone' => 'America/Mexico_City',
                 'type' => 'airport',
+                'climb_descent_adjustment_minutes' => 5,
+            ],
+            [
+                'icao' => 'MMSD',
+                'iata' => 'SJD',
+                'name' => 'Aeropuerto Internacional de Los Cabos',
+                'city' => 'Los Cabos',
+                'country' => 'Mexico',
+                'latitude' => 23.1518000,
+                'longitude' => -109.7210000,
+                'altitude' => 374,
+                'utc_offset' => -7,
+                'timezone' => 'America/Mazatlan',
+                'type' => 'airport',
+                'climb_descent_adjustment_minutes' => 5,
             ],
         ] as $airport) {
             Aeropuerto::updateOrCreate(['icao' => $airport['icao']], $airport + ['status' => 'active']);
@@ -170,6 +187,7 @@ class DatabaseSeeder extends Seeder
                 'range_km' => 3700,
                 'speed_kmh' => 860,
                 'hourly_rate' => 5200,
+                'climb_descent_minutes' => 30,
                 'currency' => 'USD',
                 'status' => 'active',
             ]
@@ -186,6 +204,7 @@ class DatabaseSeeder extends Seeder
                 'range_km' => 4300,
                 'speed_kmh' => 745,
                 'hourly_rate' => 6100,
+                'climb_descent_minutes' => 35,
                 'currency' => 'USD',
                 'status' => 'active',
             ]

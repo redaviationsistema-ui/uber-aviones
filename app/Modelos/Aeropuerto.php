@@ -22,6 +22,7 @@ class Aeropuerto extends Model
         'utc_offset',
         'timezone',
         'type',
+        'climb_descent_adjustment_minutes',
         'status',
     ];
 }

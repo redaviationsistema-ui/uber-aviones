@@ -27,6 +27,14 @@ class OperadorControlador extends ControladorBase
         'Heavy Jet',
     ];
 
+    private const CATEGORY_CLIMB_DESCENT_MINUTES = [
+        'Helicoptero' => 25,
+        'Turboprop' => 25,
+        'Light Jet' => 30,
+        'Mid Jet' => 35,
+        'Heavy Jet' => 45,
+    ];
+
     public function __construct(
         private readonly VisibilidadServicio $visibilidadServicio,
         private readonly ReintentoCoincidenciaSolicitudServicio $reintentoServicio,
@@ -344,6 +352,7 @@ class OperadorControlador extends ControladorBase
             'amenities' => ['nullable'],
             'hourly_rate' => ['nullable', 'numeric', 'min:0'],
             'minimum_hours' => ['nullable', 'numeric', 'min:0'],
+            'climb_descent_minutes' => ['nullable', 'integer', 'min:0'],
             'operational_cost' => ['nullable', 'numeric', 'min:0'],
             'fuel_burn_gph' => ['nullable', 'numeric', 'min:0'],
             'engine_reserve_rate' => ['nullable', 'numeric', 'min:0'],
@@ -393,6 +402,10 @@ class OperadorControlador extends ControladorBase
         $resolvedCategory = $data['category'] ?? $this->normalizeAircraftCategory($aircraft?->category);
         if ($resolvedCategory) {
             $data['minimum_hours'] = $this->resolveMinimumHoursForCategory($resolvedCategory);
+
+            if (! array_key_exists('climb_descent_minutes', $data) || (int) ($data['climb_descent_minutes'] ?? 0) <= 0) {
+                $data['climb_descent_minutes'] = $this->resolveClimbDescentMinutesForCategory($resolvedCategory);
+            }
         }
 
         if (array_key_exists('coverage', $data)) {
@@ -428,6 +441,11 @@ class OperadorControlador extends ControladorBase
         };
     }
 
+    private function resolveClimbDescentMinutesForCategory(?string $category): int
+    {
+        return self::CATEGORY_CLIMB_DESCENT_MINUTES[$this->normalizeAircraftCategory($category) ?? ''] ?? 30;
+    }
+
     private function formatAircraftPayload(Aeronave $aircraft, $plan = null, ?int $fleetCount = null): array
     {
         $providerUser = $aircraft->provider?->user;
@@ -451,6 +469,7 @@ class OperadorControlador extends ControladorBase
             ...$aircraft->toArray(),
             'year' => $aircraft->model_year,
             'minimum_hours' => $aircraft->minimum_hours ?: $this->resolveMinimumHoursForCategory($aircraft->category),
+            'climb_descent_minutes' => $aircraft->climb_descent_minutes ?: $this->resolveClimbDescentMinutesForCategory($aircraft->category),
             'amenities' => $this->parseAmenities($aircraft->amenities),
             'documents' => $aircraft->documents
                 ->map(fn (DocumentoAeronave $document) => $this->formatAircraftDocumentPayload($document))
