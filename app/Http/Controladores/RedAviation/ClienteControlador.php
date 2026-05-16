@@ -504,6 +504,7 @@ class ClienteControlador extends ControladorBase
     private function previewPricingForAircraft(Aeronave $aircraft, string $tripType, array $legs): array
     {
         $hourlyRate = (float) $aircraft->hourly_rate;
+        $overnightFee = round($hourlyRate / 2, 2);
         $clientLegs = $legs;
         $clientLegPricings = collect($clientLegs)
             ->map(function (array $leg) use ($aircraft) {
@@ -525,9 +526,11 @@ class ClienteControlador extends ControladorBase
         $clientAirTimeHours = (float) collect($clientLegPricings)->sum('air_time_hours');
         $minimumHours = (float) collect($clientLegPricings)->sum('minimum_hours');
         $billableHours = (float) collect($clientLegPricings)->sum('billable_hours');
+        $overnightNights = $this->calculateOvernightNights($clientLegs);
+        $overnightCost = $overnightNights > 0 ? $overnightFee * $overnightNights : 0.0;
         $basePrice = $billableHours * $hourlyRate;
-        $subtotal = $basePrice;
-        $total = $basePrice;
+        $subtotal = $basePrice + $overnightCost;
+        $total = $subtotal;
 
         return [
             'trip_type' => $tripType,
@@ -542,7 +545,7 @@ class ClienteControlador extends ControladorBase
             'insurance_rate' => 0,
             'maintenance_rate' => 0,
             'crew_rate' => 0,
-            'overnight_fee' => 0,
+            'overnight_fee' => $overnightFee,
             'parking_fee' => 0,
             'operational_expenses' => 0,
             'jet_a_price' => 0,
@@ -562,13 +565,13 @@ class ClienteControlador extends ControladorBase
             'total_billed_hours' => $billableHours,
             'client_flight_base_cost' => $basePrice,
             'client_flight_cost' => $basePrice,
-            'operator_subtotal' => $basePrice,
+            'operator_subtotal' => $subtotal,
             'base_price' => $basePrice,
             'markup_amount' => 0,
             'initial_repositioning_cost' => 0,
             'return_to_base_cost' => 0,
-            'overnight_nights' => 0,
-            'overnight_cost' => 0,
+            'overnight_nights' => $overnightNights,
+            'overnight_cost' => $overnightCost,
             'airport_fees' => 0,
             'tax_rate' => 0,
             'tax' => 0,
