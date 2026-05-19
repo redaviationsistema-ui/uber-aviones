@@ -150,11 +150,14 @@ class ClienteControlador extends ControladorBase
                     'climb_descent_minutes' => (int) round($pricing['client_climb_descent_minutes']),
                     'climb_descent_hours' => round($pricing['client_climb_descent_hours'], 2),
                     'billable_hours' => round($pricing['total_billed_hours'], 2),
+                    'billable_minutes' => round($pricing['billable_minutes'], 2),
                     'final_hours' => round($pricing['total_billed_hours'], 2),
                     'hourly_rate' => round($pricing['hourly_rate'], 2),
+                    'price_per_minute' => round($pricing['price_per_minute'], 2),
                     'minimum_hours' => round($pricing['minimum_hours'], 2),
                     'minimum_route_price' => round($pricing['minimum_route_price'], 2),
                     'base_cost' => round($pricing['base_price'], 2),
+                    'base_price_formula' => $pricing['base_price_formula'],
                     'repositioning_cost' => round($pricing['initial_repositioning_cost'] + $pricing['return_to_base_cost'], 2),
                     'operational_costs_total' => round(
                         $pricing['overnight_cost'] + $pricing['operational_expenses'] + $pricing['airport_fees'] + $pricing['fixed_fee_total'],
@@ -504,6 +507,7 @@ class ClienteControlador extends ControladorBase
     private function previewPricingForAircraft(Aeronave $aircraft, string $tripType, array $legs): array
     {
         $hourlyRate = (float) $aircraft->hourly_rate;
+        $pricePerMinute = round($hourlyRate / 60, 2);
         $overnightFee = round($hourlyRate / 2, 2);
         $clientLegs = $legs;
         $clientLegPricings = collect($clientLegs)
@@ -526,6 +530,7 @@ class ClienteControlador extends ControladorBase
         $clientAirTimeHours = (float) collect($clientLegPricings)->sum('air_time_hours');
         $minimumHours = (float) collect($clientLegPricings)->sum('minimum_hours');
         $billableHours = (float) collect($clientLegPricings)->sum('billable_hours');
+        $billableMinutes = round($billableHours * 60, 2);
         $overnightNights = $this->calculateOvernightNights($clientLegs);
         $overnightCost = $overnightNights > 0 ? $overnightFee * $overnightNights : 0.0;
         $basePrice = $billableHours * $hourlyRate;
@@ -536,6 +541,7 @@ class ClienteControlador extends ControladorBase
             'trip_type' => $tripType,
             'quote_strategy' => 'distance_total_per_hour',
             'hourly_rate' => $hourlyRate,
+            'price_per_minute' => $pricePerMinute,
             'minimum_hours' => $minimumHours,
             'minimum_route_price' => 0,
             'redsky_markup_percent' => 0,
@@ -563,10 +569,25 @@ class ClienteControlador extends ControladorBase
             'client_reserve_hours' => $clientReserveHours,
             'client_air_time_hours' => $clientAirTimeHours,
             'total_billed_hours' => $billableHours,
+            'billable_minutes' => $billableMinutes,
             'client_flight_base_cost' => $basePrice,
             'client_flight_cost' => $basePrice,
             'operator_subtotal' => $subtotal,
             'base_price' => $basePrice,
+            'base_price_formula' => [
+                'hourly_rate' => round($hourlyRate, 2),
+                'price_per_minute' => $pricePerMinute,
+                'billable_minutes' => $billableMinutes,
+                'base_price' => round($basePrice, 2),
+                'expression' => sprintf(
+                    '%.2f / 60 = %.2f; %.2f * %.2f = %.2f',
+                    round($hourlyRate, 2),
+                    $pricePerMinute,
+                    $pricePerMinute,
+                    $billableMinutes,
+                    round($basePrice, 2)
+                ),
+            ],
             'markup_amount' => 0,
             'initial_repositioning_cost' => 0,
             'return_to_base_cost' => 0,
@@ -598,7 +619,8 @@ class ClienteControlador extends ControladorBase
         $reserveHours = $this->operationalBufferHours($distanceNm);
         $realFlightHours = $directAirTime + $climbDescentHours + $reserveHours;
         $minimumHours = $applyMinimumHours ? $this->resolveMinimumHours($aircraft->category) : 0.0;
-        $billableHours = max($realFlightHours, $minimumHours);
+        // El marketplace cliente debe cobrar sobre el tiempo visible del vuelo, no sobre reservas operativas ni minimos.
+        $billableHours = $displayFlightHours;
         $finalHours = $billableHours;
         $hourlyRate = (float) $aircraft->hourly_rate;
         $rawLegCost = $finalHours * $hourlyRate;
