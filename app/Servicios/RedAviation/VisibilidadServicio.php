@@ -61,6 +61,19 @@ class VisibilidadServicio
                 : ($preferredMatch?->aircraft
                     ? $this->aeronaveVisibleParaCliente($preferredMatch->aircraft, $solicitud->aircraft_type)['main_image']
                     : null),
+            'quote_total' => $preferredMatch?->estimated_price
+                ?? $solicitud->final_price
+                ?? $solicitud->pricing_context['total']
+                ?? $solicitud->pricing_context['final_price']
+                ?? $visibilityPayload['selected_card_price']
+                ?? null,
+            'base_price' => $solicitud->base_price,
+            'operational_fee' => $solicitud->operational_fee,
+            'priority_price' => $solicitud->priority_price,
+            'final_price' => $solicitud->final_price,
+            'currency' => $solicitud->currency,
+            'pricing_context' => $solicitud->pricing_context,
+            'visibility_payload' => $visibilityPayload,
             'requirements' => $solicitud->requirements,
             'legs' => $this->visibleLegs($solicitud),
             'notes' => $solicitud->notes,
@@ -84,6 +97,8 @@ class VisibilidadServicio
                 'id' => $match->id,
                 'aircraft_id' => $match->aircraft_id,
                 'status' => $match->status,
+                'estimated_price' => $match->estimated_price,
+                'visibility_payload' => $match->visibility_payload,
                 'aircraft' => $match->aircraft
                     ? $this->aeronaveVisibleParaCliente($match->aircraft, $solicitud->aircraft_type)
                     : [
@@ -122,7 +137,17 @@ class VisibilidadServicio
                 ?? null,
             'aircraft_id' => $solicitud->assigned_aircraft_id ?? $match?->aircraft_id,
             'provider_id' => $solicitud->assigned_provider_id ?? $match?->provider_id,
-            'quote_total' => $match?->estimated_price,
+            'quote_total' => $match?->estimated_price
+                ?? $solicitud->final_price
+                ?? $solicitud->pricing_context['total']
+                ?? $solicitud->pricing_context['final_price']
+                ?? null,
+            'base_price' => $solicitud->base_price,
+            'operational_fee' => $solicitud->operational_fee,
+            'priority_price' => $solicitud->priority_price,
+            'final_price' => $solicitud->final_price,
+            'currency' => $solicitud->currency,
+            'pricing_context' => $solicitud->pricing_context,
             'response_deadline' => $match?->response_deadline,
             'requirements' => $solicitud->requirements,
             'legs' => $this->visibleLegs($solicitud),

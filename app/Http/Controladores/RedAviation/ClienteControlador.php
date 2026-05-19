@@ -20,6 +20,16 @@ class ClienteControlador extends ControladorBase
 {
     private const SHORT_ROUTE_DISTANCE_KM = 300.0;
     private const MACH_1_KMH = 1062.0;
+    private const COMMERCIAL_OVERNIGHT_HOURS_PER_NIGHT = 0.5;
+    private const DEFAULT_IVA_RATE = 0.16;
+    private const AIRPORT_EXPENSE_BY_CATEGORY = [
+        'HEAVY JET' => 2000.0,
+        'MID JET' => 1000.0,
+        'LIGHT JET' => 800.0,
+        'TURBOPROP' => 600.0,
+        'HELICOPTERO' => 700.0,
+        'HELICÓPTERO' => 700.0,
+    ];
 
     private const AIRCRAFT_CATEGORY_MINIMUM_PRICE = [
         'Helicoptero' => ['minimum_route_price' => 2200.0, 'redsky_markup' => 20.0],
@@ -103,9 +113,16 @@ class ClienteControlador extends ControladorBase
             'origin' => ['required', 'string', 'max:20'],
             'destination' => ['required', 'string', 'max:20'],
             'departure_datetime' => ['nullable', 'date'],
+            'return_datetime' => ['nullable', 'date'],
             'passengers' => ['required', 'integer', 'min:1'],
             'trip_type' => ['nullable', 'string', 'max:50'],
             'trip_label' => ['nullable', 'string', 'max:50'],
+            'round_trip' => ['nullable', 'boolean'],
+            'return' => ['nullable', 'boolean'],
+            'overnights' => ['nullable', 'integer', 'min:0'],
+            'overnight_nights' => ['nullable', 'integer', 'min:0'],
+            'include_iva' => ['nullable', 'boolean'],
+            'airport_expenses' => ['nullable', 'boolean'],
             'aircraft_type' => ['nullable', 'string', 'max:100'],
             'requirements' => ['nullable', 'array'],
             'notes' => ['nullable', 'string'],
@@ -123,7 +140,7 @@ class ClienteControlador extends ControladorBase
         $distanceKm = (float) collect($legs)->sum('distance_km');
         $distanceNm = (float) collect($legs)->sum('distance_nm');
         $passengers = (int) $data['passengers'];
-        $tripType = $this->normalizeTripType($data['trip_type'] ?? $data['trip_label'] ?? null);
+        $tripType = $this->resolveQuoteTripType($data);
         $maxLegDistanceKm = (float) collect($legs)->max('distance_km');
         $quotes = Aeronave::with(['images', 'provider'])
             ->whereIn('status', ['active', 'trial_active', 'aprobada', 'available', 'disponible'])
@@ -131,7 +148,7 @@ class ClienteControlador extends ControladorBase
             ->get()
             ->filter(fn (Aeronave $aircraft) => $this->aircraftCanQuote($aircraft, $maxLegDistanceKm))
             ->map(function (Aeronave $aircraft) use ($data, $distanceKm, $distanceNm, $legs, $tripType) {
-                $pricing = $this->previewPricingForAircraft($aircraft, $tripType, $legs);
+                $pricing = $this->previewPricingForAircraft($aircraft, $tripType, $legs, $data);
                 $currency = $aircraft->currency ?: 'USD';
 
                 return [
@@ -243,10 +260,14 @@ class ClienteControlador extends ControladorBase
             'base_price' => ['nullable', 'numeric'],
             'operational_fee' => ['nullable', 'numeric'],
             'priority_price' => ['nullable', 'numeric'],
+            'total' => ['nullable', 'numeric'],
+            'estimated_total' => ['nullable', 'numeric'],
             'final_price' => ['nullable', 'numeric'],
+            'selected_card_price' => ['nullable', 'numeric'],
             'currency' => ['nullable', 'string', 'max:10'],
             'pricing_formula_version' => ['nullable', 'string', 'max:120'],
             'pricing_context' => ['nullable', 'array'],
+            'aircraft_snapshot' => ['nullable', 'array'],
             'requirements' => ['nullable', 'array'],
             'notes' => ['nullable', 'string'],
         ]);
@@ -256,6 +277,18 @@ class ClienteControlador extends ControladorBase
         $data['departure_time'] = $departure->format('H:i');
         $data['requirements'] = $data['requirements'] ?? [];
         $data['trip_type'] = $this->normalizeTripType($data['trip_type'] ?? null);
+        $selectedCardPrice = (float) (
+            $data['selected_card_price']
+            ?? $data['total']
+            ?? $data['estimated_total']
+            ?? $data['final_price']
+            ?? 0
+        );
+        if ($selectedCardPrice > 0) {
+            $data['final_price'] = $selectedCardPrice;
+        }
+        $data['pricing_context'] = $this->normalizeStoredPricingContext($data);
+        $aircraftSnapshot = is_array($data['aircraft_snapshot'] ?? null) ? $data['aircraft_snapshot'] : [];
 
         $solicitud = SolicitudVuelo::create($data + [
             'client_id' => $request->user()->id,
@@ -266,11 +299,25 @@ class ClienteControlador extends ControladorBase
                 'plan_id' => $request->user()->activeSuscripcion?->plan_id,
                 'demo' => $request->user()->demo?->status === 'active',
             ],
+            'visibility_payload' => array_filter([
+                'selected_card_price' => $selectedCardPrice > 0 ? $selectedCardPrice : null,
+                'aircraft_snapshot' => ! empty($aircraftSnapshot) ? $aircraftSnapshot : null,
+            ], fn ($value) => $value !== null),
         ]);
         $this->storeFlightRequestLegs($solicitud, $data);
 
-        $this->matchingServicio->ejecutar($solicitud);
-        $this->assignSelectedMatchToFlightRequest($solicitud, $data);
+        $hasExplicitSelection = ! empty($data['provider_id'])
+            || ! empty($data['aircraft_id'])
+            || ! empty($data['match_id'])
+            || ! empty($data['matched_option_id']);
+
+        if ($hasExplicitSelection) {
+            $this->assignSelectedMatchToFlightRequest($solicitud, $data);
+        } else {
+            $this->matchingServicio->ejecutar($solicitud);
+            $this->assignSelectedMatchToFlightRequest($solicitud, $data);
+        }
+
         $chat = $solicitud->chatsProtegidos()->create([
             'client_id' => $request->user()->id,
             'status' => 'activo',
@@ -288,17 +335,39 @@ class ClienteControlador extends ControladorBase
 
     private function assignSelectedMatchToFlightRequest(SolicitudVuelo $solicitud, array $data): void
     {
+        $selectedMatchId = (string) ($data['match_id'] ?? $data['matched_option_id'] ?? '');
         $selectedProviderId = (int) ($data['provider_id'] ?? 0);
         $selectedAircraftId = (int) ($data['aircraft_id'] ?? 0);
+        $selectedPreviewAircraftId = 0;
 
-        if (! $selectedProviderId && ! $selectedAircraftId) {
+        if ($selectedMatchId !== '' && preg_match('/^preview-(\d+)$/', $selectedMatchId, $matches)) {
+            $selectedPreviewAircraftId = (int) ($matches[1] ?? 0);
+        }
+
+        if ($selectedMatchId === '' && ! $selectedProviderId && ! $selectedAircraftId) {
             return;
         }
 
-        $selectedMatch = $solicitud->matches()
-            ->when($selectedProviderId > 0, fn ($query) => $query->where('provider_id', $selectedProviderId))
-            ->when($selectedAircraftId > 0, fn ($query) => $query->where('aircraft_id', $selectedAircraftId))
-            ->first();
+        $selectedMatch = null;
+
+        if ($selectedMatchId !== '') {
+            $selectedMatchQuery = $solicitud->matches();
+
+            if (ctype_digit($selectedMatchId)) {
+                $selectedMatchQuery->whereKey((int) $selectedMatchId);
+            } elseif ($selectedPreviewAircraftId > 0) {
+                $selectedMatchQuery->where('aircraft_id', $selectedPreviewAircraftId);
+            }
+
+            $selectedMatch = $selectedMatchQuery->first();
+        }
+
+        if (! $selectedMatch) {
+            $selectedMatch = $solicitud->matches()
+                ->when($selectedProviderId > 0, fn ($query) => $query->where('provider_id', $selectedProviderId))
+                ->when($selectedAircraftId > 0, fn ($query) => $query->where('aircraft_id', $selectedAircraftId))
+                ->first();
+        }
 
         if (! $selectedMatch && $selectedAircraftId > 0) {
             $selectedMatch = $solicitud->matches()
@@ -313,21 +382,63 @@ class ClienteControlador extends ControladorBase
                 ->first();
         }
 
+        $resolvedAircraftId = $selectedAircraftId > 0 ? $selectedAircraftId : $selectedPreviewAircraftId;
+        if (! $selectedMatch && $resolvedAircraftId > 0) {
+            $selectedAircraft = Aeronave::with('provider')->find($resolvedAircraftId);
+
+            if ($selectedAircraft) {
+                $selectedMatch = $solicitud->matches()->updateOrCreate(
+                    [
+                        'aircraft_id' => $selectedAircraft->id,
+                        'provider_id' => $selectedAircraft->provider_id,
+                    ],
+                    [
+                        'match_score' => 100,
+                        'status' => 'pending',
+                        'response_deadline' => now()->addMinutes(30),
+                        'visibility_payload' => [
+                            'aircraft_model' => $selectedAircraft->model,
+                            'capacity' => $selectedAircraft->capacity,
+                            'provider_label' => 'Operador verificado Red Aviation',
+                            'forced_from_client_selection' => true,
+                        ],
+                    ]
+                );
+            }
+        }
+
         if (! $selectedMatch) {
             return;
         }
 
         $selectedMatch->loadMissing('aircraft');
         $selectedMatch->update([
+            'estimated_price' => (float) (
+                $data['selected_card_price']
+                ?? $data['total']
+                ?? $data['estimated_total']
+                ?? $data['final_price']
+                ?? $selectedMatch->estimated_price
+                ?? 0
+            ),
             'status' => 'sent_to_provider',
         ]);
 
         $visibilityPayload = $solicitud->visibility_payload ?? [];
+        $selectedCardPrice = (float) (
+            $data['selected_card_price']
+            ?? $data['total']
+            ?? $data['estimated_total']
+            ?? $data['final_price']
+            ?? $solicitud->final_price
+            ?? 0
+        );
 
         $solicitud->update([
             'assigned_provider_id' => $selectedMatch->provider_id,
             'assigned_aircraft_id' => $selectedMatch->aircraft_id,
             'assigned_aircraft_model' => $selectedMatch->aircraft?->model,
+            'final_price' => $selectedCardPrice > 0 ? $selectedCardPrice : $solicitud->final_price,
             'workflow_status' => 'operador_asignado',
             'visibility_payload' => [
                 ...$visibilityPayload,
@@ -336,6 +447,7 @@ class ClienteControlador extends ControladorBase
                 'aircraft_model' => $selectedMatch->aircraft?->model,
                 'aircraft_category' => $selectedMatch->aircraft?->category,
                 'aircraft_capacity' => $selectedMatch->aircraft?->capacity,
+                'selected_card_price' => $selectedCardPrice > 0 ? $selectedCardPrice : null,
             ],
         ]);
     }
@@ -441,8 +553,8 @@ class ClienteControlador extends ControladorBase
             $legs[] = $this->quoteLegPayload($index + 2, $extraOrigin, $extraDestination, $requirement['departure_datetime'] ?? null);
         }
 
-        if ($this->normalizeTripType($data['trip_type'] ?? $data['trip_label'] ?? null) === 'round_trip' && count($legs) === 1) {
-            $legs[] = $this->quoteLegPayload(2, $destinationAirport, $originAirport);
+        if ($this->resolveQuoteTripType($data) === 'round_trip' && count($legs) === 1) {
+            $legs[] = $this->quoteLegPayload(2, $destinationAirport, $originAirport, $data['return_datetime'] ?? null);
         }
 
         return $legs;
@@ -504,9 +616,9 @@ class ClienteControlador extends ControladorBase
         return '$'.number_format(round($amount), 0, '.', ',').' '.strtoupper($currency);
     }
 
-    private function previewPricingForAircraft(Aeronave $aircraft, string $tripType, array $legs): array
+    private function previewPricingForAircraft(Aeronave $aircraft, string $tripType, array $legs, array $requestData = []): array
     {
-        $hourlyRate = (float) $aircraft->hourly_rate;
+        $hourlyRate = $this->resolveCommercialHourlyRate($aircraft->hourly_rate);
         $pricePerMinute = round($hourlyRate / 60, 2);
         $overnightFee = round($hourlyRate / 2, 2);
         $clientLegs = $legs;
@@ -529,13 +641,23 @@ class ClienteControlador extends ControladorBase
         $clientReserveHours = (float) collect($clientLegPricings)->sum('reserve_hours');
         $clientAirTimeHours = (float) collect($clientLegPricings)->sum('air_time_hours');
         $minimumHours = (float) collect($clientLegPricings)->sum('minimum_hours');
-        $billableHours = (float) collect($clientLegPricings)->sum('billable_hours');
+        $outboundHours = (float) ($clientLegPricings[0]['billable_hours'] ?? 0);
+        $returnHours = (float) collect(array_slice($clientLegPricings, 1))->sum('billable_hours');
+        $repositioningHours = 0.0;
+        $overnightNights = $this->resolveOvernightNights($clientLegs, $requestData);
+        $overnightHours = $overnightNights * self::COMMERCIAL_OVERNIGHT_HOURS_PER_NIGHT;
+        $flightHours = $outboundHours + $returnHours;
+        $billableHours = $outboundHours + $returnHours + $repositioningHours + $overnightHours;
         $billableMinutes = round($billableHours * 60, 2);
-        $overnightNights = $this->calculateOvernightNights($clientLegs);
         $overnightCost = $overnightNights > 0 ? $overnightFee * $overnightNights : 0.0;
+        $expenseFee = $this->shouldApplyAirportExpenses($requestData)
+            ? $this->resolveAirportExpenseForAircraft($aircraft)
+            : 0.0;
         $basePrice = $billableHours * $hourlyRate;
-        $subtotal = $basePrice + $overnightCost;
-        $total = $subtotal;
+        $subtotal = $basePrice + $expenseFee;
+        $taxRate = $this->shouldIncludeIva($requestData) ? self::DEFAULT_IVA_RATE : 0.0;
+        $ivaAmount = $subtotal * $taxRate;
+        $total = $subtotal + $ivaAmount;
 
         return [
             'trip_type' => $tripType,
@@ -568,10 +690,18 @@ class ClienteControlador extends ControladorBase
             'client_climb_descent_hours' => $clientClimbDescentHours,
             'client_reserve_hours' => $clientReserveHours,
             'client_air_time_hours' => $clientAirTimeHours,
+            'outbound_hours' => $outboundHours,
+            'return_hours' => $returnHours,
+            'repositioning_hours' => $repositioningHours,
+            'flight_hours' => $flightHours,
+            'overnight_hours' => $overnightHours,
             'total_billed_hours' => $billableHours,
+            'billable_hours' => $billableHours,
             'billable_minutes' => $billableMinutes,
+            'flight_base' => $basePrice,
             'client_flight_base_cost' => $basePrice,
             'client_flight_cost' => $basePrice,
+            'flight_cost' => $basePrice,
             'operator_subtotal' => $subtotal,
             'base_price' => $basePrice,
             'base_price_formula' => [
@@ -593,11 +723,17 @@ class ClienteControlador extends ControladorBase
             'return_to_base_cost' => 0,
             'overnight_nights' => $overnightNights,
             'overnight_cost' => $overnightCost,
-            'airport_fees' => 0,
-            'tax_rate' => 0,
-            'tax' => 0,
+            'overnight' => $overnightCost,
+            'airport_fees' => $expenseFee,
+            'airport_expenses' => $expenseFee,
+            'expense_fee' => $expenseFee,
+            'tax_rate' => $taxRate,
+            'tax' => $ivaAmount,
+            'iva' => $ivaAmount,
+            'iva_amount' => $ivaAmount,
             'subtotal' => $subtotal,
             'utility' => 0,
+            'final_price' => $total,
             'total' => $total,
         ];
     }
@@ -619,10 +755,10 @@ class ClienteControlador extends ControladorBase
         $reserveHours = $this->operationalBufferHours($distanceNm);
         $realFlightHours = $directAirTime + $climbDescentHours + $reserveHours;
         $minimumHours = $applyMinimumHours ? $this->resolveMinimumHours($aircraft->category) : 0.0;
-        // El marketplace cliente debe cobrar sobre el tiempo visible del vuelo, no sobre reservas operativas ni minimos.
-        $billableHours = $displayFlightHours;
+        // La tarifa comercial se redondea al siguiente cuarto de hora por tramo.
+        $billableHours = $this->roundUpQuarterHours($displayFlightHours);
         $finalHours = $billableHours;
-        $hourlyRate = (float) $aircraft->hourly_rate;
+        $hourlyRate = $this->resolveCommercialHourlyRate($aircraft->hourly_rate);
         $rawLegCost = $finalHours * $hourlyRate;
 
         return [
@@ -795,6 +931,16 @@ class ClienteControlador extends ControladorBase
         return $nights;
     }
 
+    private function resolveOvernightNights(array $legs, array $requestData = []): int
+    {
+        $explicitNights = $requestData['overnights'] ?? $requestData['overnight_nights'] ?? null;
+        if ($explicitNights !== null && $explicitNights !== '') {
+            return max((int) $explicitNights, 0);
+        }
+
+        return $this->calculateOvernightNights($legs);
+    }
+
     private function operationalBufferHours(float $distanceNm): float
     {
         if ($distanceNm < 300) {
@@ -829,6 +975,86 @@ class ClienteControlador extends ControladorBase
             'multi-destino', 'multidestino', 'multi_city', 'multi_leg' => 'multi_leg',
             default => 'one_way',
         };
+    }
+
+    private function resolveQuoteTripType(array $data): string
+    {
+        $normalizedTripType = $this->normalizeTripType($data['trip_type'] ?? $data['trip_label'] ?? null);
+
+        if ($normalizedTripType !== 'one_way') {
+            return $normalizedTripType;
+        }
+
+        $roundTrip = filter_var($data['round_trip'] ?? false, FILTER_VALIDATE_BOOL);
+        $returnTrip = filter_var($data['return'] ?? false, FILTER_VALIDATE_BOOL);
+
+        return ($roundTrip || $returnTrip) ? 'round_trip' : 'one_way';
+    }
+
+    private function shouldIncludeIva(array $data): bool
+    {
+        if (! array_key_exists('include_iva', $data)) {
+            return true;
+        }
+
+        return filter_var($data['include_iva'], FILTER_VALIDATE_BOOL);
+    }
+
+    private function shouldApplyAirportExpenses(array $data): bool
+    {
+        if (! array_key_exists('airport_expenses', $data)) {
+            return true;
+        }
+
+        return filter_var($data['airport_expenses'], FILTER_VALIDATE_BOOL);
+    }
+
+    private function resolveCommercialHourlyRate(mixed $value): float
+    {
+        $hourlyRate = (float) $value;
+        if ($hourlyRate > 0 && $hourlyRate < 100) {
+            return $hourlyRate * 1000;
+        }
+
+        return $hourlyRate;
+    }
+
+    private function resolveAirportExpenseForAircraft(Aeronave $aircraft): float
+    {
+        $airportExpense = (float) ($aircraft->airport_expenses_usd ?? 0);
+        if ($airportExpense > 0) {
+            return $airportExpense > 0 && $airportExpense < 100 ? $airportExpense * 1000 : $airportExpense;
+        }
+
+        return $this->resolveAirportExpenseByCategory($aircraft->category);
+    }
+
+    private function resolveAirportExpenseByCategory(mixed $category): float
+    {
+        $normalizedCategory = strtoupper(trim((string) $category));
+
+        return self::AIRPORT_EXPENSE_BY_CATEGORY[$normalizedCategory] ?? 0.0;
+    }
+
+    private function normalizeStoredPricingContext(array $data): ?array
+    {
+        $pricingContext = is_array($data['pricing_context'] ?? null) ? $data['pricing_context'] : [];
+        $basePrice = (float) ($data['base_price'] ?? ($pricingContext['flight_base'] ?? $pricingContext['base_cost'] ?? 0));
+        $expenseFee = (float) ($data['operational_fee'] ?? ($pricingContext['expense_fee'] ?? 0));
+        $subtotal = (float) ($pricingContext['subtotal'] ?? $pricingContext['subtotal_before_multipliers'] ?? ($basePrice + $expenseFee));
+        $ivaAmount = (float) ($pricingContext['iva_amount'] ?? $pricingContext['tax'] ?? $pricingContext['iva'] ?? 0);
+        $finalPrice = (float) ($data['final_price'] ?? ($pricingContext['total'] ?? $pricingContext['final_price'] ?? ($subtotal + $ivaAmount)));
+
+        return $pricingContext + [
+            'flight_base' => $basePrice,
+            'base_price' => $basePrice,
+            'expense_fee' => $expenseFee,
+            'subtotal' => $subtotal,
+            'iva_amount' => $ivaAmount,
+            'total' => $finalPrice,
+            'final_price' => $finalPrice,
+            'billable_hours' => (float) ($pricingContext['billable_hours'] ?? 0),
+        ];
     }
 
     private function storeFlightRequestLegs(SolicitudVuelo $solicitud, array $data): void

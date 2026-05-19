@@ -711,6 +711,7 @@ class AeronaveControlador extends ControladorBase
             'coverage' => ['nullable', 'string', 'max:255'],
             'amenities' => ['nullable'],
             'hourly_rate' => [$required, 'numeric', 'min:0'],
+            'airport_expenses_usd' => ['nullable', 'numeric', 'min:0'],
             'minimum_hours' => ['nullable', 'numeric', 'min:0'],
             'minimum_route_price' => ['nullable', 'numeric', 'min:0'],
             'climb_descent_minutes' => ['nullable', 'integer', 'min:0'],

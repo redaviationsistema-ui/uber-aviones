@@ -159,6 +159,10 @@ class PlataformaVuelosApiTest extends TestCase
                 'aircraft_type' => 'light_jet',
                 'provider_id' => $aircraft->provider_id,
                 'aircraft_id' => $aircraft->id,
+                'final_price' => 15620,
+                'total' => 15620,
+                'estimated_total' => 15620,
+                'selected_card_price' => 15620,
                 'requirements' => ['wifi' => true],
             ])
             ->assertCreated()
@@ -170,12 +174,14 @@ class PlataformaVuelosApiTest extends TestCase
             'id' => $flightRequestId,
             'assigned_provider_id' => $aircraft->provider_id,
             'assigned_aircraft_id' => $aircraft->id,
+            'final_price' => 15620,
         ]);
 
         $this->assertDatabaseHas('request_matches', [
             'flight_request_id' => $flightRequestId,
             'provider_id' => $aircraft->provider_id,
             'aircraft_id' => $aircraft->id,
+            'estimated_price' => 15620,
             'status' => 'sent_to_provider',
         ]);
 

@@ -351,6 +351,7 @@ class OperadorControlador extends ControladorBase
             'coverage' => ['nullable', 'string', 'max:255'],
             'amenities' => ['nullable'],
             'hourly_rate' => ['nullable', 'numeric', 'min:0'],
+            'airport_expenses_usd' => ['nullable', 'numeric', 'min:0'],
             'minimum_hours' => ['nullable', 'numeric', 'min:0'],
             'climb_descent_minutes' => ['nullable', 'integer', 'min:0'],
             'operational_cost' => ['nullable', 'numeric', 'min:0'],
