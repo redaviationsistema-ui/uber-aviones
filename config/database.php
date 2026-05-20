@@ -87,7 +87,8 @@ return [
         'pgsql' => [
             'driver' => 'pgsql',
             'url' => env('DB_URL'),
-            'host' => env('DB_HOST', '127.0.0.1'),
+            // Inject connect_timeout into the DSN so PostgreSQL fails fast when the host is unreachable.
+            'host' => env('DB_HOST', '127.0.0.1').(env('DB_CONNECT_TIMEOUT') ? ';connect_timeout='.env('DB_CONNECT_TIMEOUT') : ''),
             'port' => env('DB_PORT', '5432'),
             'database' => env('DB_DATABASE', 'laravel'),
             'username' => env('DB_USERNAME', 'root'),
@@ -97,6 +98,10 @@ return [
             'prefix_indexes' => true,
             'search_path' => 'public',
             'sslmode' => env('DB_SSLMODE', 'prefer'),
+            'options' => extension_loaded('pdo_pgsql') ? array_filter([
+                PDO::ATTR_TIMEOUT => (int) env('DB_CONNECT_TIMEOUT', 5),
+                PDO::ATTR_PERSISTENT => filter_var(env('DB_PERSISTENT', true), FILTER_VALIDATE_BOOL),
+            ], fn ($value) => $value !== null) : [],
         ],
 
         'sqlsrv' => [

@@ -120,6 +120,11 @@ class VisibilidadServicio
         $assignedAircraft = $solicitud->relationLoaded('assignedAircraft')
             ? $solicitud->assignedAircraft
             : $solicitud->assignedAircraft()->first();
+        $operatorStatus = $match?->status === 'rejected'
+            ? 'rejected'
+            : ($match?->status === 'accepted'
+                ? 'accepted'
+                : ($solicitud->workflow_status ?? $solicitud->status));
 
         return [
             'id' => $solicitud->id,
@@ -151,7 +156,7 @@ class VisibilidadServicio
             'response_deadline' => $match?->response_deadline,
             'requirements' => $solicitud->requirements,
             'legs' => $this->visibleLegs($solicitud),
-            'status' => $solicitud->workflow_status ?? $solicitud->status,
+            'status' => $operatorStatus,
             'client' => [
                 'display_name' => 'Cliente Red Aviation #'.$solicitud->client_id,
             ],

@@ -87,7 +87,7 @@ class ReintentoCoincidenciaSolicitudServicio
 
         $visibilityPayload = $flightRequest->visibility_payload ?? [];
         $flightRequest->update([
-            'status' => 'unmatched',
+            'status' => 'pending',
             'workflow_status' => 'sin_opciones_disponibles',
             'assigned_provider_id' => null,
             'assigned_aircraft_id' => null,
