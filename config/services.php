@@ -43,4 +43,16 @@ return [
         'folder' => env('CLOUDINARY_FOLDER', 'red-aviation'),
     ],
 
+    'stripe' => [
+        'secret' => env('STRIPE_SECRET_KEY'),
+        'publishable' => env('STRIPE_PUBLISHABLE_KEY'),
+        'webhook_secret' => env('STRIPE_WEBHOOK_SECRET'),
+        'frontend_url' => env('FRONTEND_URL', 'http://localhost:5173'),
+        'bank_name' => env('WIRE_BANK_NAME', 'Banco por configurar'),
+        'bank_beneficiary' => env('WIRE_BANK_BENEFICIARY', 'Red Aviation'),
+        'bank_account' => env('WIRE_BANK_ACCOUNT', 'Por configurar'),
+        'bank_clabe' => env('WIRE_BANK_CLABE', 'Por configurar'),
+        'bank_swift' => env('WIRE_BANK_SWIFT', ''),
+    ],
+
 ];

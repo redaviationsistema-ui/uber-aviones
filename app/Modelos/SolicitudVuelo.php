@@ -41,6 +41,10 @@ class SolicitudVuelo extends Model
         'pricing_formula_version',
         'pricing_context',
         'notes',
+        'payment_method',
+        'payment_status',
+        'stripe_checkout_session_id',
+        'stripe_payment_intent_id',
         'status',
         'workflow_status',
     ];

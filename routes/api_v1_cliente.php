@@ -9,6 +9,7 @@ use App\Http\Controladores\PagoControlador;
 use App\Http\Controladores\MetodoPagoControlador;
 use App\Http\Controladores\CotizacionControlador;
 use App\Http\Controladores\ReservaControlador;
+use App\Http\Controladores\StripePagoControlador;
 use App\Http\Controladores\SuscripcionControlador;
 use Illuminate\Support\Facades\Route;
 
@@ -43,6 +44,9 @@ Route::prefix('cliente')->middleware(['auth.token', 'role:client,admin'])->group
     Route::post('/reservas/{reservation}/calificar', [ReservaControlador::class, 'rateService']);
     Route::post('/reservas/{reservation}/pagar', [PagoControlador::class, 'storeReservaPago']);
     Route::post('/reservas/{reservation}/reintentar-pago', [PagoControlador::class, 'retryReservaPago']);
+    Route::post('/stripe/checkout/create', [StripePagoControlador::class, 'createCheckout']);
+    Route::post('/stripe/payment-intent', [StripePagoControlador::class, 'createPaymentIntent']);
+    Route::post('/stripe/wire-intent', [StripePagoControlador::class, 'createWireIntent']);
 
     Route::get('/pagos', [PagoControlador::class, 'index']);
     Route::get('/historial', [SolicitudVueloControlador::class, 'history']);

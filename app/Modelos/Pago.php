@@ -12,6 +12,7 @@ class Pago extends Model
     protected $fillable = [
         'user_id',
         'reservation_id',
+        'flight_request_id',
         'subscription_id',
         'payment_method_id',
         'payment_type',
@@ -19,6 +20,8 @@ class Pago extends Model
         'currency',
         'provider',
         'transaction_reference',
+        'stripe_checkout_session_id',
+        'stripe_payment_intent_id',
         'status',
         'paid_at',
         'failure_reason',
@@ -37,5 +40,10 @@ class Pago extends Model
     public function reservation(): BelongsTo
     {
         return $this->belongsTo(Reserva::class);
+    }
+
+    public function flightRequest(): BelongsTo
+    {
+        return $this->belongsTo(SolicitudVuelo::class, 'flight_request_id');
     }
 }

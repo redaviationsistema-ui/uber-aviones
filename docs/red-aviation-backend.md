@@ -36,3 +36,11 @@ Esta capa actualiza el backend actual de marketplace hacia un modelo SaaS cerrad
 - No se elimino la capa previa de cotizaciones/reservas para no romper integraciones existentes.
 - `sobrecargo` no reemplaza el campo `users.role`; se resuelve con `users.operational_role` para evitar una migracion destructiva.
 - La transicion de comisiones a SaaS queda reflejada en configuracion y nuevos endpoints, pero la capa legacy sigue presente hasta su retiro definitivo.
+
+## Stripe local
+- El backend expone webhooks Stripe en `POST /api/v1/stripe/webhook` y `POST /api/v1/webhooks/stripe`.
+- Para pruebas locales usa `php artisan serve` y luego `sh scripts/stripe-listen-local.sh`.
+- El comando imprimira un secreto `whsec_...`; ese valor debe copiarse a `STRIPE_WEBHOOK_SECRET` en `.env`.
+- Si quieres una prueba completa sin pasar por el frontend, usa `sh scripts/stripe-e2e-local.sh`.
+- Ese script registra o reutiliza un cliente de prueba, crea una `flight_request`, le asigna monto de prueba y devuelve un `checkout_url` listo para abrir en Stripe Checkout.
+- El mensaje `zsh: command not found: i` no pertenece a Stripe; normalmente indica que se tecleo una `i` suelta en la terminal despues del login.
