@@ -123,6 +123,7 @@ class ClienteControlador extends ControladorBase
             'overnight_nights' => ['nullable', 'integer', 'min:0'],
             'include_iva' => ['nullable', 'boolean'],
             'airport_expenses' => ['nullable', 'boolean'],
+            'apply_margin' => ['nullable', 'boolean'],
             'aircraft_type' => ['nullable', 'string', 'max:100'],
             'requirements' => ['nullable', 'array'],
             'notes' => ['nullable', 'string'],
@@ -173,35 +174,29 @@ class ClienteControlador extends ControladorBase
                     'price_per_minute' => round($pricing['price_per_minute'], 2),
                     'minimum_hours' => round($pricing['minimum_hours'], 2),
                     'minimum_route_price' => round($pricing['minimum_route_price'], 2),
+                    'minimum_adjustment' => round($pricing['minimum_adjustment'], 2),
                     'base_cost' => round($pricing['base_price'], 2),
+                    'client_flight_cost' => round($pricing['client_flight_cost'], 2),
+                    'repositioning_hours' => round($pricing['repositioning_hours'], 2),
+                    'return_to_base_hours' => round($pricing['return_to_base_hours'], 2),
+                    'overnight_hours' => round($pricing['overnight_hours'], 2),
+                    'repositioning_cost' => round($pricing['initial_repositioning_cost'], 2),
+                    'return_to_base_cost' => round($pricing['return_to_base_cost'], 2),
+                    'overnight_cost' => round($pricing['overnight_cost'], 2),
+                    'airport_expenses' => round($pricing['airport_expenses'], 2),
                     'base_price_formula' => $pricing['base_price_formula'],
-                    'repositioning_cost' => round($pricing['initial_repositioning_cost'] + $pricing['return_to_base_cost'], 2),
-                    'operational_costs_total' => round(
-                        $pricing['overnight_cost'] + $pricing['operational_expenses'] + $pricing['airport_fees'] + $pricing['fixed_fee_total'],
-                        2
-                    ),
-                    'subtotal_before_multipliers' => round($pricing['operator_subtotal'], 2),
-                    'commercial_margin' => round($pricing['redsky_markup_factor'], 4),
                     'priority_factor' => 1,
+                    'subtotal_before_margin' => round($pricing['subtotal_before_margin'], 2),
+                    'margin_percentage' => round($pricing['margin_percentage'], 2),
+                    'margin_amount' => round($pricing['margin_amount'], 2),
                     'total_amount' => round($pricing['total'], 2),
                     'quoted_total' => round($pricing['total'], 2),
-                    'operational_cost' => round($pricing['operational_expenses'], 2),
-                    'fuel_burn_gph' => round($pricing['fuel_burn_gph'], 2),
-                    'engine_reserve_rate' => round($pricing['engine_reserve_rate'], 2),
-                    'insurance_rate' => round($pricing['insurance_rate'], 2),
-                    'maintenance_rate' => round($pricing['maintenance_rate'], 2),
-                    'crew_rate' => round($pricing['crew_rate'], 2),
-                    'repositioning_fee' => round($pricing['initial_repositioning_cost'] + $pricing['return_to_base_cost'], 2),
                     'overnight_fee' => round($pricing['overnight_fee'], 2),
                     'jet_a_price' => round($pricing['jet_a_price'], 2),
-                    'fixed_fee' => round($pricing['fixed_fee'], 2),
-                    'fixed_fee_total' => round($pricing['fixed_fee_total'], 2),
                     'segment_count' => max(count($pricing['client_legs']), 1),
                     'subtotal' => round($pricing['subtotal'], 2),
                     'utility' => 0,
                     'margin' => 0,
-                    'margin_percent' => round($pricing['margin_percent'], 4),
-                    'redsky_markup' => round($pricing['redsky_markup_percent'], 2),
                     'taxes' => round($pricing['tax'], 2),
                     'total' => round($pricing['total'], 2),
                     'currency' => $currency,
@@ -215,9 +210,6 @@ class ClienteControlador extends ControladorBase
                         'company_name' => $aircraft->provider?->company_name,
                         'commercial_name' => $aircraft->provider?->commercial_name,
                         'jet_a_price' => round($pricing['jet_a_price'], 2),
-                        'margin_percent' => round($pricing['margin_percent'], 4),
-                        'redsky_markup' => round($pricing['redsky_markup_percent'], 2),
-                        'fixed_fee' => round($pricing['fixed_fee'], 2),
                     ],
                     'aircraft' => $this->aircraftPreviewPayload($aircraft),
                 ];
@@ -591,7 +583,7 @@ class ClienteControlador extends ControladorBase
 
     private function aircraftCanQuote(Aeronave $aircraft, float $distanceKm): bool
     {
-        if ((float) $aircraft->speed_kmh <= 0 || (float) $aircraft->hourly_rate <= 0) {
+        if ($this->resolveCruiseSpeedKmh($aircraft) <= 0 || (float) $aircraft->hourly_rate <= 0) {
             return false;
         }
 
@@ -621,6 +613,10 @@ class ClienteControlador extends ControladorBase
         $hourlyRate = $this->resolveCommercialHourlyRate($aircraft->hourly_rate);
         $pricePerMinute = round($hourlyRate / 60, 2);
         $overnightFee = round($hourlyRate / 2, 2);
+        $categoryPricingRule = $this->resolveCategoryPricingRule($aircraft);
+        $marginRate = $this->shouldApplyCommercialMargin($requestData)
+            ? $this->resolveCommercialMarginRate($aircraft, $categoryPricingRule)
+            : 0.0;
         $clientLegs = $legs;
         $clientLegPricings = collect($clientLegs)
             ->map(function (array $leg) use ($aircraft) {
@@ -643,31 +639,77 @@ class ClienteControlador extends ControladorBase
         $minimumHours = (float) collect($clientLegPricings)->sum('minimum_hours');
         $outboundHours = (float) ($clientLegPricings[0]['billable_hours'] ?? 0);
         $returnHours = (float) collect(array_slice($clientLegPricings, 1))->sum('billable_hours');
-        $repositioningHours = 0.0;
+        $clientBillableHours = (float) collect($clientLegPricings)->sum('billable_hours');
+        $initialRepositioningPricing = $this->emptyLegPricing();
+        $returnToBasePricing = $this->emptyLegPricing();
+
+        $baseAirport = $this->resolveAircraftBaseAirport($aircraft);
+        $firstClientLeg = $clientLegs[0] ?? null;
+        $lastClientLeg = $clientLegs[count($clientLegs) - 1] ?? null;
+        $firstOriginAirport = $firstClientLeg ? $this->airportFromPayload($firstClientLeg['origin_airport']) : null;
+        $lastDestinationAirport = $lastClientLeg ? $this->airportFromPayload($lastClientLeg['destination_airport']) : null;
+        $firstOriginCode = (string) ($firstClientLeg['origin'] ?? '');
+        $lastDestinationCode = (string) ($lastClientLeg['destination'] ?? '');
+
+        if ($tripType === 'one_way' && $baseAirport && $firstOriginAirport && ! $this->airportsMatch($baseAirport, $firstOriginAirport)) {
+            $initialRepositioningPricing = $this->calculateLegPricing($aircraft, $baseAirport, $firstOriginAirport, false);
+        }
+
+        if ($tripType === 'one_way' && $baseAirport && $lastDestinationAirport && ! $this->airportsMatch($baseAirport, $lastDestinationAirport)) {
+            $returnToBasePricing = $this->calculateLegPricing($aircraft, $lastDestinationAirport, $baseAirport, false);
+        }
+
+        if ($tripType === 'multi_leg' && $baseAirport && $firstOriginAirport && ! $this->airportsMatch($baseAirport, $firstOriginAirport)) {
+            $initialRepositioningPricing = $this->calculateLegPricing($aircraft, $baseAirport, $firstOriginAirport, false);
+        }
+
+        if (
+            $tripType === 'multi_leg' &&
+            $baseAirport &&
+            $lastDestinationAirport &&
+            ! $this->airportsMatch($baseAirport, $lastDestinationAirport) &&
+            ! $this->airportMatchesCode($lastDestinationAirport, $firstOriginCode)
+        ) {
+            $returnToBasePricing = $this->calculateLegPricing($aircraft, $lastDestinationAirport, $baseAirport, false);
+        }
+
+        $repositioningHours = (float) ($initialRepositioningPricing['billable_hours'] ?? 0);
+        $returnToBaseHours = (float) ($returnToBasePricing['billable_hours'] ?? 0);
+        $repositioningCost = (float) ($initialRepositioningPricing['leg_cost'] ?? 0);
+        $returnToBaseCost = (float) ($returnToBasePricing['leg_cost'] ?? 0);
         $overnightNights = $this->resolveOvernightNights($clientLegs, $requestData);
         $overnightHours = $overnightNights * self::COMMERCIAL_OVERNIGHT_HOURS_PER_NIGHT;
-        $flightHours = $outboundHours + $returnHours;
-        $billableHours = $outboundHours + $returnHours + $repositioningHours + $overnightHours;
+        $flightHours = $clientBillableHours;
+        $billableHours = $clientBillableHours + $repositioningHours + $returnToBaseHours + $overnightHours;
         $billableMinutes = round($billableHours * 60, 2);
         $overnightCost = $overnightNights > 0 ? $overnightFee * $overnightNights : 0.0;
         $expenseFee = $this->shouldApplyAirportExpenses($requestData)
             ? $this->resolveAirportExpenseForAircraft($aircraft)
             : 0.0;
-        $basePrice = $billableHours * $hourlyRate;
-        $subtotal = $basePrice + $expenseFee;
+        $clientFlightCost = (float) collect($clientLegPricings)->sum('leg_cost');
+        $subtotalOperative = $clientFlightCost + $repositioningCost + $returnToBaseCost + $overnightCost + $expenseFee;
+        $minimumRoutePrice = $this->resolveMinimumRoutePrice($aircraft, $distanceTotal, $categoryPricingRule);
+        $subtotalBeforeMargin = max($subtotalOperative, $minimumRoutePrice);
+        $minimumAdjustment = max($subtotalBeforeMargin - $subtotalOperative, 0.0);
+        $marginAmount = $subtotalBeforeMargin * $marginRate;
+        $subtotal = $subtotalBeforeMargin + $marginAmount;
         $taxRate = $this->shouldIncludeIva($requestData) ? self::DEFAULT_IVA_RATE : 0.0;
         $ivaAmount = $subtotal * $taxRate;
         $total = $subtotal + $ivaAmount;
 
         return [
             'trip_type' => $tripType,
-            'quote_strategy' => 'distance_total_per_hour',
+            'quote_strategy' => 'official_backend_pricing_v2',
             'hourly_rate' => $hourlyRate,
             'price_per_minute' => $pricePerMinute,
             'minimum_hours' => $minimumHours,
-            'minimum_route_price' => 0,
-            'redsky_markup_percent' => 0,
-            'redsky_markup_factor' => 1,
+            'minimum_route_price' => $minimumRoutePrice,
+            'minimum_adjustment' => $minimumAdjustment,
+            'margin_percentage' => round($marginRate * 100, 2),
+            'margin_rate' => $marginRate,
+            'margin_amount' => $marginAmount,
+            'redsky_markup_percent' => round($marginRate * 100, 2),
+            'redsky_markup_factor' => 1 + $marginRate,
             'fuel_burn_gph' => 0,
             'engine_reserve_rate' => 0,
             'insurance_rate' => 0,
@@ -679,9 +721,11 @@ class ClienteControlador extends ControladorBase
             'jet_a_price' => 0,
             'fixed_fee' => 0,
             'fixed_fee_total' => 0,
-            'margin_percent' => 0,
+            'margin_percent' => round($marginRate * 100, 4),
             'client_legs' => $clientLegs,
             'client_leg_pricing' => $clientLegPricings,
+            'initial_repositioning_leg' => $repositioningCost > 0 ? $initialRepositioningPricing : null,
+            'return_to_base_leg' => $returnToBaseCost > 0 ? $returnToBasePricing : null,
             'distance_total' => $distanceTotal,
             'client_flight_hours' => $clientDisplayFlightHours,
             'client_display_flight_hours' => $clientDisplayFlightHours,
@@ -693,34 +737,47 @@ class ClienteControlador extends ControladorBase
             'outbound_hours' => $outboundHours,
             'return_hours' => $returnHours,
             'repositioning_hours' => $repositioningHours,
+            'return_to_base_hours' => $returnToBaseHours,
             'flight_hours' => $flightHours,
             'overnight_hours' => $overnightHours,
             'total_billed_hours' => $billableHours,
             'billable_hours' => $billableHours,
             'billable_minutes' => $billableMinutes,
-            'flight_base' => $basePrice,
-            'client_flight_base_cost' => $basePrice,
-            'client_flight_cost' => $basePrice,
-            'flight_cost' => $basePrice,
-            'operator_subtotal' => $subtotal,
-            'base_price' => $basePrice,
+            'flight_base' => $clientFlightCost,
+            'client_flight_base_cost' => $clientFlightCost,
+            'client_flight_cost' => $clientFlightCost,
+            'flight_cost' => $clientFlightCost,
+            'operator_subtotal' => $subtotalBeforeMargin,
+            'subtotal_operativo' => $subtotalOperative,
+            'subtotal_before_margin' => $subtotalBeforeMargin,
+            'base_price' => $clientFlightCost,
             'base_price_formula' => [
                 'hourly_rate' => round($hourlyRate, 2),
                 'price_per_minute' => $pricePerMinute,
                 'billable_minutes' => $billableMinutes,
-                'base_price' => round($basePrice, 2),
+                'client_flight_cost' => round($clientFlightCost, 2),
+                'repositioning_cost' => round($repositioningCost, 2),
+                'return_to_base_cost' => round($returnToBaseCost, 2),
+                'overnight_cost' => round($overnightCost, 2),
+                'airport_expenses' => round($expenseFee, 2),
+                'minimum_adjustment' => round($minimumAdjustment, 2),
+                'margin_amount' => round($marginAmount, 2),
+                'subtotal_before_margin' => round($subtotalBeforeMargin, 2),
                 'expression' => sprintf(
-                    '%.2f / 60 = %.2f; %.2f * %.2f = %.2f',
-                    round($hourlyRate, 2),
-                    $pricePerMinute,
-                    $pricePerMinute,
-                    $billableMinutes,
-                    round($basePrice, 2)
+                    '%.2f + %.2f + %.2f + %.2f + %.2f => %.2f; margen %.2f%% => %.2f',
+                    round($clientFlightCost, 2),
+                    round($repositioningCost, 2),
+                    round($returnToBaseCost, 2),
+                    round($overnightCost, 2),
+                    round($expenseFee, 2),
+                    round($subtotalBeforeMargin, 2),
+                    round($marginRate * 100, 2),
+                    round($subtotal, 2)
                 ),
             ],
-            'markup_amount' => 0,
-            'initial_repositioning_cost' => 0,
-            'return_to_base_cost' => 0,
+            'markup_amount' => $marginAmount,
+            'initial_repositioning_cost' => $repositioningCost,
+            'return_to_base_cost' => $returnToBaseCost,
             'overnight_nights' => $overnightNights,
             'overnight_cost' => $overnightCost,
             'overnight' => $overnightCost,
@@ -732,7 +789,7 @@ class ClienteControlador extends ControladorBase
             'iva' => $ivaAmount,
             'iva_amount' => $ivaAmount,
             'subtotal' => $subtotal,
-            'utility' => 0,
+            'utility' => $marginAmount,
             'final_price' => $total,
             'total' => $total,
         ];
@@ -754,9 +811,9 @@ class ClienteControlador extends ControladorBase
         $displayFlightHours = $directAirTime + $climbDescentHours;
         $reserveHours = $this->operationalBufferHours($distanceNm);
         $realFlightHours = $directAirTime + $climbDescentHours + $reserveHours;
-        $minimumHours = $applyMinimumHours ? $this->resolveMinimumHours($aircraft->category) : 0.0;
-        // La tarifa comercial se redondea al siguiente cuarto de hora por tramo.
-        $billableHours = $this->roundUpQuarterHours($displayFlightHours);
+        $minimumHours = $applyMinimumHours ? $this->resolveMinimumHours($aircraft->category, $distanceKm) : 0.0;
+        // En rutas largas usamos redondeo comercial al cuarto mas cercano; los minimos solo empujan rutas cortas.
+        $billableHours = max($this->roundUpQuarterHours($displayFlightHours), $minimumHours);
         $finalHours = $billableHours;
         $hourlyRate = $this->resolveCommercialHourlyRate($aircraft->hourly_rate);
         $rawLegCost = $finalHours * $hourlyRate;
@@ -788,16 +845,16 @@ class ClienteControlador extends ControladorBase
 
     private function resolveCruiseSpeedKmh(Aeronave $aircraft): float
     {
+        $explicitSpeedKmh = (float) $aircraft->speed_kmh;
+        if ($explicitSpeedKmh > 0) {
+            return $explicitSpeedKmh;
+        }
+
         $cruiseCategory = $this->normalizeCruiseCategory($aircraft->category);
         if ($cruiseCategory !== null) {
             $mach = self::CATEGORY_MACH_BANDS[$cruiseCategory] ?? self::CATEGORY_MACH_BANDS['Mid Jet'];
 
             return $mach * self::MACH_1_KMH;
-        }
-
-        $explicitSpeedKmh = (float) $aircraft->speed_kmh;
-        if ($explicitSpeedKmh > 0) {
-            return $explicitSpeedKmh;
         }
 
         return 740.0;
@@ -839,7 +896,8 @@ class ClienteControlador extends ControladorBase
             'turboprop', 'turbo prop', 'turbo_prop' => 'turboprop',
             'light jet', 'light_jet', 'lightjet' => 'light_jet',
             'mid jet', 'mid_jet', 'midjet', 'midsize jet', 'midsize_jet', 'super mid', 'super_mid' => 'mid_jet',
-            'heavy jet', 'heavy_jet', 'heavyjet', 'long range', 'long_range', 'ultra long', 'ultra_long', 'ultra long range', 'ultra_long_range' => 'heavy_jet',
+            'heavy jet', 'heavy_jet', 'heavyjet', 'long range', 'long_range' => 'heavy_jet',
+            'ultra long', 'ultra_long', 'ultra long range', 'ultra_long_range' => 'ultra_long',
             default => 'default',
         };
     }
@@ -856,15 +914,70 @@ class ClienteControlador extends ControladorBase
         return self::CATEGORY_CLIMB_DESCENT_MINUTES[$normalizedCategory ?? ''] ?? 30;
     }
 
-    private function resolveMinimumHours(mixed $aircraftCategory): float
+    private function resolveMinimumHours(mixed $aircraftCategory, ?float $distanceKm = null): float
     {
+        if ($distanceKm !== null && $distanceKm >= self::SHORT_ROUTE_DISTANCE_KM) {
+            return 0.0;
+        }
+
         return match ($this->normalizePricingCategory($aircraftCategory)) {
             'helicopter' => 1.0,
             'turboprop' => 1.5,
+            'light_jet' => 2.0,
+            'mid_jet' => 2.5,
             'heavy_jet' => 3.0,
-            'light_jet', 'mid_jet' => 2.0,
+            'ultra_long' => 4.0,
             default => 2.0,
         };
+    }
+
+    private function resolveCommercialMarginRate(Aeronave $aircraft, array $categoryPricingRule): float
+    {
+        $providerMargin = (float) ($aircraft->provider?->margin_percent ?? 0);
+        if ($providerMargin > 0) {
+            return $providerMargin > 1 ? $providerMargin / 100 : $providerMargin;
+        }
+
+        $categoryMarkup = (float) ($categoryPricingRule['redsky_markup'] ?? 0);
+
+        return $categoryMarkup > 0 ? $categoryMarkup / 100 : 0.20;
+    }
+
+    private function resolveAircraftBaseAirport(Aeronave $aircraft): ?Aeropuerto
+    {
+        $baseAirportCode = strtoupper(trim((string) $aircraft->base_airport));
+        if ($baseAirportCode === '') {
+            return null;
+        }
+
+        return $this->findActiveAirport($baseAirportCode);
+    }
+
+    private function airportsMatch(?Aeropuerto $left, ?Aeropuerto $right): bool
+    {
+        if (! $left || ! $right) {
+            return false;
+        }
+
+        return $this->airportMatchesCode($left, (string) ($right->icao ?: $right->iata))
+            || $this->airportMatchesCode($right, (string) ($left->icao ?: $left->iata));
+    }
+
+    private function airportMatchesCode(?Aeropuerto $airport, string $code): bool
+    {
+        if (! $airport) {
+            return false;
+        }
+
+        $normalizedCode = strtoupper(trim($code));
+        if ($normalizedCode === '') {
+            return false;
+        }
+
+        return in_array($normalizedCode, array_filter([
+            strtoupper((string) $airport->icao),
+            strtoupper((string) $airport->iata),
+        ]), true);
     }
 
     private function emptyLegPricing(): array
@@ -960,7 +1073,7 @@ class ClienteControlador extends ControladorBase
 
     private function roundUpQuarterHours(float $hours): float
     {
-        return ceil($hours * 4) / 4;
+        return round($hours * 4) / 4;
     }
 
     private function isInternationalLeg(Aeropuerto $originAirport, Aeropuerto $destinationAirport): bool
@@ -1007,6 +1120,15 @@ class ClienteControlador extends ControladorBase
         }
 
         return filter_var($data['airport_expenses'], FILTER_VALIDATE_BOOL);
+    }
+
+    private function shouldApplyCommercialMargin(array $data): bool
+    {
+        if (! array_key_exists('apply_margin', $data)) {
+            return false;
+        }
+
+        return filter_var($data['apply_margin'], FILTER_VALIDATE_BOOL);
     }
 
     private function resolveCommercialHourlyRate(mixed $value): float
@@ -1159,7 +1281,6 @@ class ClienteControlador extends ControladorBase
 
     private function aircraftPreviewPayload(Aeronave $aircraft): array
     {
-        $categoryPricingRule = $this->resolveCategoryPricingRule($aircraft);
         $sortedImages = $aircraft->images
             ->filter(fn (ImagenAeronave $image) => filled($image->image_url))
             ->sortBy([
@@ -1187,24 +1308,13 @@ class ClienteControlador extends ControladorBase
             'base_airport' => $aircraft->base_airport,
             'hourly_rate' => $aircraft->hourly_rate,
             'minimum_hours' => $aircraft->minimum_hours,
-            'minimum_route_price' => $categoryPricingRule['minimum_route_price'],
             'climb_descent_minutes' => $this->resolveAircraftClimbDescentBaseMinutes($aircraft),
-            'redsky_markup' => $categoryPricingRule['redsky_markup'],
-            'operational_cost' => $aircraft->operational_cost,
-            'fuel_burn_gph' => $aircraft->fuel_burn_gph,
-            'engine_reserve_rate' => $aircraft->engine_reserve_rate,
-            'insurance_rate' => $aircraft->insurance_rate,
-            'maintenance_rate' => $aircraft->maintenance_rate,
-            'crew_rate' => $aircraft->crew_rate,
-            'repositioning_fee' => $aircraft->repositioning_fee,
             'overnight_fee' => $aircraft->overnight_fee,
             'provider' => $aircraft->provider ? [
                 'id' => $aircraft->provider->id,
                 'company_name' => $aircraft->provider->company_name,
                 'commercial_name' => $aircraft->provider->commercial_name,
                 'jet_a_price' => $aircraft->provider->jet_a_price,
-                'margin_percent' => $aircraft->provider->margin_percent,
-                'fixed_fee' => $aircraft->provider->fixed_fee,
             ] : null,
             'main_image' => $visibleImages->firstWhere('is_main', true)?->image_url ?? $visibleImages->first()?->image_url,
             'images' => $visibleImages->map(fn (ImagenAeronave $image) => [
