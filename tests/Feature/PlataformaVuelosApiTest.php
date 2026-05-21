@@ -193,6 +193,43 @@ class PlataformaVuelosApiTest extends TestCase
             ->assertJsonPath('requests.0.aircraft_id', $aircraft->id);
     }
 
+    public function test_preview_quote_applies_iva_only_to_taxable_flight_amount(): void
+    {
+        $this->seed();
+
+        $aircraft = Aeronave::where('registration', 'XA-LJ45')->firstOrFail();
+        $aircraft->update([
+            'airport_expenses_usd' => 1000,
+        ]);
+
+        $response = $this->postJson('/api/v1/client/quotes/preview', [
+            'origin' => 'MMMX',
+            'destination' => 'MMUN',
+            'departure_datetime' => now()->addDays(3)->toISOString(),
+            'passengers' => 4,
+            'trip_type' => 'one_way',
+            'include_iva' => true,
+            'airport_expenses' => true,
+            'apply_margin' => false,
+        ])->assertOk();
+
+        $quote = collect($response->json('matches'))
+            ->firstWhere('aircraft_id', $aircraft->id);
+
+        $this->assertNotNull($quote);
+        $this->assertSame(1000.0, (float) $quote['airport_expenses']);
+
+        $subtotal = (float) $quote['subtotal'];
+        $airportExpenses = (float) $quote['airport_expenses'];
+        $taxableSubtotal = (float) $quote['pricing_breakdown']['taxable_subtotal'];
+        $taxes = (float) $quote['taxes'];
+        $total = (float) $quote['total'];
+
+        $this->assertEquals(round($subtotal - $airportExpenses, 2), round($taxableSubtotal, 2));
+        $this->assertEquals(round($taxableSubtotal * 0.16, 2), round($taxes, 2));
+        $this->assertEquals(round($subtotal + $taxes, 2), round($total, 2));
+    }
+
     public function test_red_aviation_chat_blocks_contact_leaks(): void
     {
         $this->seed();

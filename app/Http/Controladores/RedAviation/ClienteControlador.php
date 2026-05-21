@@ -22,14 +22,7 @@ class ClienteControlador extends ControladorBase
     private const MACH_1_KMH = 1062.0;
     private const COMMERCIAL_OVERNIGHT_HOURS_PER_NIGHT = 0.5;
     private const DEFAULT_IVA_RATE = 0.16;
-    private const AIRPORT_EXPENSE_BY_CATEGORY = [
-        'HEAVY JET' => 2000.0,
-        'MID JET' => 1000.0,
-        'LIGHT JET' => 800.0,
-        'TURBOPROP' => 600.0,
-        'HELICOPTERO' => 700.0,
-        'HELICÓPTERO' => 700.0,
-    ];
+    private const DEFAULT_AIRPORT_EXPENSE_USD = 1000.0;
 
     private const AIRCRAFT_CATEGORY_MINIMUM_PRICE = [
         'Helicoptero' => ['minimum_route_price' => 2200.0, 'redsky_markup' => 20.0],
@@ -693,8 +686,9 @@ class ClienteControlador extends ControladorBase
         $minimumAdjustment = max($subtotalBeforeMargin - $subtotalOperative, 0.0);
         $marginAmount = $subtotalBeforeMargin * $marginRate;
         $subtotal = $subtotalBeforeMargin + $marginAmount;
+        $taxableSubtotal = max($subtotal - $expenseFee, 0.0);
         $taxRate = $this->shouldIncludeIva($requestData) ? self::DEFAULT_IVA_RATE : 0.0;
-        $ivaAmount = $subtotal * $taxRate;
+        $ivaAmount = $taxableSubtotal * $taxRate;
         $total = $subtotal + $ivaAmount;
 
         return [
@@ -749,6 +743,8 @@ class ClienteControlador extends ControladorBase
             'flight_cost' => $clientFlightCost,
             'operator_subtotal' => $subtotalBeforeMargin,
             'subtotal_operativo' => $subtotalOperative,
+            'taxable_subtotal' => $taxableSubtotal,
+            'non_taxable_expenses' => $expenseFee,
             'subtotal_before_margin' => $subtotalBeforeMargin,
             'base_price' => $clientFlightCost,
             'base_price_formula' => [
@@ -763,14 +759,17 @@ class ClienteControlador extends ControladorBase
                 'minimum_adjustment' => round($minimumAdjustment, 2),
                 'margin_amount' => round($marginAmount, 2),
                 'subtotal_before_margin' => round($subtotalBeforeMargin, 2),
+                'taxable_subtotal' => round($taxableSubtotal, 2),
+                'non_taxable_expenses' => round($expenseFee, 2),
                 'expression' => sprintf(
-                    '%.2f + %.2f + %.2f + %.2f + %.2f => %.2f; margen %.2f%% => %.2f',
+                    'base %.2f + repo %.2f + return %.2f + overnight %.2f + airport %.2f => %.2f; taxable %.2f; margen %.2f%% => %.2f',
                     round($clientFlightCost, 2),
                     round($repositioningCost, 2),
                     round($returnToBaseCost, 2),
                     round($overnightCost, 2),
                     round($expenseFee, 2),
                     round($subtotalBeforeMargin, 2),
+                    round($taxableSubtotal, 2),
                     round($marginRate * 100, 2),
                     round($subtotal, 2)
                 ),
@@ -1148,14 +1147,7 @@ class ClienteControlador extends ControladorBase
             return $airportExpense > 0 && $airportExpense < 100 ? $airportExpense * 1000 : $airportExpense;
         }
 
-        return $this->resolveAirportExpenseByCategory($aircraft->category);
-    }
-
-    private function resolveAirportExpenseByCategory(mixed $category): float
-    {
-        $normalizedCategory = strtoupper(trim((string) $category));
-
-        return self::AIRPORT_EXPENSE_BY_CATEGORY[$normalizedCategory] ?? 0.0;
+        return self::DEFAULT_AIRPORT_EXPENSE_USD;
     }
 
     private function normalizeStoredPricingContext(array $data): ?array
@@ -1172,6 +1164,8 @@ class ClienteControlador extends ControladorBase
             'base_price' => $basePrice,
             'expense_fee' => $expenseFee,
             'subtotal' => $subtotal,
+            'taxable_subtotal' => (float) ($pricingContext['taxable_subtotal'] ?? max($subtotal - $expenseFee, 0)),
+            'non_taxable_expenses' => (float) ($pricingContext['non_taxable_expenses'] ?? $expenseFee),
             'iva_amount' => $ivaAmount,
             'total' => $finalPrice,
             'final_price' => $finalPrice,
