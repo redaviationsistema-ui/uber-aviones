@@ -32,11 +32,12 @@ class ProveedorControlador extends ControladorBase
 
     public function dashboard(Request $request)
     {
-        $provider = $request->user()->loadMissing('provider', 'profile')->provider;
+        $user = $request->user()->loadMissing('provider', 'profile');
+        $provider = $user->provider;
         abort_if(! $provider, 404, 'Proveedor no encontrado.');
 
         return $this->ok([
-            'provider' => $this->formatCompanyPayload($request),
+            'provider' => $this->formatCompanyPayload($user),
             'metrics' => [
                 'aircraft' => $provider->aircraft()->count(),
                 'active_aircraft' => $provider->aircraft()->whereIn('status', ['active', 'trial_active'])->count(),
@@ -199,13 +200,33 @@ class ProveedorControlador extends ControladorBase
         abort_if(! $providerId, 404, 'Proveedor no encontrado.');
 
         $requests = SolicitudVuelo::with([
-                'matches' => fn ($query) => $query->where('provider_id', $providerId),
-                'matches.aircraft',
-                'assignedAircraft',
-                'legs',
-                'reservation.contract',
-                'reservation.payments',
-                'operaciones.timeline',
+                'matches' => fn ($query) => $query
+                    ->select([
+                        'id',
+                        'flight_request_id',
+                        'aircraft_id',
+                        'provider_id',
+                        'estimated_price',
+                        'status',
+                        'response_deadline',
+                        'visibility_payload',
+                    ])
+                    ->where('provider_id', $providerId),
+                'matches.aircraft:id,model,category,capacity',
+                'assignedAircraft:id,model,category,capacity',
+                'legs:id,flight_request_id,leg_order,origin,destination,departure_datetime,arrival_datetime,passengers,distance_km',
+                'reservation:id,flight_request_id,status',
+                'reservation.contract:id,reservation_id,status',
+                'reservation.latestPayment' => fn ($query) => $query->select([
+                    'payments.id',
+                    'payments.reservation_id',
+                    'payments.status',
+                ]),
+                'latestOperation' => fn ($query) => $query->select([
+                    'operations.id',
+                    'operations.flight_request_id',
+                    'operations.status',
+                ]),
             ])
             ->where(function ($query) use ($providerId) {
                 $query

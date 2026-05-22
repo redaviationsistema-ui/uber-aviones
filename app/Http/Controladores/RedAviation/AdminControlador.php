@@ -255,15 +255,34 @@ class AdminControlador extends ControladorBase
     public function requests()
     {
         $requests = SolicitudVuelo::with([
-                'client',
-                'matches.aircraft',
-                'assignedAircraft',
-                'legs',
-                'reservation.contract',
-                'reservation.payments',
-                'operaciones.timeline',
+                'client:id,name',
+                'matches' => fn ($query) => $query->select([
+                    'id',
+                    'flight_request_id',
+                    'aircraft_id',
+                    'provider_id',
+                    'estimated_price',
+                    'status',
+                    'visibility_payload',
+                ]),
+                'matches.aircraft:id,model,category,capacity',
+                'assignedAircraft:id,model,category,capacity',
+                'legs:id,flight_request_id,leg_order,origin,destination,departure_datetime,arrival_datetime,passengers,distance_km',
+                'reservation:id,flight_request_id,status',
+                'reservation.contract:id,reservation_id,status',
+                'reservation.latestPayment' => fn ($query) => $query->select([
+                    'payments.id',
+                    'payments.reservation_id',
+                    'payments.status',
+                ]),
+                'latestOperation' => fn ($query) => $query->select([
+                    'operations.id',
+                    'operations.flight_request_id',
+                    'operations.status',
+                ]),
             ])
             ->latest()
+            ->limit(100)
             ->get()
             ->map(fn ($solicitud) => $this->visibilidadServicio->solicitudParaAdmin($solicitud))
             ->values();
@@ -336,124 +355,152 @@ class AdminControlador extends ControladorBase
             'notes' => ['nullable', 'string', 'max:4000'],
         ]);
 
-        $visibilityPayload = is_array($flightRequest->visibility_payload) ? $flightRequest->visibility_payload : [];
-        $adminFlowState = $data['admin_flow_state'] ?? $data['flow_control_state'] ?? 'active';
-        $adminReason = $data['admin_delay_reason'] ?? $data['delay_reason'] ?? $data['hold_reason'] ?? '';
-        $adminEta = $data['admin_delay_eta'] ?? $data['delay_eta'] ?? $data['hold_eta'] ?? '';
-        $adminNote = $data['admin_note'] ?? '';
-        $normalizedWorkflowStatus = Str::lower(trim((string) ($data['workflow_status'] ?? $flightRequest->workflow_status ?? '')));
-        $nextRequestStatus = $this->resolveFlightRequestStatusForWorkflow(
-            $data['status'] ?? null,
-            $normalizedWorkflowStatus,
-            $flightRequest->status
-        );
+        $result = DB::transaction(function () use ($request, $flightRequest, $data) {
+            $visibilityPayload = is_array($flightRequest->visibility_payload) ? $flightRequest->visibility_payload : [];
+            $adminFlowState = $data['admin_flow_state'] ?? $data['flow_control_state'] ?? 'active';
+            $adminReason = $data['admin_delay_reason'] ?? $data['delay_reason'] ?? $data['hold_reason'] ?? '';
+            $adminEta = $data['admin_delay_eta'] ?? $data['delay_eta'] ?? $data['hold_eta'] ?? '';
+            $adminNote = $data['admin_note'] ?? '';
+            $contractStatus = null;
+            $paymentStatus = $data['payment_status'] ?? $flightRequest->payment_status;
+            $normalizedWorkflowStatus = Str::lower(trim((string) ($data['workflow_status'] ?? $flightRequest->workflow_status ?? '')));
+            $nextRequestStatus = $this->resolveFlightRequestStatusForWorkflow(
+                $data['status'] ?? null,
+                $normalizedWorkflowStatus,
+                $flightRequest->status
+            );
 
-        $flightRequest->fill([
-            'status' => $nextRequestStatus,
-            'workflow_status' => $data['workflow_status'] ?? $flightRequest->workflow_status,
-            'payment_status' => $data['payment_status'] ?? $flightRequest->payment_status,
-            'notes' => $data['notes'] ?? $flightRequest->notes,
-            'visibility_payload' => [
-                ...$visibilityPayload,
-                'admin_flow' => [
-                    'state' => $adminFlowState,
-                    'reason' => $adminReason,
-                    'eta' => $adminEta,
-                    'note' => $adminNote,
-                    'updated_at' => now()->toIso8601String(),
-                    'updated_by' => $request->user()?->id,
+            $flightRequest->fill([
+                'status' => $nextRequestStatus,
+                'workflow_status' => $data['workflow_status'] ?? $flightRequest->workflow_status,
+                'payment_status' => $data['payment_status'] ?? $flightRequest->payment_status,
+                'notes' => $data['notes'] ?? $flightRequest->notes,
+                'visibility_payload' => [
+                    ...$visibilityPayload,
+                    'admin_flow' => [
+                        'state' => $adminFlowState,
+                        'reason' => $adminReason,
+                        'eta' => $adminEta,
+                        'note' => $adminNote,
+                        'updated_at' => now()->toIso8601String(),
+                        'updated_by' => $request->user()?->id,
+                    ],
                 ],
-            ],
-        ]);
-        $flightRequest->save();
-
-        $reservation = \App\Modelos\Reserva::query()
-            ->where('flight_request_id', $flightRequest->id)
-            ->latest('id')
-            ->first();
-
-        if ($reservation) {
-            $reservationUpdates = [];
-
-            if (! empty($data['workflow_status'])) {
-                $reservationUpdates['status'] = match ($data['workflow_status']) {
-                    'cancelada', 'cancelled' => 'cancelled',
-                    'pago confirmado', 'payment_confirmed' => 'confirmed',
-                    'tracking en vivo', 'tracking_live', 'vuelo confirmado', 'flight_confirmed' => 'confirmed',
-                    'finalizada', 'completed' => 'completed',
-                    default => $reservation->status,
-                };
-            }
-
-            if (! empty($reservationUpdates)) {
-                $reservation->update($reservationUpdates);
-            }
-
-            if (! empty($data['contract_status'])) {
-                $contract = $reservation->contract;
-                if ($contract) {
-                    $normalizedContractStatus = Str::lower(trim((string) $data['contract_status']));
-                    $contract->update([
-                        'status' => $normalizedContractStatus === 'signed' ? 'signed' : 'generated',
-                        'signed_at' => $normalizedContractStatus === 'signed'
-                            ? ($contract->signed_at ?? now())
-                            : null,
-                    ]);
-                }
-            }
-
-            if (! empty($data['payment_status'])) {
-                $payment = $reservation->payments()->latest('id')->first();
-                if ($payment) {
-                    $normalizedPaymentStatus = Str::lower(trim((string) $data['payment_status']));
-                    $payment->update([
-                        'status' => match ($normalizedPaymentStatus) {
-                            'pagado', 'paid' => 'paid',
-                            'pendiente', 'pending', 'pendiente de pago' => 'pending',
-                            'retenido', 'held' => 'held',
-                            'reembolsado', 'refunded' => 'refunded',
-                            'fallido', 'failed' => 'failed',
-                            default => $payment->status,
-                        },
-                        'paid_at' => in_array($normalizedPaymentStatus, ['pagado', 'paid'], true)
-                            ? ($payment->paid_at ?? now())
-                            : $payment->paid_at,
-                    ]);
-                }
-            }
-        }
-
-        $operation = Operacion::query()
-            ->where('flight_request_id', $flightRequest->id)
-            ->latest('id')
-            ->first();
-
-        if ($operation && ! empty($data['workflow_status'])) {
-            $operation->timeline()->create([
-                'status' => $data['workflow_status'],
-                'title' => 'Actualizacion manual del flujo',
-                'description' => $adminNote ?: 'Admin actualizo el flujo de la solicitud.',
-                'created_by' => $request->user()->id,
             ]);
+            $flightRequest->save();
+
+            $reservation = \App\Modelos\Reserva::query()
+                ->where('flight_request_id', $flightRequest->id)
+                ->latest('id')
+                ->first();
+
+            if ($reservation) {
+                $reservationUpdates = [];
+
+                if (! empty($data['workflow_status'])) {
+                    $reservationUpdates['status'] = match ($data['workflow_status']) {
+                        'cancelada', 'cancelled' => 'cancelled',
+                        'pago confirmado', 'payment_confirmed' => 'confirmed',
+                        'tracking en vivo', 'tracking_live', 'vuelo confirmado', 'flight_confirmed' => 'confirmed',
+                        'finalizada', 'completed' => 'completed',
+                        default => $reservation->status,
+                    };
+                }
+
+                if (! empty($reservationUpdates)) {
+                    $reservation->update($reservationUpdates);
+                }
+
+                if (! empty($data['contract_status'])) {
+                    $contract = $reservation->contract;
+                    if ($contract) {
+                        $normalizedContractStatus = Str::lower(trim((string) $data['contract_status']));
+                        $contract->update([
+                            'status' => $normalizedContractStatus === 'signed' ? 'signed' : 'generated',
+                            'signed_at' => $normalizedContractStatus === 'signed'
+                                ? ($contract->signed_at ?? now())
+                                : null,
+                        ]);
+                        $contractStatus = $contract->status;
+                    }
+                }
+
+                if (! empty($data['payment_status'])) {
+                    $payment = $reservation->payments()->latest('id')->first();
+                    if ($payment) {
+                        $normalizedPaymentStatus = Str::lower(trim((string) $data['payment_status']));
+                        $payment->update([
+                            'status' => match ($normalizedPaymentStatus) {
+                                'pagado', 'paid' => 'paid',
+                                'pendiente', 'pending', 'pendiente de pago' => 'pending',
+                                'retenido', 'held' => 'held',
+                                'reembolsado', 'refunded' => 'refunded',
+                                'fallido', 'failed' => 'failed',
+                                default => $payment->status,
+                            },
+                            'paid_at' => in_array($normalizedPaymentStatus, ['pagado', 'paid'], true)
+                                ? ($payment->paid_at ?? now())
+                                : $payment->paid_at,
+                        ]);
+                        $paymentStatus = $payment->status;
+                    }
+                }
+
+                $contractStatus ??= $reservation->contract?->status;
+                $paymentStatus ??= $reservation->latestPayment?->status ?? $reservation->status;
+            }
+
+            $operation = Operacion::query()
+                ->where('flight_request_id', $flightRequest->id)
+                ->latest('id')
+                ->first();
+
+            if ($operation && ! empty($data['workflow_status'])) {
+                $operation->timeline()->create([
+                    'status' => $data['workflow_status'],
+                    'title' => 'Actualizacion manual del flujo',
+                    'description' => $adminNote ?: 'Admin actualizo el flujo de la solicitud.',
+                    'created_by' => $request->user()->id,
+                ]);
+            }
+
+            return [
+                'request' => [
+                    'id' => $flightRequest->id,
+                    'request_id' => $flightRequest->id,
+                    'flight_request_id' => $flightRequest->id,
+                    'reservation_id' => $reservation?->id,
+                    'status' => $flightRequest->status,
+                    'workflow_status' => $flightRequest->workflow_status,
+                    'payment_status' => $paymentStatus,
+                    'contract_status' => $contractStatus,
+                    'notes' => $flightRequest->notes,
+                    'visibility_payload' => $flightRequest->visibility_payload,
+                    'reservation' => $reservation ? [
+                        'id' => $reservation->id,
+                        'status' => $reservation->status,
+                        'contract_status' => $contractStatus,
+                        'payment_status' => $paymentStatus,
+                    ] : null,
+                    'operation' => $operation ? [
+                        'id' => $operation->id,
+                        'status' => $operation->status,
+                    ] : null,
+                ],
+            ];
+        });
+
+        try {
+            $this->writeAudit($request, 'admin_request_workflow_updated', 'admin_requests', sprintf(
+                'Admin actualizo el flujo de la solicitud %s a %s.',
+                $flightRequest->id,
+                $data['workflow_status'] ?? $flightRequest->workflow_status
+            ));
+        } catch (\Throwable) {
+            // Audit failures should not block the admin flow update response.
         }
 
-        $this->writeAudit($request, 'admin_request_workflow_updated', 'admin_requests', sprintf(
-            'Admin actualizo el flujo de la solicitud %s a %s.',
-            $flightRequest->id,
-            $data['workflow_status'] ?? $flightRequest->workflow_status
-        ));
-
-        return $this->ok([
-            'request' => $flightRequest->fresh([
-                'client',
-                'matches.aircraft',
-                'assignedProvider',
-                'assignedAircraft',
-                'operaciones.timeline',
-                'operaciones.sobrecargo',
-            ]),
-            'reservation' => $reservation?->fresh(['contract', 'payments', 'provider', 'aircraft']),
-        ]);
+        return $this->ok($result);
     }
 
     private function resolveFlightRequestStatusForWorkflow(?string $requestedStatus, string $workflowStatus, ?string $currentStatus): string

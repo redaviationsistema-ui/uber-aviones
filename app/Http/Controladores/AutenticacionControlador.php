@@ -79,7 +79,16 @@ class AutenticacionControlador extends ControladorBase
 
     public function me(Request $request)
     {
-        $user = $request->user()->load(['provider', 'ownedProvider', 'profile', 'roles', 'demo', 'activeSuscripcion.plan', 'paymentMethods']);
+        $user = $request->user()->loadMissing([
+            'provider:id,user_id,company_name,commercial_name,approval_status,jet_a_price,margin_percent,fixed_fee,notes',
+            'ownedProvider:id,user_id,company_name,commercial_name,approval_status,jet_a_price,margin_percent,fixed_fee,notes',
+            'profile:id,user_id,company_name,business_type,country,city,address,avatar,avatar_url,tax_data',
+            'roles:id,code,name',
+            'demo:id,user_id,status,started_at,expires_at',
+            'activeSuscripcion:id,user_id,plan_id,status,started_at,expires_at',
+            'activeSuscripcion.plan:id,name,code,billing_cycle,price_monthly,price_yearly,max_aircraft,max_users,has_priority,has_concierge,has_reports,is_enterprise',
+            'paymentMethods:id,user_id,type,brand,last_four,provider,is_default',
+        ]);
 
         return $this->ok([
             'user' => $user,

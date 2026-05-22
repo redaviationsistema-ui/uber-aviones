@@ -54,6 +54,11 @@ class Reserva extends Model
         return $this->belongsTo(Cotizacion::class, 'quote_id');
     }
 
+    public function flightRequest(): BelongsTo
+    {
+        return $this->belongsTo(SolicitudVuelo::class, 'flight_request_id');
+    }
+
     public function legs(): HasMany
     {
         return $this->hasMany(TramoReserva::class, 'reservation_id');
@@ -62,6 +67,11 @@ class Reserva extends Model
     public function payments(): HasMany
     {
         return $this->hasMany(Pago::class, 'reservation_id');
+    }
+
+    public function latestPayment(): HasOne
+    {
+        return $this->hasOne(Pago::class, 'reservation_id')->latestOfMany();
     }
 
     public function contract(): HasOne

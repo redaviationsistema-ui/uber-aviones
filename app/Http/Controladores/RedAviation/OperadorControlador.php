@@ -178,9 +178,33 @@ class OperadorControlador extends ControladorBase
         $providerId = $request->user()->provider_id;
         abort_if(! $providerId, 422, 'El usuario proveedor no tiene provider_id asignado.');
         $solicitudes = SolicitudVuelo::with([
-                'matches' => fn ($query) => $query->where('provider_id', $providerId),
-                'matches.aircraft',
-                'assignedAircraft',
+                'matches' => fn ($query) => $query
+                    ->select([
+                        'id',
+                        'flight_request_id',
+                        'aircraft_id',
+                        'provider_id',
+                        'estimated_price',
+                        'status',
+                        'response_deadline',
+                        'visibility_payload',
+                    ])
+                    ->where('provider_id', $providerId),
+                'matches.aircraft:id,model,category,capacity',
+                'assignedAircraft:id,model,category,capacity',
+                'legs:id,flight_request_id,leg_order,origin,destination,departure_datetime,arrival_datetime,passengers,distance_km',
+                'reservation:id,flight_request_id,status',
+                'reservation.contract:id,reservation_id,status',
+                'reservation.latestPayment' => fn ($query) => $query->select([
+                    'payments.id',
+                    'payments.reservation_id',
+                    'payments.status',
+                ]),
+                'latestOperation' => fn ($query) => $query->select([
+                    'operations.id',
+                    'operations.flight_request_id',
+                    'operations.status',
+                ]),
             ])
             ->where(function ($query) use ($providerId) {
                 $query

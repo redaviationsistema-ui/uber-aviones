@@ -8,6 +8,7 @@ use App\Modelos\Comision;
 use App\Modelos\Cotizacion;
 use App\Modelos\Reserva;
 use App\Modelos\SolicitudVuelo;
+use Barryvdh\DomPDF\Facade\Pdf;
 use JsonException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
@@ -164,6 +165,19 @@ class ReservaControlador extends ControladorBase
         ]);
     }
 
+    public function downloadContractPdf(Request $request, mixed $reservation)
+    {
+        $reservation = $this->resolveReservation($reservation);
+        $this->authorizeReservationClient($request, $reservation);
+
+        $contract = $this->buildReservationContract($reservation)->fresh();
+        $fileName = ($contract->contract_code ?: 'contrato-'.$reservation->id).'.pdf';
+        $pdf = Pdf::loadView('pdf.contract', $this->buildContractPdfPayload($reservation, $contract))
+            ->setPaper('a4');
+
+        return $pdf->download($fileName);
+    }
+
     public function generateContract(Request $request, mixed $reservation)
     {
         $reservation = $this->resolveReservation($reservation);
@@ -224,6 +238,18 @@ class ReservaControlador extends ControladorBase
                 'transaction_reference' => 'PAY-'.Str::upper(Str::random(10)),
             ]);
         }
+
+        if ($reservation->flight_request_id) {
+            $reservation->flightRequest()->update([
+                'status' => 'reserved',
+                'workflow_status' => 'pago pendiente',
+                'payment_status' => 'pending',
+            ]);
+        }
+
+        $reservation->update([
+            'status' => 'pending_payment',
+        ]);
 
         $this->writeAudit($request, 'sign', 'reservation_contracts', 'Contrato firmado por cliente.');
 
@@ -356,5 +382,183 @@ class ReservaControlador extends ControladorBase
         }
 
         return $reservation->contract()->create($payload);
+    }
+
+    private function buildContractPdfPayload(Reserva $reservation, ContratoReserva $contract): array
+    {
+        $snapshot = is_array($contract->terms_snapshot) ? $contract->terms_snapshot : [];
+        $clientSnapshot = is_array($snapshot['client_contract_snapshot'] ?? null)
+            ? $snapshot['client_contract_snapshot']
+            : [];
+        $conditions = array_values(array_filter(
+            $snapshot['conditions'] ?? [],
+            fn ($value) => is_string($value) && trim($value) !== ''
+        ));
+        $segments = $this->buildPdfItinerarySegments($reservation, $clientSnapshot);
+        $route = $this->buildPdfRouteLabel($segments, $clientSnapshot['route'] ?? '');
+        $finalPriceValue = $this->parsePdfMoney($clientSnapshot['final_price'] ?? $snapshot['amount'] ?? $reservation->total_amount);
+        $depositValue = $this->parsePdfMoney($clientSnapshot['deposit_amount'] ?? null);
+        if ($depositValue <= 0 && $finalPriceValue > 0) {
+            $depositValue = $finalPriceValue * 0.5;
+        }
+
+        $pricingRows = [
+            ['label' => 'Costo total del servicio', 'amount' => $finalPriceValue],
+            ['label' => 'Depósito requerido', 'amount' => $depositValue],
+            ['label' => 'Saldo estimado', 'amount' => max($finalPriceValue - $depositValue, 0)],
+        ];
+
+        return [
+            'contract' => $contract,
+            'reservation' => $reservation->loadMissing(['client', 'provider', 'aircraft', 'legs', 'flightRequest']),
+            'snapshot' => $snapshot,
+            'clientSnapshot' => $clientSnapshot,
+            'conditions' => $conditions,
+            'segments' => $segments,
+            'route' => $route,
+            'departureDate' => $clientSnapshot['departure_date'] ?? optional($reservation->flightRequest)->departure_datetime?->format('d/m/Y H:i') ?? 'Pendiente',
+            'aircraft' => $clientSnapshot['aircraft'] ?? optional($reservation->aircraft)->model ?? 'Por definir',
+            'aircraftCategory' => $clientSnapshot['aircraft_category'] ?? optional($reservation->aircraft)->category ?? 'Por definir',
+            'passengers' => $clientSnapshot['passengers'] ?? ($reservation->flightRequest?->passengers ? $reservation->flightRequest->passengers.' pasajeros' : 'Por definir'),
+            'customerName' => $clientSnapshot['customer_name'] ?? optional($reservation->client)->name ?? 'Cliente',
+            'customerRepresentative' => $clientSnapshot['customer_representative'] ?? optional($reservation->client)->name ?? 'Cliente',
+            'customerAddress' => $clientSnapshot['customer_address'] ?? 'Domicilio por confirmar',
+            'serviceTier' => $clientSnapshot['service_tier'] ?? 'Servicio ejecutivo privado',
+            'operator' => $clientSnapshot['operator'] ?? optional($reservation->provider)->commercial_name ?? optional($reservation->provider)->company_name ?? 'Operador por confirmar',
+            'contractDate' => $clientSnapshot['contract_date'] ?? optional($contract->signed_at ?: $contract->generated_at)->format('d/m/Y') ?? now()->format('d/m/Y'),
+            'finalPrice' => $this->formatPdfMoney($finalPriceValue),
+            'depositText' => $depositValue > 0 ? $this->formatPdfMoney($depositValue).' (50% del costo total)' : 'Depósito por definir',
+            'balanceText' => $this->formatPdfMoney(max($finalPriceValue - $depositValue, 0)),
+            'pricingRows' => $pricingRows,
+            'logoPath' => public_path('logo.png'),
+            'providerSignaturePath' => public_path('AUTOGRAFO/AUTOGRAFO JEFE.png'),
+            'clientSignatureDataUrl' => data_get($snapshot, 'client_signature.data_url', ''),
+            'bankAccounts' => [
+                [
+                    'bank' => 'BANBAJÍO',
+                    'account' => '046 76313 20201',
+                    'clabe' => '0304 209000 4337 2636',
+                    'beneficiary' => 'TRANSPORTACIÓN EXITOSA BELLIKAI S.A. DE C.V.',
+                    'rfc' => 'TEB231030NU9',
+                ],
+                [
+                    'bank' => 'BANREGIO',
+                    'account' => '247 96234 0011',
+                    'clabe' => '05842 0000 150761410',
+                    'beneficiary' => 'TRANSPORTACIÓN EXITOSA BELLIKAI S.A. DE C.V.',
+                    'rfc' => 'TEB231030NU9',
+                ],
+                [
+                    'bank' => 'BBVA',
+                    'account' => '0122 912627',
+                    'clabe' => '01243 800122 9126272',
+                    'beneficiary' => 'TRANSPORTACIÓN EXITOSA BELLIKAI S.A. DE C.V.',
+                    'rfc' => 'TEB231030NU9',
+                ],
+            ],
+            'includesItems' => [
+                'Aeronave y tripulación asignada para la ruta contratada.',
+                'Coordinación operativa y seguimiento comercial de SKY Group / Red Aviation.',
+                'Combustible y operación contemplados en la cotización validada.',
+                'Uso de aeronave conforme al itinerario confirmado en este Anexo A.',
+            ],
+            'excludesItems' => [
+                'Catering especial no contemplado expresamente.',
+                'Transporte terrestre, hospedaje o concierge fuera del alcance contratado.',
+                'Cambios de itinerario solicitados por el Cliente después de la firma.',
+                'Tiempos de espera extraordinarios, permisos especiales o costos por reprogramación.',
+            ],
+        ];
+    }
+
+    private function buildPdfItinerarySegments(Reserva $reservation, array $clientSnapshot): array
+    {
+        $segments = [];
+        $snapshotSegments = $clientSnapshot['itinerary_segments'] ?? [];
+        if (is_array($snapshotSegments) && ! empty($snapshotSegments)) {
+            foreach ($snapshotSegments as $index => $segment) {
+                if (! is_array($segment)) {
+                    continue;
+                }
+
+                $segments[] = [
+                    'order' => $segment['order'] ?? $index + 1,
+                    'origin' => $segment['origin'] ?? 'Origen por confirmar',
+                    'destination' => $segment['destination'] ?? 'Destino por confirmar',
+                    'departure' => $segment['departure'] ?? '',
+                ];
+            }
+
+            return $segments;
+        }
+
+        foreach ($reservation->legs as $index => $leg) {
+            $segments[] = [
+                'order' => $leg->leg_order ?? $index + 1,
+                'origin' => $leg->origin ?? 'Origen por confirmar',
+                'destination' => $leg->destination ?? 'Destino por confirmar',
+                'departure' => (string) ($leg->departure_datetime ?? ''),
+            ];
+        }
+
+        if ($segments) {
+            return $segments;
+        }
+
+        return [[
+            'order' => 1,
+            'origin' => $reservation->flightRequest?->origin ?? 'Origen por confirmar',
+            'destination' => $reservation->flightRequest?->destination ?? 'Destino por confirmar',
+            'departure' => (string) ($reservation->flightRequest?->departure_datetime ?? ''),
+        ]];
+    }
+
+    private function buildPdfRouteLabel(array $segments, string $fallback = ''): string
+    {
+        $path = [];
+        foreach ($segments as $index => $segment) {
+            $origin = trim((string) ($segment['origin'] ?? ''));
+            $destination = trim((string) ($segment['destination'] ?? ''));
+            if ($index === 0 && $origin !== '') {
+                $path[] = $origin;
+            }
+            if ($destination !== '' && end($path) !== $destination) {
+                $path[] = $destination;
+            }
+        }
+
+        if (count($path) >= 2) {
+            return implode(' → ', $path);
+        }
+
+        return trim($fallback) !== '' ? $fallback : 'Ruta por confirmar';
+    }
+
+    private function parsePdfMoney(mixed $value): float
+    {
+        if (is_numeric($value)) {
+            return (float) $value;
+        }
+
+        $normalized = preg_replace('/[^\d,.\-]/', '', trim((string) $value)) ?? '';
+        if ($normalized === '') {
+            return 0.0;
+        }
+
+        if (str_contains($normalized, ',') && str_contains($normalized, '.')) {
+            $normalized = strrpos($normalized, ',') > strrpos($normalized, '.')
+                ? str_replace('.', '', $normalized)
+                : str_replace(',', '', $normalized);
+            $normalized = str_replace(',', '.', $normalized);
+        } elseif (str_contains($normalized, ',') && ! str_contains($normalized, '.')) {
+            $normalized = str_replace(',', '.', $normalized);
+        }
+
+        return is_numeric($normalized) ? (float) $normalized : 0.0;
+    }
+
+    private function formatPdfMoney(float $amount): string
+    {
+        return '$'.number_format($amount, 2, '.', ',').' USD';
     }
 }

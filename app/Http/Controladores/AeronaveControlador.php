@@ -36,14 +36,20 @@ class AeronaveControlador extends ControladorBase
     public function index(Request $request)
     {
         $query = Aeronave::with(['provider.user.activeSuscripcion.plan', 'images', 'availability', 'documents']);
+        $providerAircraftCount = null;
+        $providerPlan = null;
 
         if ($request->user()->hasRole('provider') && ! $request->user()->hasRole('admin')) {
             $query->where('provider_id', $request->user()->provider_id);
+            $providerAircraftCount = $query->toBase()->getCountForPagination();
+            $providerPlan = $request->user()->loadMissing('activeSuscripcion.plan')->activeSuscripcion?->plan;
         }
 
         $aircraft = $query->latest()->paginate(20);
         $aircraft->setCollection(
-            $aircraft->getCollection()->map(fn (Aeronave $item) => $this->formatAircraftPayload($item))
+            $aircraft->getCollection()->map(
+                fn (Aeronave $item) => $this->formatAircraftPayload($item, $providerPlan, $providerAircraftCount)
+            )
         );
 
         return $this->ok(['aircraft' => $aircraft]);
@@ -732,11 +738,11 @@ class AeronaveControlador extends ControladorBase
         ];
     }
 
-    private function formatAircraftPayload(Aeronave $aircraft): array
+    private function formatAircraftPayload(Aeronave $aircraft, mixed $planOverride = null, ?int $providerAircraftCountOverride = null): array
     {
         $providerUser = $aircraft->provider?->user;
-        $plan = $providerUser?->activeSuscripcion?->plan;
-        $providerAircraftCount = $aircraft->provider?->aircraft()->count() ?? 1;
+        $plan = $planOverride ?? $providerUser?->activeSuscripcion?->plan;
+        $providerAircraftCount = $providerAircraftCountOverride ?? ($aircraft->provider?->aircraft()->count() ?? 1);
         $monthlyBase = (float) ($plan?->price_monthly ?? $plan?->price_yearly ?? $plan?->price ?? 0);
         $monthlyPerAircraft = $providerAircraftCount > 0 && $monthlyBase > 0
             ? round($monthlyBase / $providerAircraftCount, 2)

@@ -122,13 +122,17 @@ class VisibilidadServicio
             : $solicitud->assignedAircraft()->first();
         $reservation = $solicitud->relationLoaded('reservation')
             ? $solicitud->reservation
-            : $solicitud->reservation()->with(['contract', 'payments'])->first();
-        $operation = $solicitud->relationLoaded('operaciones')
-            ? $solicitud->operaciones->sortByDesc('id')->first()
-            : $solicitud->operaciones()->latest('id')->first();
-        $latestPayment = $reservation?->relationLoaded('payments')
-            ? $reservation->payments->sortByDesc('id')->first()
-            : $reservation?->payments()->latest('id')->first();
+            : $solicitud->reservation()->with(['contract', 'latestPayment'])->first();
+        $operation = $solicitud->relationLoaded('latestOperation')
+            ? $solicitud->latestOperation
+            : ($solicitud->relationLoaded('operaciones')
+                ? $solicitud->operaciones->sortByDesc('id')->first()
+                : $solicitud->latestOperation()->first());
+        $latestPayment = $reservation?->relationLoaded('latestPayment')
+            ? $reservation->latestPayment
+            : ($reservation?->relationLoaded('payments')
+                ? $reservation->payments->sortByDesc('id')->first()
+                : $reservation?->latestPayment()->first());
         $operatorStatus = $match?->status === 'rejected'
             ? 'rejected'
             : ($match?->status === 'accepted'
@@ -197,13 +201,13 @@ class VisibilidadServicio
             : $solicitud->assignedAircraft()->first();
         $reservation = $solicitud->relationLoaded('reservation')
             ? $solicitud->reservation
-            : $solicitud->reservation()->with(['contract', 'payments'])->first();
-        $operation = $solicitud->relationLoaded('operaciones')
-            ? $solicitud->operaciones->sortByDesc('id')->first()
-            : $solicitud->operaciones()->latest('id')->first();
-        $latestPayment = $reservation?->relationLoaded('payments')
-            ? $reservation->payments->sortByDesc('id')->first()
-            : $reservation?->payments()->latest('id')->first();
+            : $solicitud->reservation()->with(['contract', 'latestPayment'])->first();
+        $operation = $solicitud->relationLoaded('latestOperation')
+            ? $solicitud->latestOperation
+            : $solicitud->latestOperation()->first();
+        $latestPayment = $reservation?->relationLoaded('latestPayment')
+            ? $reservation->latestPayment
+            : $reservation?->latestPayment()->first();
         $client = $solicitud->relationLoaded('client') ? $solicitud->client : $solicitud->client()->first();
 
         return [

@@ -39,6 +39,7 @@ Route::prefix('cliente')->middleware(['auth.token', 'role:client,admin'])->group
     Route::get('/reservas/{reservation}', [ReservaControlador::class, 'show']);
     Route::post('/reservas', [ReservaControlador::class, 'store'])->middleware('premium');
     Route::get('/reservas/{reservation}/contrato', [ReservaControlador::class, 'showContract']);
+    Route::get('/reservas/{reservation}/contrato/pdf', [ReservaControlador::class, 'downloadContractPdf']);
     Route::post('/reservas/{reservation}/contrato/generar', [ReservaControlador::class, 'generateContract']);
     Route::post('/reservas/{reservation}/contrato/firmar', [ReservaControlador::class, 'signContract']);
     Route::post('/reservas/{reservation}/calificar', [ReservaControlador::class, 'rateService']);

@@ -198,6 +198,34 @@ class PlataformaVuelosApiTest extends TestCase
             ->assertJsonPath('requests.0.operation', null);
     }
 
+    public function test_admin_can_list_requests_queue(): void
+    {
+        $this->seed();
+
+        $adminLogin = $this->postJson('/api/v1/auth/login', [
+            'email' => 'admin@privateflights.test',
+            'password' => 'password',
+        ])->assertOk();
+
+        $adminToken = $adminLogin->json('token');
+
+        $this->withToken($adminToken)
+            ->getJson('/api/v1/admin/requests')
+            ->assertOk()
+            ->assertJsonStructure([
+                'success',
+                'requests' => [
+                    '*' => [
+                        'id',
+                        'origin',
+                        'destination',
+                        'status',
+                        'workflow_status',
+                    ],
+                ],
+            ]);
+    }
+
     public function test_preview_quote_applies_iva_only_to_taxable_flight_amount(): void
     {
         $this->seed();
