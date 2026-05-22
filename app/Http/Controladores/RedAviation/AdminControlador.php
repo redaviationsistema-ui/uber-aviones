@@ -299,6 +299,170 @@ class AdminControlador extends ControladorBase
         return $this->ok(['operation' => $operacion->load('timeline')]);
     }
 
+    public function updateRequestWorkflow(Request $request, SolicitudVuelo $flightRequest)
+    {
+        $data = $request->validate([
+            'status' => ['nullable', 'string', 'max:120'],
+            'workflow_status' => ['nullable', 'string', 'max:120'],
+            'payment_status' => ['nullable', 'string', 'max:120'],
+            'contract_status' => ['nullable', 'string', 'max:120'],
+            'admin_flow_state' => ['nullable', Rule::in(['active', 'delayed', 'blocked'])],
+            'flow_control_state' => ['nullable', Rule::in(['active', 'delayed', 'blocked'])],
+            'admin_delay_reason' => ['nullable', 'string', 'max:1000'],
+            'delay_reason' => ['nullable', 'string', 'max:1000'],
+            'hold_reason' => ['nullable', 'string', 'max:1000'],
+            'admin_delay_eta' => ['nullable', 'string', 'max:120'],
+            'delay_eta' => ['nullable', 'string', 'max:120'],
+            'hold_eta' => ['nullable', 'string', 'max:120'],
+            'admin_note' => ['nullable', 'string', 'max:1000'],
+            'notes' => ['nullable', 'string', 'max:4000'],
+        ]);
+
+        $visibilityPayload = is_array($flightRequest->visibility_payload) ? $flightRequest->visibility_payload : [];
+        $adminFlowState = $data['admin_flow_state'] ?? $data['flow_control_state'] ?? 'active';
+        $adminReason = $data['admin_delay_reason'] ?? $data['delay_reason'] ?? $data['hold_reason'] ?? '';
+        $adminEta = $data['admin_delay_eta'] ?? $data['delay_eta'] ?? $data['hold_eta'] ?? '';
+        $adminNote = $data['admin_note'] ?? '';
+        $normalizedWorkflowStatus = Str::lower(trim((string) ($data['workflow_status'] ?? $flightRequest->workflow_status ?? '')));
+        $nextRequestStatus = $this->resolveFlightRequestStatusForWorkflow(
+            $data['status'] ?? null,
+            $normalizedWorkflowStatus,
+            $flightRequest->status
+        );
+
+        $flightRequest->fill([
+            'status' => $nextRequestStatus,
+            'workflow_status' => $data['workflow_status'] ?? $flightRequest->workflow_status,
+            'payment_status' => $data['payment_status'] ?? $flightRequest->payment_status,
+            'notes' => $data['notes'] ?? $flightRequest->notes,
+            'visibility_payload' => [
+                ...$visibilityPayload,
+                'admin_flow' => [
+                    'state' => $adminFlowState,
+                    'reason' => $adminReason,
+                    'eta' => $adminEta,
+                    'note' => $adminNote,
+                    'updated_at' => now()->toIso8601String(),
+                    'updated_by' => $request->user()?->id,
+                ],
+            ],
+        ]);
+        $flightRequest->save();
+
+        $reservation = \App\Modelos\Reserva::query()
+            ->where('flight_request_id', $flightRequest->id)
+            ->latest('id')
+            ->first();
+
+        if ($reservation) {
+            $reservationUpdates = [];
+
+            if (! empty($data['workflow_status'])) {
+                $reservationUpdates['status'] = match ($data['workflow_status']) {
+                    'cancelada', 'cancelled' => 'cancelled',
+                    'pago confirmado', 'payment_confirmed' => 'confirmed',
+                    'tracking en vivo', 'tracking_live', 'vuelo confirmado', 'flight_confirmed' => 'confirmed',
+                    'finalizada', 'completed' => 'completed',
+                    default => $reservation->status,
+                };
+            }
+
+            if (! empty($reservationUpdates)) {
+                $reservation->update($reservationUpdates);
+            }
+
+            if (! empty($data['contract_status'])) {
+                $contract = $reservation->contract;
+                if ($contract) {
+                    $normalizedContractStatus = Str::lower(trim((string) $data['contract_status']));
+                    $contract->update([
+                        'status' => $normalizedContractStatus === 'signed' ? 'signed' : 'generated',
+                        'signed_at' => $normalizedContractStatus === 'signed'
+                            ? ($contract->signed_at ?? now())
+                            : null,
+                    ]);
+                }
+            }
+
+            if (! empty($data['payment_status'])) {
+                $payment = $reservation->payments()->latest('id')->first();
+                if ($payment) {
+                    $normalizedPaymentStatus = Str::lower(trim((string) $data['payment_status']));
+                    $payment->update([
+                        'status' => match ($normalizedPaymentStatus) {
+                            'pagado', 'paid' => 'paid',
+                            'pendiente', 'pending', 'pendiente de pago' => 'pending',
+                            'retenido', 'held' => 'held',
+                            'reembolsado', 'refunded' => 'refunded',
+                            'fallido', 'failed' => 'failed',
+                            default => $payment->status,
+                        },
+                        'paid_at' => in_array($normalizedPaymentStatus, ['pagado', 'paid'], true)
+                            ? ($payment->paid_at ?? now())
+                            : $payment->paid_at,
+                    ]);
+                }
+            }
+        }
+
+        $operation = Operacion::query()
+            ->where('flight_request_id', $flightRequest->id)
+            ->latest('id')
+            ->first();
+
+        if ($operation && ! empty($data['workflow_status'])) {
+            $operation->timeline()->create([
+                'status' => $data['workflow_status'],
+                'title' => 'Actualizacion manual del flujo',
+                'description' => $adminNote ?: 'Admin actualizo el flujo de la solicitud.',
+                'created_by' => $request->user()->id,
+            ]);
+        }
+
+        $this->writeAudit($request, 'admin_request_workflow_updated', 'admin_requests', sprintf(
+            'Admin actualizo el flujo de la solicitud %s a %s.',
+            $flightRequest->id,
+            $data['workflow_status'] ?? $flightRequest->workflow_status
+        ));
+
+        return $this->ok([
+            'request' => $flightRequest->fresh([
+                'client',
+                'matches.aircraft',
+                'assignedProvider',
+                'assignedAircraft',
+                'operaciones.timeline',
+                'operaciones.sobrecargo',
+            ]),
+            'reservation' => $reservation?->fresh(['contract', 'payments', 'provider', 'aircraft']),
+        ]);
+    }
+
+    private function resolveFlightRequestStatusForWorkflow(?string $requestedStatus, string $workflowStatus, ?string $currentStatus): string
+    {
+        $allowedStatuses = ['pending', 'matched', 'quoted', 'reserved', 'cancelled', 'expired'];
+        $normalizedRequestedStatus = Str::lower(trim((string) $requestedStatus));
+
+        if (in_array($normalizedRequestedStatus, $allowedStatuses, true)) {
+            return $normalizedRequestedStatus;
+        }
+
+        return match ($workflowStatus) {
+            'cotizada', 'quoted' => 'quoted',
+            'cancelada', 'cancelled' => 'cancelled',
+            'expirada', 'expired' => 'expired',
+            'proveedor aceptado', 'provider accepted', 'provider_accepted', 'aceptada', 'accepted', 'operador asignado', 'operador_asignado' => 'matched',
+            'contrato pendiente', 'contract pending', 'contract_pending',
+            'contrato firmado', 'contract signed', 'contract_signed',
+            'pago pendiente', 'payment pending', 'payment_pending',
+            'pago confirmado', 'payment confirmed', 'payment_confirmed',
+            'vuelo confirmado', 'flight confirmed', 'flight_confirmed',
+            'tracking en vivo', 'tracking live', 'tracking_live',
+            'finalizada', 'completed' => 'reserved',
+            default => $currentStatus ?: 'pending',
+        };
+    }
+
     public function subscriptions()
     {
         return $this->ok(['subscriptions' => Suscripcion::with(['user', 'plan'])->latest()->paginate(20)]);

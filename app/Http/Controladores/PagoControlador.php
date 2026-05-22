@@ -8,6 +8,7 @@ use App\Modelos\Notificacion;
 use App\Modelos\Operacion;
 use App\Modelos\Pago;
 use App\Modelos\Reserva;
+use JsonException;
 use Illuminate\Http\Request;
 
 class PagoControlador extends ControladorBase
@@ -22,8 +23,9 @@ class PagoControlador extends ControladorBase
         ]);
     }
 
-    public function storeReservaPago(Request $request, Reserva $reservation)
+    public function storeReservaPago(Request $request, mixed $reservation)
     {
+        $reservation = $this->resolveReservation($reservation);
         abort_if($reservation->client_id !== $request->user()->id, 403, 'No puedes pagar esta reserva.');
         abort_if(optional($reservation->contract)->status !== 'signed', 409, 'Primero debes firmar el contrato.');
 
@@ -87,8 +89,9 @@ class PagoControlador extends ControladorBase
         return $this->ok(['payment' => $payment->fresh(), 'reservation' => $reservation->fresh(['payments', 'contract'])], 201);
     }
 
-    public function retryReservaPago(Request $request, Reserva $reservation)
+    public function retryReservaPago(Request $request, mixed $reservation)
     {
+        $reservation = $this->resolveReservation($reservation);
         abort_if($reservation->client_id !== $request->user()->id, 403, 'No puedes reintentar este pago.');
 
         $payment = $reservation->payments()
@@ -157,5 +160,57 @@ class PagoControlador extends ControladorBase
                 ]);
             }
         }
+    }
+
+    private function resolveReservation(mixed $identifier): Reserva
+    {
+        if ($identifier instanceof Reserva) {
+            return $identifier->load(['contract', 'payments']);
+        }
+
+        $normalizedIdentifier = $this->normalizeReservationIdentifier($identifier);
+
+        return Reserva::with(['contract', 'payments'])
+            ->where('id', $normalizedIdentifier)
+            ->orWhere('flight_request_id', $normalizedIdentifier)
+            ->latest('id')
+            ->firstOrFail();
+    }
+
+    private function normalizeReservationIdentifier(mixed $value): string
+    {
+        if ($value instanceof Reserva) {
+            return (string) $value->getKey();
+        }
+
+        if (is_array($value)) {
+            return $this->normalizeReservationIdentifier(
+                $value['id'] ?? $value['reservation_id'] ?? $value['flight_request_id'] ?? ''
+            );
+        }
+
+        if (is_object($value)) {
+            return $this->normalizeReservationIdentifier(
+                $value->id ?? $value->reservation_id ?? $value->flight_request_id ?? ''
+            );
+        }
+
+        $normalizedValue = trim((string) $value);
+
+        if ($normalizedValue === '') {
+            return '';
+        }
+
+        if (str_starts_with($normalizedValue, '{') || str_starts_with($normalizedValue, '[')) {
+            try {
+                $decoded = json_decode($normalizedValue, true, 512, JSON_THROW_ON_ERROR);
+
+                return $this->normalizeReservationIdentifier($decoded);
+            } catch (JsonException) {
+                return $normalizedValue;
+            }
+        }
+
+        return $normalizedValue;
     }
 }
