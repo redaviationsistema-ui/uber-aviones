@@ -14,6 +14,7 @@ use App\Modelos\Suscripcion;
 use App\Modelos\SuscripcionAeronave;
 use App\Modelos\Usuario;
 use App\Servicios\RedAviation\KpiSaasServicio;
+use App\Servicios\RedAviation\VisibilidadServicio;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -29,7 +30,10 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class AdminControlador extends ControladorBase
 {
-    public function __construct(private readonly KpiSaasServicio $kpiSaasServicio)
+    public function __construct(
+        private readonly KpiSaasServicio $kpiSaasServicio,
+        private readonly VisibilidadServicio $visibilidadServicio,
+    )
     {
     }
 
@@ -250,7 +254,21 @@ class AdminControlador extends ControladorBase
 
     public function requests()
     {
-        return $this->ok(['requests' => SolicitudVuelo::with(['client', 'matches.aircraft'])->latest()->paginate(20)]);
+        $requests = SolicitudVuelo::with([
+                'client',
+                'matches.aircraft',
+                'assignedAircraft',
+                'legs',
+                'reservation.contract',
+                'reservation.payments',
+                'operaciones.timeline',
+            ])
+            ->latest()
+            ->get()
+            ->map(fn ($solicitud) => $this->visibilidadServicio->solicitudParaAdmin($solicitud))
+            ->values();
+
+        return $this->ok(['requests' => $requests]);
     }
 
     public function assign(Request $request, SolicitudVuelo $flightRequest)

@@ -203,6 +203,9 @@ class ProveedorControlador extends ControladorBase
                 'matches.aircraft',
                 'assignedAircraft',
                 'legs',
+                'reservation.contract',
+                'reservation.payments',
+                'operaciones.timeline',
             ])
             ->where(function ($query) use ($providerId) {
                 $query

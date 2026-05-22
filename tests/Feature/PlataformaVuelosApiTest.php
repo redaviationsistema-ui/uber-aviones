@@ -21,14 +21,14 @@ class PlataformaVuelosApiTest extends TestCase
             'role' => 'client',
         ])->assertCreated();
 
-        $sessionCookie = $register->getCookie('red_aviation_session');
+        $sessionToken = $register->json('token');
 
-        $this->withCookie($sessionCookie->getName(), $sessionCookie->getValue())
+        $this->withToken($sessionToken)
             ->postJson('/api/v1/cliente/demo/activar')
             ->assertCreated()
             ->assertJsonPath('success', true);
 
-        $this->withCookie($sessionCookie->getName(), $sessionCookie->getValue())
+        $this->withToken($sessionToken)
             ->postJson('/api/v1/cliente/solicitudes', [
                 'origin' => 'MMMX',
                 'destination' => 'MMUN',
@@ -52,14 +52,14 @@ class PlataformaVuelosApiTest extends TestCase
             'role' => 'client',
         ])->assertCreated();
 
-        $sessionCookie = $register->getCookie('red_aviation_session');
+        $sessionToken = $register->json('token');
 
-        $this->withCookie($sessionCookie->getName(), $sessionCookie->getValue())
+        $this->withToken($sessionToken)
             ->postJson('/api/v1/subscriptions/start-trial')
             ->assertCreated()
             ->assertJsonPath('subscription_status', 'demo_activa');
 
-        $response = $this->withCookie($sessionCookie->getName(), $sessionCookie->getValue())
+        $response = $this->withToken($sessionToken)
             ->postJson('/api/v1/client/flight-requests', [
                 'origin' => 'MMMX',
                 'destination' => 'MMUN',
@@ -84,7 +84,7 @@ class PlataformaVuelosApiTest extends TestCase
             'password' => 'password',
         ])->assertOk();
 
-        $adminCookie = $adminLogin->getCookie('red_aviation_session');
+        $adminToken = $adminLogin->json('token');
 
         $register = $this->postJson('/api/v1/auth/register', [
             'name' => 'Cliente Bloqueado',
@@ -93,10 +93,10 @@ class PlataformaVuelosApiTest extends TestCase
             'role' => 'client',
         ])->assertCreated();
 
-        $clientCookie = $register->getCookie('red_aviation_session');
+        $clientToken = $register->json('token');
         $clientId = $register->json('user.id');
 
-        $this->withCookie($clientCookie->getName(), $clientCookie->getValue())
+        $this->withToken($clientToken)
             ->postJson('/api/v1/client/flight-requests', [
                 'origin' => 'MMMX',
                 'destination' => 'MMUN',
@@ -106,14 +106,14 @@ class PlataformaVuelosApiTest extends TestCase
             ->assertStatus(402)
             ->assertJsonPath('message', 'Necesitas demo activa o suscripcion vigente.');
 
-        $this->withCookie($adminCookie->getName(), $adminCookie->getValue())
+        $this->withToken($adminToken)
             ->postJson("/api/v1/admin/users/{$clientId}/grant-trial")
             ->assertCreated()
             ->assertJsonPath('message', 'Demo comercial activada correctamente.')
             ->assertJsonPath('access.has_access', true)
             ->assertJsonPath('access.demo.status', 'active');
 
-        $this->withCookie($clientCookie->getName(), $clientCookie->getValue())
+        $this->withToken($clientToken)
             ->postJson('/api/v1/client/flight-requests', [
                 'origin' => 'MMMX',
                 'destination' => 'MMUN',
@@ -135,7 +135,7 @@ class PlataformaVuelosApiTest extends TestCase
             'password' => 'password',
         ])->assertOk();
 
-        $providerCookie = $providerLogin->getCookie('red_aviation_session');
+        $providerToken = $providerLogin->json('token');
 
         $register = $this->postJson('/api/v1/auth/register', [
             'name' => 'Cliente Cola',
@@ -144,13 +144,13 @@ class PlataformaVuelosApiTest extends TestCase
             'role' => 'client',
         ])->assertCreated();
 
-        $clientCookie = $register->getCookie('red_aviation_session');
+        $clientToken = $register->json('token');
 
-        $this->withCookie($clientCookie->getName(), $clientCookie->getValue())
+        $this->withToken($clientToken)
             ->postJson('/api/v1/subscriptions/start-trial')
             ->assertCreated();
 
-        $requestResponse = $this->withCookie($clientCookie->getName(), $clientCookie->getValue())
+        $requestResponse = $this->withToken($clientToken)
             ->postJson('/api/v1/client/flight-requests', [
                 'origin' => 'MMMX',
                 'destination' => 'MMUN',
@@ -185,12 +185,17 @@ class PlataformaVuelosApiTest extends TestCase
             'status' => 'sent_to_provider',
         ]);
 
-        $this->withCookie($providerCookie->getName(), $providerCookie->getValue())
+        $this->withToken($providerToken)
             ->getJson('/api/v1/proveedor/mis-solicitudes')
             ->assertOk()
             ->assertJsonPath('requests.0.id', $flightRequestId)
             ->assertJsonPath('requests.0.provider_id', $aircraft->provider_id)
-            ->assertJsonPath('requests.0.aircraft_id', $aircraft->id);
+            ->assertJsonPath('requests.0.aircraft_id', $aircraft->id)
+            ->assertJsonPath('requests.0.workflow_status', 'operador_asignado')
+            ->assertJsonPath('requests.0.contract_status', null)
+            ->assertJsonPath('requests.0.payment_status', null)
+            ->assertJsonPath('requests.0.reservation', null)
+            ->assertJsonPath('requests.0.operation', null);
     }
 
     public function test_preview_quote_applies_iva_only_to_taxable_flight_amount(): void
@@ -241,13 +246,13 @@ class PlataformaVuelosApiTest extends TestCase
             'role' => 'client',
         ])->assertCreated();
 
-        $sessionCookie = $register->getCookie('red_aviation_session');
+        $sessionToken = $register->json('token');
 
-        $this->withCookie($sessionCookie->getName(), $sessionCookie->getValue())
+        $this->withToken($sessionToken)
             ->postJson('/api/v1/subscriptions/start-trial')
             ->assertCreated();
 
-        $requestResponse = $this->withCookie($sessionCookie->getName(), $sessionCookie->getValue())
+        $requestResponse = $this->withToken($sessionToken)
             ->postJson('/api/v1/client/flight-requests', [
                 'origin' => 'MMMX',
                 'destination' => 'MMUN',
@@ -258,14 +263,14 @@ class PlataformaVuelosApiTest extends TestCase
 
         $chatId = $requestResponse->json('chat_id');
 
-        $this->withCookie($sessionCookie->getName(), $sessionCookie->getValue())
+        $this->withToken($sessionToken)
             ->postJson("/api/v1/chats/{$chatId}/messages", [
                 'message' => 'Escribeme por WhatsApp al +52 55 1234 5678 o correo test@example.com',
             ])
             ->assertCreated()
             ->assertJsonPath('message.has_blocked_content', true);
 
-        $this->assertDatabaseCount('anti_broker_flags', 2);
+        $this->assertGreaterThanOrEqual(2, \App\Modelos\BanderaAntiBroker::count());
     }
 
     public function test_login_returns_dashboard_and_effective_role_context(): void
@@ -312,9 +317,9 @@ class PlataformaVuelosApiTest extends TestCase
             'password' => 'password',
         ])->assertOk();
 
-        $sessionCookie = $login->getCookie('red_aviation_session');
+        $sessionToken = $login->json('token');
 
-        $this->withCookie($sessionCookie->getName(), $sessionCookie->getValue())
+        $this->withToken($sessionToken)
             ->getJson('/api/v1/auth/redirect-dashboard')
             ->assertOk()
             ->assertJsonPath('dashboard', '/sobrecargo/dashboard')

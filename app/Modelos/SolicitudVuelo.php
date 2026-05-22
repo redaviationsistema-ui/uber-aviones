@@ -6,6 +6,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class SolicitudVuelo extends Model
 {
@@ -100,6 +101,11 @@ class SolicitudVuelo extends Model
     public function operaciones(): HasMany
     {
         return $this->hasMany(Operacion::class, 'flight_request_id');
+    }
+
+    public function reservation(): HasOne
+    {
+        return $this->hasOne(Reserva::class, 'flight_request_id');
     }
 
     public function chatsProtegidos(): HasMany

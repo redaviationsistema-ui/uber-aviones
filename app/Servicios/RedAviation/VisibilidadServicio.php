@@ -120,6 +120,15 @@ class VisibilidadServicio
         $assignedAircraft = $solicitud->relationLoaded('assignedAircraft')
             ? $solicitud->assignedAircraft
             : $solicitud->assignedAircraft()->first();
+        $reservation = $solicitud->relationLoaded('reservation')
+            ? $solicitud->reservation
+            : $solicitud->reservation()->with(['contract', 'payments'])->first();
+        $operation = $solicitud->relationLoaded('operaciones')
+            ? $solicitud->operaciones->sortByDesc('id')->first()
+            : $solicitud->operaciones()->latest('id')->first();
+        $latestPayment = $reservation?->relationLoaded('payments')
+            ? $reservation->payments->sortByDesc('id')->first()
+            : $reservation?->payments()->latest('id')->first();
         $operatorStatus = $match?->status === 'rejected'
             ? 'rejected'
             : ($match?->status === 'accepted'
@@ -157,9 +166,117 @@ class VisibilidadServicio
             'requirements' => $solicitud->requirements,
             'legs' => $this->visibleLegs($solicitud),
             'status' => $operatorStatus,
+            'workflow_status' => $solicitud->workflow_status ?? $solicitud->status,
+            'contract_status' => $reservation?->contract?->status,
+            'payment_status' => $solicitud->payment_status
+                ?? $latestPayment?->status
+                ?? $reservation?->status,
+            'reservation_id' => $reservation?->id,
+            'reservation' => $reservation ? [
+                'id' => $reservation->id,
+                'status' => $reservation->status,
+                'contract_status' => $reservation->contract?->status,
+                'payment_status' => $solicitud->payment_status ?? $latestPayment?->status,
+            ] : null,
+            'operation' => $operation ? [
+                'id' => $operation->id,
+                'status' => $operation->status,
+            ] : null,
             'client' => [
                 'display_name' => 'Cliente Red Aviation #'.$solicitud->client_id,
             ],
+        ];
+    }
+
+    public function solicitudParaAdmin(SolicitudVuelo $solicitud): array
+    {
+        $preferredMatch = $this->matchPreferidoParaOperador($solicitud);
+        $visibilityPayload = $solicitud->visibility_payload ?? [];
+        $assignedAircraft = $solicitud->relationLoaded('assignedAircraft')
+            ? $solicitud->assignedAircraft
+            : $solicitud->assignedAircraft()->first();
+        $reservation = $solicitud->relationLoaded('reservation')
+            ? $solicitud->reservation
+            : $solicitud->reservation()->with(['contract', 'payments'])->first();
+        $operation = $solicitud->relationLoaded('operaciones')
+            ? $solicitud->operaciones->sortByDesc('id')->first()
+            : $solicitud->operaciones()->latest('id')->first();
+        $latestPayment = $reservation?->relationLoaded('payments')
+            ? $reservation->payments->sortByDesc('id')->first()
+            : $reservation?->payments()->latest('id')->first();
+        $client = $solicitud->relationLoaded('client') ? $solicitud->client : $solicitud->client()->first();
+
+        return [
+            'id' => $solicitud->id,
+            'request_id' => $solicitud->id,
+            'flight_request_id' => $solicitud->id,
+            'reservation_id' => $reservation?->id,
+            'origin' => $solicitud->origin,
+            'destination' => $solicitud->destination,
+            'route' => trim(($solicitud->origin ?? 'N/D').' - '.($solicitud->destination ?? 'N/D')),
+            'departure_datetime' => $solicitud->departure_datetime,
+            'passengers' => $solicitud->passengers,
+            'trip_type' => $solicitud->trip_type,
+            'aircraft_type' => $solicitud->aircraft_type,
+            'assigned_provider_id' => $solicitud->assigned_provider_id,
+            'assigned_aircraft_id' => $solicitud->assigned_aircraft_id,
+            'aircraft_model' => $assignedAircraft?->model
+                ?? $solicitud->assigned_aircraft_model
+                ?? $preferredMatch?->aircraft?->model
+                ?? $visibilityPayload['aircraft_model']
+                ?? $preferredMatch?->visibility_payload['aircraft_model']
+                ?? null,
+            'aircraft_id' => $solicitud->assigned_aircraft_id ?? $preferredMatch?->aircraft_id,
+            'provider_id' => $solicitud->assigned_provider_id ?? $preferredMatch?->provider_id,
+            'quote_total' => $preferredMatch?->estimated_price
+                ?? $solicitud->final_price
+                ?? $solicitud->pricing_context['total']
+                ?? $solicitud->pricing_context['final_price']
+                ?? null,
+            'base_price' => $solicitud->base_price,
+            'operational_fee' => $solicitud->operational_fee,
+            'priority_price' => $solicitud->priority_price,
+            'final_price' => $solicitud->final_price,
+            'currency' => $solicitud->currency,
+            'pricing_context' => $solicitud->pricing_context,
+            'requirements' => $solicitud->requirements,
+            'legs' => $this->visibleLegs($solicitud),
+            'status' => $solicitud->status,
+            'workflow_status' => $solicitud->workflow_status ?? $solicitud->status,
+            'contract_status' => $reservation?->contract?->status,
+            'payment_status' => $solicitud->payment_status
+                ?? $latestPayment?->status
+                ?? $reservation?->status,
+            'reservation' => $reservation ? [
+                'id' => $reservation->id,
+                'status' => $reservation->status,
+                'contract_status' => $reservation->contract?->status,
+                'payment_status' => $solicitud->payment_status ?? $latestPayment?->status,
+            ] : null,
+            'operation' => $operation ? [
+                'id' => $operation->id,
+                'status' => $operation->status,
+            ] : null,
+            'client' => $client ? [
+                'id' => $client->id,
+                'name' => $client->name,
+                'company' => $client->company_name ?? null,
+            ] : null,
+            'client_name' => $client?->name,
+            'company_name' => $client->company_name ?? null,
+            'matches' => $solicitud->matches->map(fn ($match) => [
+                'id' => $match->id,
+                'provider_id' => $match->provider_id,
+                'aircraft_id' => $match->aircraft_id,
+                'status' => $match->status,
+                'estimated_price' => $match->estimated_price,
+                'aircraft' => $match->aircraft ? [
+                    'id' => $match->aircraft->id,
+                    'model' => $match->aircraft->model,
+                    'category' => $match->aircraft->category,
+                    'capacity' => $match->aircraft->capacity,
+                ] : null,
+            ])->values(),
         ];
     }
 
