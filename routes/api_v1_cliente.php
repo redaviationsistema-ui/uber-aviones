@@ -58,3 +58,9 @@ Route::prefix('cliente')->middleware(['auth.token', 'role:client,admin'])->group
         ->parameters(['metodos-pago' => 'paymentMethod'])
         ->only(['index', 'store', 'destroy']);
 });
+
+Route::prefix('stripe')->middleware(['auth.token', 'role:client,admin'])->group(function () {
+    Route::post('/checkout/create', [StripePagoControlador::class, 'createCheckout']);
+    Route::post('/payment-intent', [StripePagoControlador::class, 'createPaymentIntent']);
+    Route::post('/wire-intent', [StripePagoControlador::class, 'createWireIntent']);
+});

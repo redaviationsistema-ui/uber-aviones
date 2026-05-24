@@ -4,6 +4,7 @@ namespace App\Http\Controladores;
 
 use App\Modelos\Pago;
 use App\Modelos\SolicitudVuelo;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -15,6 +16,10 @@ class StripePagoControlador extends ControladorBase
 {
     public function createCheckout(Request $request)
     {
+        if ($response = $this->ensureStripeIsConfigured()) {
+            return $response;
+        }
+
         $data = $request->validate([
             'flight_request_id' => ['required', 'exists:flight_requests,id'],
             'contact_email' => ['nullable', 'email'],
@@ -106,6 +111,10 @@ class StripePagoControlador extends ControladorBase
 
     public function createPaymentIntent(Request $request)
     {
+        if ($response = $this->ensureStripeIsConfigured()) {
+            return $response;
+        }
+
         $data = $request->validate([
             'flight_request_id' => ['required', 'exists:flight_requests,id'],
             'contact_email' => ['nullable', 'email'],
@@ -241,5 +250,27 @@ class StripePagoControlador extends ControladorBase
             ?: ($pricingContext['selected_card_price'] ?? 0)
             ?: ($pricingContext['final_price'] ?? 0)
         );
+    }
+
+    private function ensureStripeIsConfigured(): ?JsonResponse
+    {
+        $secretKey = trim((string) config('services.stripe.secret'));
+        $publishableKey = trim((string) config('services.stripe.publishable'));
+
+        if ($secretKey === '') {
+            return response()->json([
+                'success' => false,
+                'message' => 'Stripe no esta configurado en el backend. Falta STRIPE_SECRET_KEY en el entorno.',
+            ], 503);
+        }
+
+        if ($publishableKey === '') {
+            return response()->json([
+                'success' => false,
+                'message' => 'Stripe no esta configurado completamente. Falta STRIPE_PUBLISHABLE_KEY en el entorno.',
+            ], 503);
+        }
+
+        return null;
     }
 }
