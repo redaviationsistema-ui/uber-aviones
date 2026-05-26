@@ -219,6 +219,39 @@ class AdminControlador extends ControladorBase
         ], 201);
     }
 
+    public function revokeCommercialAccess(Request $request, Usuario $user)
+    {
+        if (! $user->hasRole(Usuario::ROLE_CLIENT)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Solo los usuarios cliente pueden modificar acceso comercial.',
+            ], 422);
+        }
+
+        $user->demo()->update([
+            'status' => 'inactive',
+            'expires_at' => now(),
+        ]);
+
+        $user->subscriptions()
+            ->where('status', 'active')
+            ->update([
+                'status' => 'cancelled',
+                'expires_at' => now(),
+            ]);
+
+        $this->writeAudit($request, 'admin_user_commercial_access_revoked', 'admin_users', sprintf(
+            'Admin desactivo el acceso comercial para el usuario %s.',
+            $user->email
+        ));
+
+        return $this->ok([
+            'message' => 'Acceso comercial desactivado correctamente.',
+            'access' => $user->fresh(['demo', 'activeSuscripcion.plan'])->accessStatus(),
+            'user' => $user->fresh(['roles', 'profile', 'provider', 'demo', 'activeSuscripcion.plan']),
+        ]);
+    }
+
     public function resetUserPassword(Request $request, Usuario $user)
     {
         $plainPassword = Str::password(12);

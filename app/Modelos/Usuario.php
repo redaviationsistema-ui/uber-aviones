@@ -48,6 +48,9 @@ class Usuario extends Authenticatable
 
     protected $appends = [
         'proveedor_id',
+        'access',
+        'subscription_status',
+        'effective_role',
     ];
 
     protected function casts(): array
@@ -323,6 +326,21 @@ class Usuario extends Authenticatable
             'plan_id' => $this->resolvedPlanId(),
             'dashboard' => $this->dashboardPath(),
         ];
+    }
+
+    public function getAccessAttribute(): array
+    {
+        return $this->accessStatus();
+    }
+
+    public function getSubscriptionStatusAttribute(): string
+    {
+        return $this->resolvedSubscriptionStatus();
+    }
+
+    public function getEffectiveRoleAttribute(): string
+    {
+        return $this->effectiveRole();
     }
 
     public function getProveedorIdAttribute(): ?int
