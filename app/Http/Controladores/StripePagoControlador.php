@@ -3,6 +3,7 @@
 namespace App\Http\Controladores;
 
 use App\Modelos\Pago;
+use App\Modelos\Reserva;
 use App\Modelos\SolicitudVuelo;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -14,6 +15,114 @@ use Stripe\Stripe;
 
 class StripePagoControlador extends ControladorBase
 {
+    public function confirmReservationPayment(Request $request, mixed $reservation)
+    {
+        if ($response = $this->ensureStripeIsConfigured()) {
+            return $response;
+        }
+
+        $reservation = $reservation instanceof Reserva
+            ? $reservation->load(['flightRequest', 'payments' => fn ($query) => $query->latest('id')])
+            : Reserva::with(['flightRequest', 'payments' => fn ($query) => $query->latest('id')])
+                ->findOrFail($reservation);
+
+        abort_if($reservation->client_id !== $request->user()->id, 403, 'No puedes confirmar el pago de esta reserva.');
+
+        $data = $request->validate([
+            'payment_intent_id' => ['nullable', 'string', 'max:255'],
+            'flight_request_id' => ['nullable', 'integer', 'exists:flight_requests,id'],
+            'brand' => ['nullable', 'string', 'max:120'],
+        ]);
+
+        $flightRequest = $reservation->flightRequest;
+        abort_if(! $flightRequest, 404, 'La reserva no tiene una solicitud de vuelo asociada.');
+
+        $paymentIntentId = trim((string) (
+            $data['payment_intent_id']
+            ?? $flightRequest->stripe_payment_intent_id
+            ?? $reservation->payments->first()?->stripe_payment_intent_id
+            ?? ''
+        ));
+
+        abort_if($paymentIntentId === '', 422, 'No encontramos el PaymentIntent para confirmar este pago.');
+
+        Stripe::setApiKey((string) config('services.stripe.secret'));
+        $paymentIntent = PaymentIntent::retrieve($paymentIntentId);
+
+        abort_if(! $paymentIntent, 404, 'Stripe no devolvio informacion del PaymentIntent.');
+        abort_if(($paymentIntent->status ?? '') !== 'succeeded', 409, 'Stripe aun no confirma este pago como exitoso.');
+
+        $metadataFlightRequestId = (int) ($paymentIntent->metadata->flight_request_id ?? 0);
+        if ($metadataFlightRequestId > 0) {
+            abort_if($metadataFlightRequestId !== (int) $flightRequest->id, 409, 'El PaymentIntent no corresponde a esta reserva.');
+        }
+
+        $brand = trim((string) (
+            $data['brand']
+            ?? data_get($paymentIntent, 'payment_method_details.card.brand')
+            ?? data_get($paymentIntent, 'charges.data.0.payment_method_details.card.brand')
+            ?? ''
+        ));
+
+        DB::transaction(function () use ($flightRequest, $reservation, $paymentIntent, $brand) {
+            $flightRequest->update([
+                'payment_method' => 'card',
+                'payment_status' => 'paid',
+                'stripe_payment_intent_id' => $paymentIntent->id,
+                'workflow_status' => 'pago confirmado',
+                'status' => 'reserved',
+            ]);
+
+            $reservation->update([
+                'status' => 'paid',
+                'confirmed_at' => $reservation->confirmed_at ?: now(),
+            ]);
+
+            $payment = Pago::updateOrCreate(
+                [
+                    'reservation_id' => $reservation->id,
+                    'flight_request_id' => $flightRequest->id,
+                    'provider' => 'stripe',
+                    'payment_type' => 'reservation',
+                ],
+                [
+                    'user_id' => $flightRequest->client_id,
+                    'amount' => ((int) ($paymentIntent->amount ?? 0)) / 100,
+                    'currency' => strtoupper((string) ($paymentIntent->currency ?? $flightRequest->currency ?? 'USD')),
+                    'transaction_reference' => $paymentIntent->id,
+                    'stripe_payment_intent_id' => $paymentIntent->id,
+                    'status' => 'paid',
+                    'paid_at' => now(),
+                    'failure_reason' => null,
+                    'gateway_response' => [
+                        'brand' => $brand ?: null,
+                        'payment_intent' => json_decode(json_encode($paymentIntent), true),
+                    ],
+                ],
+            );
+
+            if ($brand !== '') {
+                $responsePayload = is_array($payment->gateway_response) ? $payment->gateway_response : [];
+                $responsePayload['brand'] = $brand;
+                $payment->update(['gateway_response' => $responsePayload]);
+            }
+        });
+
+        $reservation->refresh()->load(['contract', 'payments', 'flightRequest']);
+        $paymentOrder = $reservation->payments->sortByDesc('id')->first();
+
+        return $this->ok([
+            'reservation' => $reservation,
+            'payment_order' => [
+                'status' => 'paid',
+                'brand' => $brand ?: data_get($paymentOrder, 'gateway_response.brand'),
+                'payment_intent_id' => $paymentIntent->id,
+            ],
+            'payment_status' => 'paid',
+            'workflow_status' => 'pago confirmado',
+        ]);
+    }
+
     public function createCheckout(Request $request)
     {
         if ($response = $this->ensureStripeIsConfigured()) {

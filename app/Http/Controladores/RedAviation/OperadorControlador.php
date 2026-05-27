@@ -604,7 +604,7 @@ class OperadorControlador extends ControladorBase
         $disk = (string) ($document->storage_disk ?: 'public');
         $path = (string) ($document->storage_path ?: '');
 
-        if ($disk === 's3' && $path !== '') {
+        if ($disk === 's3' && $path !== '' && $this->canGenerateTemporaryS3Urls()) {
             try {
                 return Storage::disk('s3')->temporaryUrl($path, now()->addMinutes(30));
             } catch (\Throwable) {
@@ -621,7 +621,7 @@ class OperadorControlador extends ControladorBase
         $thumbnailUrl = $document->thumbnail_url ?: null;
         $disk = (string) ($document->storage_disk ?: 'public');
 
-        if ($disk === 's3' && $thumbnailPath !== '') {
+        if ($disk === 's3' && $thumbnailPath !== '' && $this->canGenerateTemporaryS3Urls()) {
             try {
                 return Storage::disk('s3')->temporaryUrl($thumbnailPath, now()->addMinutes(30));
             } catch (\Throwable) {
@@ -630,5 +630,15 @@ class OperadorControlador extends ControladorBase
         }
 
         return $thumbnailUrl;
+    }
+
+    private function canGenerateTemporaryS3Urls(): bool
+    {
+        $key = trim((string) config('filesystems.disks.s3.key', ''));
+        $secret = trim((string) config('filesystems.disks.s3.secret', ''));
+        $bucket = trim((string) config('filesystems.disks.s3.bucket', ''));
+        $region = trim((string) config('filesystems.disks.s3.region', ''));
+
+        return $key !== '' && $secret !== '' && $bucket !== '' && $region !== '';
     }
 }

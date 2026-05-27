@@ -17,7 +17,13 @@ class TokenApiIntermediario
             return $this->unauthenticated();
         }
 
-        $token = TokenApi::with('user')
+        $token = TokenApi::with([
+                'user.roles',
+                'user.demo',
+                'user.activeSuscripcion.plan',
+                'user.profile',
+                'user.provider',
+            ])
             ->where('token', hash('sha256', $plainToken))
             ->where(function ($query) {
                 $query->whereNull('expires_at')->orWhere('expires_at', '>', now());

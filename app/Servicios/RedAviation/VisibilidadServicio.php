@@ -166,6 +166,8 @@ class VisibilidadServicio
             'final_price' => $solicitud->final_price,
             'currency' => $solicitud->currency,
             'pricing_context' => $solicitud->pricing_context,
+            'visibility_payload' => $visibilityPayload,
+            'provider_operational_release' => $visibilityPayload['provider_operational_release'] ?? null,
             'response_deadline' => $match?->response_deadline,
             'requirements' => $solicitud->requirements,
             'legs' => $this->visibleLegs($solicitud),

@@ -44,6 +44,7 @@ Route::prefix('cliente')->middleware(['auth.token', 'role:client,admin'])->group
     Route::post('/reservas/{reservation}/contrato/firmar', [ReservaControlador::class, 'signContract']);
     Route::post('/reservas/{reservation}/calificar', [ReservaControlador::class, 'rateService']);
     Route::post('/reservas/{reservation}/pagar', [PagoControlador::class, 'storeReservaPago']);
+    Route::post('/reservas/{reservation}/pago/confirmar', [StripePagoControlador::class, 'confirmReservationPayment']);
     Route::post('/reservas/{reservation}/reintentar-pago', [PagoControlador::class, 'retryReservaPago']);
     Route::post('/stripe/checkout/create', [StripePagoControlador::class, 'createCheckout']);
     Route::post('/stripe/payment-intent', [StripePagoControlador::class, 'createPaymentIntent']);

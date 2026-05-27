@@ -38,6 +38,7 @@ Route::prefix('proveedor')->middleware(['auth.token', 'role:provider,admin'])->g
     Route::get('/solicitudes/{flightRequest}', [ProveedorControlador::class, 'showRequest']);
     Route::post('/solicitudes/{flightRequest}/aceptar', [ProveedorControlador::class, 'acceptRequest']);
     Route::post('/solicitudes/{flightRequest}/rechazar', [ProveedorControlador::class, 'rejectRequest']);
+    Route::put('/solicitudes/{flightRequest}/release-provider', [ProveedorControlador::class, 'updateReleaseProvider']);
 
     Route::get('/cotizaciones', [CotizacionControlador::class, 'providerIndex']);
     Route::post('/cotizaciones', [CotizacionControlador::class, 'store']);

@@ -35,7 +35,12 @@ class AeronaveControlador extends ControladorBase
 
     public function index(Request $request)
     {
-        $query = Aeronave::with(['provider.user.activeSuscripcion.plan', 'images', 'availability', 'documents']);
+        $query = Aeronave::with([
+            'provider:id,user_id,company_name,commercial_name',
+            'images:id,aircraft_id,kind,title,image_url,is_main,visible_to_client,sort_order',
+            'availability:id,aircraft_id,start_datetime,end_datetime,status,notes',
+            'documents:id,aircraft_id,type,file_url,document_type,document_name,document_url,storage_disk,storage_path,thumbnail_path,thumbnail_url,expires_at,created_at,updated_at',
+        ]);
         $providerAircraftCount = null;
         $providerPlan = null;
 
@@ -756,10 +761,16 @@ class AeronaveControlador extends ControladorBase
             ->values();
 
         return [
-            ...$aircraft->toArray(),
+            ...$aircraft->attributesToArray(),
             'year' => $aircraft->model_year,
             'climb_descent_minutes' => $aircraft->climb_descent_minutes ?: $this->resolveClimbDescentMinutesForCategory($aircraft->category),
             'amenities' => $this->parseAmenities($aircraft->amenities),
+            'provider' => $aircraft->provider ? [
+                'id' => $aircraft->provider->id,
+                'user_id' => $aircraft->provider->user_id,
+                'company_name' => $aircraft->provider->company_name,
+                'commercial_name' => $aircraft->provider->commercial_name,
+            ] : null,
             'documents' => $aircraft->documents
                 ->map(fn (DocumentoAeronave $document) => $this->formatAircraftDocumentPayload($document))
                 ->values(),
@@ -917,7 +928,7 @@ class AeronaveControlador extends ControladorBase
         $disk = (string) ($document->storage_disk ?: 'public');
         $path = (string) ($document->storage_path ?: '');
 
-        if ($disk === 's3' && $path !== '') {
+        if ($disk === 's3' && $path !== '' && $this->canGenerateTemporaryS3Urls()) {
             try {
                 return Storage::disk('s3')->temporaryUrl($path, now()->addMinutes(30));
             } catch (\Throwable) {
@@ -934,7 +945,7 @@ class AeronaveControlador extends ControladorBase
         $thumbnailUrl = $document->thumbnail_url ?: null;
         $disk = (string) ($document->storage_disk ?: 'public');
 
-        if ($disk === 's3' && $thumbnailPath !== '') {
+        if ($disk === 's3' && $thumbnailPath !== '' && $this->canGenerateTemporaryS3Urls()) {
             try {
                 return Storage::disk('s3')->temporaryUrl($thumbnailPath, now()->addMinutes(30));
             } catch (\Throwable) {
@@ -943,6 +954,16 @@ class AeronaveControlador extends ControladorBase
         }
 
         return $thumbnailUrl;
+    }
+
+    private function canGenerateTemporaryS3Urls(): bool
+    {
+        $key = trim((string) config('filesystems.disks.s3.key', ''));
+        $secret = trim((string) config('filesystems.disks.s3.secret', ''));
+        $bucket = trim((string) config('filesystems.disks.s3.bucket', ''));
+        $region = trim((string) config('filesystems.disks.s3.region', ''));
+
+        return $key !== '' && $secret !== '' && $bucket !== '' && $region !== '';
     }
 
     private function resolveMainImageUrl(Aeronave $aircraft): ?string
