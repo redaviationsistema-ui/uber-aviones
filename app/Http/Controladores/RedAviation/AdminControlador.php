@@ -287,7 +287,32 @@ class AdminControlador extends ControladorBase
 
     public function requests()
     {
-        $requests = SolicitudVuelo::with([
+        $requests = SolicitudVuelo::query()
+            ->select([
+                'id',
+                'client_id',
+                'assigned_provider_id',
+                'assigned_aircraft_id',
+                'assigned_aircraft_model',
+                'origin',
+                'destination',
+                'departure_datetime',
+                'passengers',
+                'trip_type',
+                'aircraft_type',
+                'requirements',
+                'visibility_payload',
+                'base_price',
+                'operational_fee',
+                'priority_price',
+                'final_price',
+                'currency',
+                'pricing_context',
+                'payment_status',
+                'status',
+                'workflow_status',
+            ])
+            ->with([
                 'client:id,name',
                 'matches' => fn ($query) => $query->select([
                     'id',
@@ -321,6 +346,69 @@ class AdminControlador extends ControladorBase
             ->values();
 
         return $this->ok(['requests' => $requests]);
+    }
+
+    public function releases()
+    {
+        $releases = SolicitudVuelo::query()
+            ->select([
+                'id',
+                'client_id',
+                'assigned_provider_id',
+                'assigned_aircraft_id',
+                'assigned_aircraft_model',
+                'origin',
+                'destination',
+                'departure_datetime',
+                'passengers',
+                'trip_type',
+                'aircraft_type',
+                'visibility_payload',
+                'requirements',
+                'base_price',
+                'operational_fee',
+                'priority_price',
+                'final_price',
+                'currency',
+                'pricing_context',
+                'payment_status',
+                'status',
+                'workflow_status',
+            ])
+            ->with([
+                'client:id,name',
+                'assignedAircraft:id,model,category,capacity',
+                'legs:id,flight_request_id,leg_order,origin,destination,departure_datetime,arrival_datetime,passengers,distance_km',
+                'reservation:id,flight_request_id,status',
+                'reservation.contract:id,reservation_id,status',
+                'reservation.latestPayment' => fn ($query) => $query->select([
+                    'payments.id',
+                    'payments.reservation_id',
+                    'payments.status',
+                ]),
+                'latestOperation' => fn ($query) => $query->select([
+                    'operations.id',
+                    'operations.flight_request_id',
+                    'operations.status',
+                ]),
+            ])
+            ->latest()
+            ->limit(120)
+            ->get()
+            ->map(fn ($solicitud) => $this->visibilidadServicio->solicitudParaAdmin($solicitud))
+            ->filter(function ($solicitud) {
+                return ! empty($solicitud['provider_operational_release'])
+                    || ! empty($solicitud['operational_status'])
+                    || ! empty($solicitud['aircraft_confirmed'])
+                    || ! empty($solicitud['crew_confirmed'])
+                    || ! empty($solicitud['operational_ready']);
+            })
+            ->values();
+
+        return $this->ok([
+            'requests' => $releases,
+            'releases' => $releases,
+        ]);
     }
 
     public function assign(Request $request, SolicitudVuelo $flightRequest)

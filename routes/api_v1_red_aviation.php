@@ -94,6 +94,7 @@ Route::middleware(['auth.token'])->group(function () {
         Route::get('/operators', [AdminControlador::class, 'operators']);
         Route::get('/sobrecargos', [AdminControlador::class, 'sobrecargos']);
         Route::get('/requests', [AdminControlador::class, 'requests']);
+        Route::get('/releases', [AdminControlador::class, 'releases']);
         Route::post('/requests/{flightRequest}/assign', [AdminControlador::class, 'assign']);
         Route::put('/requests/{flightRequest}/workflow', [AdminControlador::class, 'updateRequestWorkflow']);
         Route::get('/subscriptions', [AdminControlador::class, 'subscriptions']);

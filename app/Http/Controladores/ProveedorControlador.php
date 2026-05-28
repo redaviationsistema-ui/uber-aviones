@@ -664,24 +664,80 @@ class ProveedorControlador extends ControladorBase
                 'Liberacion operativa actualizada por proveedor.'
             );
 
-            $freshRequest = SolicitudVuelo::query()
-                ->with([
-                    'matches.aircraft',
-                    'assignedAircraft',
-                    'legs',
-                    'reservation.contract',
-                    'reservation.latestPayment',
-                    'latestOperation',
-                ])
-                ->findOrFail($flightRequest->id);
-
             return [
-                'request' => $this->visibilidadServicio->solicitudParaOperador($freshRequest),
-                'operation' => $this->formatOperationPayload($operation->fresh(['solicitudVuelo', 'aeronave', 'sobrecargo', 'timeline'])),
+                'flight_request_id' => $flightRequest->id,
+                'operation_id' => $operation->id,
             ];
         });
 
-        return $this->ok($result);
+        $freshRequest = SolicitudVuelo::query()
+            ->select([
+                'id',
+                'client_id',
+                'assigned_provider_id',
+                'assigned_aircraft_id',
+                'assigned_aircraft_model',
+                'origin',
+                'destination',
+                'departure_datetime',
+                'passengers',
+                'trip_type',
+                'aircraft_type',
+                'requirements',
+                'visibility_payload',
+                'base_price',
+                'operational_fee',
+                'priority_price',
+                'final_price',
+                'currency',
+                'pricing_context',
+                'payment_status',
+                'status',
+                'workflow_status',
+            ])
+            ->with([
+                'matches' => fn ($query) => $query
+                    ->select([
+                        'id',
+                        'flight_request_id',
+                        'aircraft_id',
+                        'provider_id',
+                        'estimated_price',
+                        'status',
+                        'response_deadline',
+                        'visibility_payload',
+                    ])
+                    ->where('provider_id', $providerId),
+                'matches.aircraft:id,model,category,capacity',
+                'assignedAircraft:id,model,category,capacity',
+                'legs:id,flight_request_id,leg_order,origin,destination,departure_datetime,arrival_datetime,passengers,distance_km',
+                'reservation:id,flight_request_id,status',
+                'reservation.contract:id,reservation_id,status',
+                'reservation.latestPayment' => fn ($query) => $query->select([
+                    'payments.id',
+                    'payments.reservation_id',
+                    'payments.status',
+                ]),
+                'latestOperation' => fn ($query) => $query->select([
+                    'operations.id',
+                    'operations.flight_request_id',
+                    'operations.status',
+                ]),
+            ])
+            ->findOrFail($result['flight_request_id']);
+
+        $operation = Operacion::query()
+            ->with([
+                'solicitudVuelo:id,origin,destination,departure_datetime',
+                'aeronave:id,model',
+                'sobrecargo:id,name',
+            ])
+            ->findOrFail($result['operation_id']);
+
+        return $this->ok([
+            'request' => $this->visibilidadServicio->solicitudParaOperador($freshRequest),
+            'operation' => $this->formatOperationPayload($operation),
+        ]);
     }
 
     public function incidents(Request $request)

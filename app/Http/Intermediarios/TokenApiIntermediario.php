@@ -19,9 +19,6 @@ class TokenApiIntermediario
 
         $token = TokenApi::with([
                 'user.roles',
-                'user.demo',
-                'user.activeSuscripcion.plan',
-                'user.profile',
                 'user.provider',
             ])
             ->where('token', hash('sha256', $plainToken))
