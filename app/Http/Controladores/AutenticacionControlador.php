@@ -91,7 +91,30 @@ class AutenticacionControlador extends ControladorBase
         ]);
 
         return $this->ok([
-            'user' => $user,
+            'user' => [
+                'id' => $user->id,
+                'name' => $user->name,
+                'email' => $user->email,
+                'phone' => $user->phone,
+                'role' => $user->role,
+                'operational_role' => $user->operational_role,
+                'provider_id' => $user->provider_id,
+                'proveedor_id' => $user->provider_id,
+                'status' => $user->status,
+                'provider' => $user->provider,
+                'owned_provider' => $user->ownedProvider,
+                'ownedProvider' => $user->ownedProvider,
+                'profile' => $user->profile,
+                'roles' => $user->roles,
+                'demo' => $user->demo,
+                'active_suscripcion' => $user->activeSuscripcion,
+                'activeSuscripcion' => $user->activeSuscripcion,
+                'payment_methods' => $user->paymentMethods,
+                'paymentMethods' => $user->paymentMethods,
+                'access' => $user->accessStatus(),
+                'subscription_status' => $user->resolvedSubscriptionStatus(),
+                'effective_role' => $user->effectiveRole(),
+            ],
             'access' => $user->accessStatus(),
             'login_context' => $user->loginContext(),
         ]);

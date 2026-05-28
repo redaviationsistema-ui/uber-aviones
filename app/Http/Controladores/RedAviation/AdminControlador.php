@@ -285,9 +285,11 @@ class AdminControlador extends ControladorBase
         ]);
     }
 
-    public function requests()
+    public function requests(Request $request)
     {
-        $requests = SolicitudVuelo::query()
+        $perPage = min(max((int) $request->integer('per_page', 20), 1), 100);
+
+        $requestsPaginator = SolicitudVuelo::query()
             ->select([
                 'id',
                 'client_id',
@@ -340,12 +342,24 @@ class AdminControlador extends ControladorBase
                 ]),
             ])
             ->latest()
-            ->limit(100)
-            ->get()
+            ->paginate($perPage);
+
+        $requests = $requestsPaginator->getCollection()
             ->map(fn ($solicitud) => $this->visibilidadServicio->solicitudParaAdmin($solicitud))
             ->values();
 
-        return $this->ok(['requests' => $requests]);
+        $requestsPaginator->setCollection($requests);
+
+        return $this->ok([
+            'requests' => $requests,
+            'pagination' => [
+                'current_page' => $requestsPaginator->currentPage(),
+                'last_page' => $requestsPaginator->lastPage(),
+                'per_page' => $requestsPaginator->perPage(),
+                'total' => $requestsPaginator->total(),
+                'has_more_pages' => $requestsPaginator->hasMorePages(),
+            ],
+        ]);
     }
 
     public function releases()

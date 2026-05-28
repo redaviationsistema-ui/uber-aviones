@@ -177,7 +177,35 @@ class OperadorControlador extends ControladorBase
     {
         $providerId = $request->user()->provider_id;
         abort_if(! $providerId, 422, 'El usuario proveedor no tiene provider_id asignado.');
-        $solicitudes = SolicitudVuelo::with([
+
+        $perPage = min(max((int) $request->integer('per_page', 20), 1), 100);
+        $solicitudes = SolicitudVuelo::query()
+            ->select([
+                'id',
+                'client_id',
+                'assigned_provider_id',
+                'assigned_aircraft_id',
+                'assigned_aircraft_model',
+                'origin',
+                'destination',
+                'departure_datetime',
+                'passengers',
+                'trip_type',
+                'aircraft_type',
+                'requirements',
+                'visibility_payload',
+                'base_price',
+                'operational_fee',
+                'priority_price',
+                'final_price',
+                'currency',
+                'pricing_context',
+                'payment_status',
+                'status',
+                'workflow_status',
+                'created_at',
+            ])
+            ->with([
                 'matches' => fn ($query) => $query
                     ->select([
                         'id',
@@ -212,10 +240,24 @@ class OperadorControlador extends ControladorBase
                     ->orWhereHas('matches', fn ($matchQuery) => $matchQuery->where('provider_id', $providerId));
             })
             ->latest()
-            ->get()
-            ->map(fn ($solicitud) => $this->visibilidadServicio->solicitudParaOperador($solicitud));
+            ->paginate($perPage);
 
-        return $this->ok(['requests' => $solicitudes]);
+        $requests = $solicitudes->getCollection()
+            ->map(fn ($solicitud) => $this->visibilidadServicio->solicitudParaOperador($solicitud))
+            ->values();
+
+        $solicitudes->setCollection($requests);
+
+        return $this->ok([
+            'requests' => $requests,
+            'pagination' => [
+                'current_page' => $solicitudes->currentPage(),
+                'last_page' => $solicitudes->lastPage(),
+                'per_page' => $solicitudes->perPage(),
+                'total' => $solicitudes->total(),
+                'has_more_pages' => $solicitudes->hasMorePages(),
+            ],
+        ]);
     }
 
     public function accept(Request $request, SolicitudVuelo $flightRequest)

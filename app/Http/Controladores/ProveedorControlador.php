@@ -3,7 +3,6 @@
 namespace App\Http\Controladores;
 
 use App\Modelos\Aeronave;
-use App\Modelos\CoincidenciaSolicitud;
 use App\Modelos\LineaTiempoOperacion;
 use App\Modelos\Operacion;
 use App\Modelos\SolicitudVuelo;
@@ -203,9 +202,6 @@ class ProveedorControlador extends ControladorBase
         abort_if(! $providerId, 404, 'Proveedor no encontrado.');
 
         $perPage = min(max((int) $request->integer('per_page', 20), 1), 100);
-        $matchedRequestIds = CoincidenciaSolicitud::query()
-            ->where('provider_id', $providerId)
-            ->pluck('flight_request_id');
 
         $requestsPaginator = SolicitudVuelo::query()
             ->select([
@@ -263,9 +259,9 @@ class ProveedorControlador extends ControladorBase
                 ]),
             ])
             ->where(function ($query) use ($providerId) {
-                $query->where('assigned_provider_id', $providerId);
+                $query->where('assigned_provider_id', $providerId)
+                    ->orWhereHas('matches', fn ($matchQuery) => $matchQuery->where('provider_id', $providerId));
             })
-            ->when($matchedRequestIds->isNotEmpty(), fn ($query) => $query->orWhereIn('id', $matchedRequestIds))
             ->latest()
             ->paginate($perPage);
 
@@ -558,13 +554,19 @@ class ProveedorControlador extends ControladorBase
             'provider_operational_release.aircraft_id' => ['nullable', 'exists:aircraft,id'],
             'provider_operational_release.aircraft_label' => ['nullable', 'string', 'max:255'],
             'provider_operational_release.aircraft_operational_status' => ['nullable', 'string', 'max:120'],
+            'provider_operational_release.aircraft_overall_status' => ['nullable', 'string', 'max:120'],
             'provider_operational_release.availability_confirmed' => ['nullable', 'boolean'],
             'provider_operational_release.maintenance_clear' => ['nullable', 'boolean'],
             'provider_operational_release.route_coverage_confirmed' => ['nullable', 'boolean'],
             'provider_operational_release.captain_assigned_status' => ['nullable', 'string', 'max:120'],
+            'provider_operational_release.captain_status' => ['nullable', 'string', 'max:120'],
             'provider_operational_release.copilot_assigned_status' => ['nullable', 'string', 'max:120'],
+            'provider_operational_release.copilot_status' => ['nullable', 'string', 'max:120'],
+            'provider_operational_release.crew_availability_status' => ['nullable', 'string', 'max:120'],
             'provider_operational_release.crew_requirements_confirmed' => ['nullable', 'boolean'],
+            'provider_operational_release.crew_requirements_status' => ['nullable', 'string', 'max:120'],
             'provider_operational_release.crew_general_status' => ['nullable', 'string', 'max:120'],
+            'provider_operational_release.crew_overall_status' => ['nullable', 'string', 'max:120'],
             'provider_operational_release.crew_schedule_confirmed' => ['nullable', 'boolean'],
             'provider_operational_release.crew_documents_ready' => ['nullable', 'boolean'],
             'provider_operational_release.departure_airport' => ['nullable', 'string', 'max:120'],
@@ -592,8 +594,35 @@ class ProveedorControlador extends ControladorBase
         ]);
 
         $release = $data['provider_operational_release'];
+        $crewRequirementsStatus = Str::lower(trim((string) (
+            $release['crew_requirements_status'] ?? ''
+        )));
+        $crewRequirementsConfirmed = array_key_exists('crew_requirements_confirmed', $release)
+            ? (bool) $release['crew_requirements_confirmed']
+            : $crewRequirementsStatus === 'confirmed';
+        $captainStatus = $release['captain_status'] ?? $release['captain_assigned_status'] ?? null;
+        $copilotStatus = $release['copilot_status'] ?? $release['copilot_assigned_status'] ?? null;
+        $crewOverallStatus = $release['crew_overall_status'] ?? $release['crew_general_status'] ?? null;
+        $aircraftOverallStatus = $release['aircraft_overall_status'] ?? $release['aircraft_operational_status'] ?? null;
+
+        $release = [
+            ...$release,
+            'aircraft_operational_status' => $aircraftOverallStatus,
+            'aircraft_overall_status' => $aircraftOverallStatus,
+            'captain_assigned_status' => $captainStatus,
+            'captain_status' => $captainStatus,
+            'copilot_assigned_status' => $copilotStatus,
+            'copilot_status' => $copilotStatus,
+            'crew_requirements_confirmed' => $crewRequirementsConfirmed,
+            'crew_requirements_status' => $crewRequirementsStatus ?: ($crewRequirementsConfirmed ? 'confirmed' : 'pending'),
+            'crew_general_status' => $crewOverallStatus,
+            'crew_overall_status' => $crewOverallStatus,
+        ];
         $releaseStatus = Str::lower(trim((string) ($release['status'] ?? $data['operational_status'] ?? 'pending')));
-        $workflowStatus = $data['workflow_status'] ?? null;
+        $workflowStatus = $this->normalizeReleaseWorkflowStatus(
+            $data['workflow_status'] ?? $data['status'] ?? $data['state'] ?? null,
+            $releaseStatus
+        );
 
         $result = DB::transaction(function () use ($request, $flightRequest, $providerId, $release, $releaseStatus, $workflowStatus, $data) {
             $visibilityPayload = is_array($flightRequest->visibility_payload) ? $flightRequest->visibility_payload : [];
@@ -625,6 +654,20 @@ class ProveedorControlador extends ControladorBase
             ]);
             $flightRequest->save();
 
+            $reservation = \App\Modelos\Reserva::query()
+                ->where('flight_request_id', $flightRequest->id)
+                ->latest('id')
+                ->first();
+
+            if ($reservation && ! empty($workflowStatus)) {
+                $reservation->update([
+                    'status' => $this->mapReleaseWorkflowToReservationStatus(
+                        $workflowStatus,
+                        $reservation->status
+                    ),
+                ]);
+            }
+
             $operation = Operacion::query()
                 ->where('flight_request_id', $flightRequest->id)
                 ->where('provider_id', $providerId)
@@ -637,16 +680,20 @@ class ProveedorControlador extends ControladorBase
                     'provider_id' => $providerId,
                     'aircraft_id' => $release['aircraft_id'] ?? $flightRequest->assigned_aircraft_id,
                     'status' => $this->mapReleaseStatusToOperationStatus($releaseStatus, $workflowStatus),
+                    'started_at' => $this->resolveOperationStartedAt($workflowStatus),
+                    'completed_at' => $this->resolveOperationCompletedAt($workflowStatus),
                 ]);
             } else {
                 $operation->update([
                     'aircraft_id' => $release['aircraft_id'] ?? $operation->aircraft_id,
                     'status' => $this->mapReleaseStatusToOperationStatus($releaseStatus, $workflowStatus, $operation->status),
+                    'started_at' => $this->resolveOperationStartedAt($workflowStatus, $operation->started_at),
+                    'completed_at' => $this->resolveOperationCompletedAt($workflowStatus, $operation->completed_at),
                 ]);
             }
 
             $operation->timeline()->create([
-                'status' => $this->normalizeOperationTimelineStatus($releaseStatus),
+                'status' => $this->normalizeOperationTimelineStatus($workflowStatus ?: $releaseStatus),
                 'title' => 'Liberacion operativa del proveedor',
                 'description' => trim(implode(' | ', array_filter([
                     'Estado: '.$releaseStatus,
@@ -667,6 +714,7 @@ class ProveedorControlador extends ControladorBase
             return [
                 'flight_request_id' => $flightRequest->id,
                 'operation_id' => $operation->id,
+                'reservation_id' => $reservation?->id,
             ];
         });
 
@@ -1057,9 +1105,33 @@ class ProveedorControlador extends ControladorBase
     private function resolveReleaseRequestStatus(string $workflowStatus, ?string $currentStatus): string
     {
         return match (Str::lower(trim($workflowStatus))) {
-            'flight_confirmed', 'vuelo confirmado', 'tracking_live', 'tracking en vivo' => 'confirmed',
-            'completed', 'finalizada' => 'completed',
+            'flight_confirmed', 'vuelo confirmado',
+            'tracking_live', 'tracking en vivo',
+            'completed', 'finalizada' => 'reserved',
             default => $currentStatus ?: 'matched',
+        };
+    }
+
+    private function normalizeReleaseWorkflowStatus(?string $workflowStatus, string $releaseStatus): ?string
+    {
+        $normalizedWorkflowStatus = Str::lower(trim((string) $workflowStatus));
+        if ($normalizedWorkflowStatus !== '') {
+            return $normalizedWorkflowStatus;
+        }
+
+        return match ($releaseStatus) {
+            'operational_ready' => 'tracking_live',
+            default => null,
+        };
+    }
+
+    private function mapReleaseWorkflowToReservationStatus(string $workflowStatus, ?string $currentStatus): string
+    {
+        return match (Str::lower(trim($workflowStatus))) {
+            'flight_confirmed', 'vuelo confirmado',
+            'tracking_live', 'tracking en vivo' => 'confirmed',
+            'completed', 'finalizada' => 'completed',
+            default => $currentStatus ?: 'pending',
         };
     }
 
@@ -1068,7 +1140,17 @@ class ProveedorControlador extends ControladorBase
         ?string $workflowStatus = null,
         ?string $currentStatus = null
     ): string {
-        if ($workflowStatus && in_array(Str::lower(trim($workflowStatus)), ['flight_confirmed', 'vuelo confirmado'], true)) {
+        $normalizedWorkflowStatus = $workflowStatus ? Str::lower(trim($workflowStatus)) : '';
+
+        if (in_array($normalizedWorkflowStatus, ['completed', 'finalizada'], true)) {
+            return 'finalizada';
+        }
+
+        if (in_array($normalizedWorkflowStatus, ['tracking_live', 'tracking en vivo'], true)) {
+            return 'en_vuelo';
+        }
+
+        if (in_array($normalizedWorkflowStatus, ['flight_confirmed', 'vuelo confirmado'], true)) {
             return 'confirmada';
         }
 
@@ -1079,13 +1161,39 @@ class ProveedorControlador extends ControladorBase
         };
     }
 
+    private function resolveOperationStartedAt(?string $workflowStatus, $currentStartedAt = null)
+    {
+        $normalizedWorkflowStatus = Str::lower(trim((string) $workflowStatus));
+
+        if (in_array($normalizedWorkflowStatus, ['tracking_live', 'tracking en vivo', 'completed', 'finalizada'], true)) {
+            return $currentStartedAt ?: now();
+        }
+
+        return $currentStartedAt;
+    }
+
+    private function resolveOperationCompletedAt(?string $workflowStatus, $currentCompletedAt = null)
+    {
+        $normalizedWorkflowStatus = Str::lower(trim((string) $workflowStatus));
+
+        if (in_array($normalizedWorkflowStatus, ['completed', 'finalizada'], true)) {
+            return $currentCompletedAt ?: now();
+        }
+
+        return $currentCompletedAt;
+    }
+
     private function normalizeOperationTimelineStatus(string $status): string
     {
         return match (strtolower($status)) {
             'confirmada' => 'confirmada',
-            'aircraft_confirmed' => 'aircraft_confirmed',
-            'crew_confirmed' => 'crew_confirmed',
-            'operational_ready' => 'operational_ready',
+            'flight_confirmed' => 'confirmada',
+            'aircraft_confirmed' => 'preparacion',
+            'crew_confirmed' => 'preparacion',
+            'operational_ready' => 'lista',
+            'tracking_live' => 'en_vuelo',
+            'tracking en vivo' => 'en_vuelo',
+            'completed' => 'finalizada',
             'en preparacion' => 'preparacion',
             'lista' => 'lista',
             'en vuelo' => 'en_vuelo',

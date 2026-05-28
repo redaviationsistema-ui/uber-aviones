@@ -35,12 +35,58 @@ class AeronaveControlador extends ControladorBase
 
     public function index(Request $request)
     {
-        $query = Aeronave::with([
-            'provider:id,user_id,company_name,commercial_name',
-            'images:id,aircraft_id,kind,title,image_url,is_main,visible_to_client,sort_order',
-            'availability:id,aircraft_id,start_datetime,end_datetime,status,notes',
-            'documents:id,aircraft_id,type,file_url,document_type,document_name,document_url,storage_disk,storage_path,thumbnail_path,thumbnail_url,expires_at,created_at,updated_at',
-        ]);
+        $perPage = min(max((int) $request->integer('per_page', 20), 1), 50);
+
+        $query = Aeronave::query()
+            ->select([
+                'id',
+                'provider_id',
+                'model',
+                'manufacturer',
+                'category',
+                'model_year',
+                'registration',
+                'capacity',
+                'base_airport',
+                'range_km',
+                'speed_kmh',
+                'coverage',
+                'amenities',
+                'hourly_rate',
+                'airport_expenses_usd',
+                'minimum_hours',
+                'minimum_route_price',
+                'climb_descent_minutes',
+                'operational_cost',
+                'fuel_burn_gph',
+                'engine_reserve_rate',
+                'insurance_rate',
+                'maintenance_rate',
+                'crew_rate',
+                'repositioning_fee',
+                'overnight_fee',
+                'currency',
+                'status',
+                'security_filter',
+                'security_score',
+                'airworthiness_status',
+                'last_maintenance_at',
+                'engine_run_at',
+                'captain_training_at',
+                'lodging_location',
+                'client_fbo',
+                'dispatch_center',
+                'dispatch_notes',
+                'security_notes',
+                'created_at',
+                'updated_at',
+            ])
+            ->with([
+                'provider:id,user_id,company_name,commercial_name',
+                'images:id,aircraft_id,kind,title,image_url,is_main,visible_to_client,sort_order',
+                'availability:id,aircraft_id,start_datetime,end_datetime,status,notes',
+                'documents:id,aircraft_id,type,file_url,document_type,document_name,document_url,storage_disk,storage_path,thumbnail_path,thumbnail_url,expires_at,created_at,updated_at',
+            ]);
         $providerAircraftCount = null;
         $providerPlan = null;
 
@@ -50,7 +96,7 @@ class AeronaveControlador extends ControladorBase
             $providerPlan = $request->user()->loadMissing('activeSuscripcion.plan')->activeSuscripcion?->plan;
         }
 
-        $aircraft = $query->latest()->paginate(20);
+        $aircraft = $query->latest()->paginate($perPage);
         $aircraft->setCollection(
             $aircraft->getCollection()->map(
                 fn (Aeronave $item) => $this->formatAircraftPayload($item, $providerPlan, $providerAircraftCount)
