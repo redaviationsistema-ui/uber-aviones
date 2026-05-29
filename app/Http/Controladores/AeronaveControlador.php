@@ -1078,7 +1078,7 @@ class AeronaveControlador extends ControladorBase
 
         try {
             $stored = Storage::disk($disk)->put($path, $contents, $options);
-            abort_if(! $stored, 500, $errorMessage.' Disco probado: '.$disk);
+            abort_if(! $stored, 500, $errorMessage.' Disco probado: '.$disk.'. S3 devolvio false al guardar.');
             return [$disk, $path];
         } catch (\Throwable $exception) {
             Log::error('Fallo al almacenar archivo en S3.', [
@@ -1088,7 +1088,7 @@ class AeronaveControlador extends ControladorBase
                 'exception' => get_class($exception),
             ]);
 
-            abort(500, $errorMessage.' Disco probado: '.$disk);
+            abort(500, $this->formatStorageFailureMessage($errorMessage, $disk, $exception));
         }
     }
 
@@ -1098,7 +1098,7 @@ class AeronaveControlador extends ControladorBase
 
         try {
             $path = $file->storeAs($directory, $filename, $disk);
-            abort_if(! $path, 500, $errorMessage.' Disco probado: '.$disk);
+            abort_if(! $path, 500, $errorMessage.' Disco probado: '.$disk.'. S3 devolvio false al guardar.');
             return [$disk, $path];
         } catch (\Throwable $exception) {
             Log::error('Fallo al subir archivo a S3.', [
@@ -1109,8 +1109,26 @@ class AeronaveControlador extends ControladorBase
                 'exception' => get_class($exception),
             ]);
 
-            abort(500, $errorMessage.' Disco probado: '.$disk);
+            abort(500, $this->formatStorageFailureMessage($errorMessage, $disk, $exception));
         }
+    }
+
+    private function formatStorageFailureMessage(string $errorMessage, string $disk, \Throwable $exception): string
+    {
+        $details = array_values(array_filter([
+            class_basename($exception).': '.$exception->getMessage(),
+            $exception->getPrevious()
+                ? class_basename($exception->getPrevious()).': '.$exception->getPrevious()->getMessage()
+                : null,
+        ]));
+
+        $message = $errorMessage.' Disco probado: '.$disk.'.';
+
+        if ($details !== []) {
+            $message .= ' Detalle: '.implode(' | ', $details);
+        }
+
+        return $message;
     }
 
     private function normalizeStorageOptions(string $disk, array $options): array
