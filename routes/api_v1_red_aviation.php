@@ -45,6 +45,7 @@ Route::middleware(['auth.token'])->group(function () {
         Route::get('/aircraft', [OperadorControlador::class, 'indexAircraft']);
         Route::put('/aircraft/{aircraft}', [OperadorControlador::class, 'updateAircraft']);
         Route::post('/aircraft/{aircraft}/subscribe', [OperadorControlador::class, 'subscribeAircraft']);
+        Route::get('/aircraft/{aircraft}/images', [AeronaveControlador::class, 'images']);
         Route::post('/aircraft/{aircraft}/images', [AeronaveControlador::class, 'storeImage']);
         Route::post('/aircraft/{aircraft}/images/attach-existing', [AeronaveControlador::class, 'attachExistingImage']);
         Route::delete('/aircraft/{aircraft}/images/{image}', [AeronaveControlador::class, 'destroyImage']);

@@ -232,10 +232,15 @@ class AeronaveControlador extends ControladorBase
             'visible_to_client' => ['sometimes', 'boolean'],
         ]);
 
+        $file = $request->file('image');
         $disk = $this->resolveUploadDisk();
-        $path = $request->file('image')->store(
-            sprintf('provider/%s/aircraft/%s/images', $aircraft->provider_id, $aircraft->id),
-            $disk
+        $directory = sprintf('provider/%s/aircraft/%s/images', $aircraft->provider_id, $aircraft->id);
+        [$disk, $path] = $this->storeUploadedFileWithFallback(
+            $file,
+            $directory,
+            $file->hashName(),
+            $disk,
+            'No se pudo subir la imagen al almacenamiento.'
         );
         $imageUrl = $this->resolveUploadedFileUrl($request, $disk, $path);
         $isMain = (bool) ($data['is_main'] ?? false);
@@ -269,6 +274,19 @@ class AeronaveControlador extends ControladorBase
             'path' => $path,
             'url' => $imageUrl,
         ], 201);
+    }
+
+    public function images(Request $request, Aeronave $aircraft)
+    {
+        $this->authorizeProveedorAeronave($request, $aircraft);
+
+        return $this->ok([
+            'images' => $aircraft->images()
+                ->orderByDesc('is_main')
+                ->orderBy('sort_order')
+                ->orderBy('id')
+                ->get(),
+        ]);
     }
 
     public function attachExistingImage(Request $request, Aeronave $aircraft)
@@ -1027,13 +1045,30 @@ class AeronaveControlador extends ControladorBase
 
     private function resolveUploadDisk(): string
     {
-        abort_unless(
-            filled(env('AWS_ACCESS_KEY_ID')) && filled(env('AWS_SECRET_ACCESS_KEY')) && filled(env('AWS_BUCKET')),
+        $missingVariables = $this->missingS3UploadConfigurationVariables();
+
+        abort_if(
+            $missingVariables !== [],
             500,
-            'Falta configuracion de AWS S3 en el servidor.'
+            'Falta configuracion de AWS S3 en el servidor. Variables faltantes o vacias: '.implode(', ', $missingVariables).'.'
         );
 
         return 's3';
+    }
+
+    private function missingS3UploadConfigurationVariables(): array
+    {
+        $required = [
+            'AWS_ACCESS_KEY_ID' => config('filesystems.disks.s3.key'),
+            'AWS_SECRET_ACCESS_KEY' => config('filesystems.disks.s3.secret'),
+            'AWS_BUCKET' => config('filesystems.disks.s3.bucket'),
+            'AWS_DEFAULT_REGION' => config('filesystems.disks.s3.region'),
+        ];
+
+        return array_keys(array_filter(
+            $required,
+            fn ($value) => trim((string) $value) === ''
+        ));
     }
 
     private function storeBinaryWithFallback(string $path, string $contents, array $options, ?string $preferredDisk, string $errorMessage): array

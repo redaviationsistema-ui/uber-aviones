@@ -21,6 +21,7 @@ Route::prefix('proveedor')->middleware(['auth.token', 'role:provider,admin'])->g
     Route::get('/mis-aeronaves', [AeronaveControlador::class, 'index']);
     Route::apiResource('aeronaves', AeronaveControlador::class)
         ->parameters(['aeronaves' => 'aircraft']);
+    Route::get('/aeronaves/{aircraft}/imagenes', [AeronaveControlador::class, 'images']);
     Route::post('/aeronaves/{aircraft}/imagenes', [AeronaveControlador::class, 'storeImage']);
     Route::post('/aeronaves/{aircraft}/imagenes/reasociar', [AeronaveControlador::class, 'attachExistingImage']);
     Route::delete('/aeronaves/{aircraft}/imagenes/{image}', [AeronaveControlador::class, 'destroyImage']);

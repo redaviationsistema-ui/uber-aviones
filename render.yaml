@@ -20,9 +20,30 @@ services:
         sync: false
       - key: CLOUDINARY_FOLDER
         value: red-aviation
+      - key: FILESYSTEM_DISK
+        value: s3
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: AWS_DEFAULT_REGION
+        value: us-east-1
+      - key: AWS_BUCKET
+        value: red-aviation-images
+      - key: AWS_URL
+        value: https://red-aviation-images.s3.us-east-1.amazonaws.com
+      - key: AWS_ENDPOINT
+        value: ""
+      - key: AWS_USE_PATH_STYLE_ENDPOINT
+        value: false
+      - key: AWS_EC2_METADATA_DISABLED
+        value: true
     buildCommand: |
       composer install --no-dev --optimize-autoloader
       php artisan optimize:clear
+      php artisan config:clear
+      php artisan cache:clear
+      php artisan route:clear
       php artisan storage:link
       php artisan migrate --force
     startCommand: php artisan optimize:clear && php artisan serve --host 0.0.0.0 --port $PORT

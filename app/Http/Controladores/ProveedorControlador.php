@@ -172,7 +172,17 @@ class ProveedorControlador extends ControladorBase
         ]);
 
         if ($request->hasFile('file')) {
+            $missingVariables = $this->missingS3UploadConfigurationVariables();
+
+            abort_if(
+                $missingVariables !== [],
+                500,
+                'Falta configuracion de AWS S3 en el servidor. Variables faltantes o vacias: '.implode(', ', $missingVariables).'.'
+            );
+
             $path = $request->file('file')->store('company-documents', 's3');
+            abort_if(! $path, 500, 'No se pudo subir el documento de empresa al almacenamiento S3.');
+
             $documentUrl = Storage::disk('s3')->url($path);
             $data['file_url'] = $documentUrl;
             $data['document_url'] = $documentUrl;
@@ -1202,5 +1212,20 @@ class ProveedorControlador extends ControladorBase
             'cancelada' => 'cancelada',
             default => str_replace(' ', '_', strtolower($status)),
         };
+    }
+
+    private function missingS3UploadConfigurationVariables(): array
+    {
+        $required = [
+            'AWS_ACCESS_KEY_ID' => config('filesystems.disks.s3.key'),
+            'AWS_SECRET_ACCESS_KEY' => config('filesystems.disks.s3.secret'),
+            'AWS_BUCKET' => config('filesystems.disks.s3.bucket'),
+            'AWS_DEFAULT_REGION' => config('filesystems.disks.s3.region'),
+        ];
+
+        return array_keys(array_filter(
+            $required,
+            fn ($value) => trim((string) $value) === ''
+        ));
     }
 }
