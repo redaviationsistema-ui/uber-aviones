@@ -1067,8 +1067,18 @@ class AeronaveControlador extends ControladorBase
 
         return array_keys(array_filter(
             $required,
-            fn ($value) => trim((string) $value) === ''
+            fn ($value) => $this->isMissingS3ConfigValue($value)
         ));
+    }
+
+    private function isMissingS3ConfigValue(mixed $value): bool
+    {
+        $normalized = trim((string) $value);
+
+        return $normalized === ''
+            || str_starts_with($normalized, 'TU_NUEVA_')
+            || str_starts_with($normalized, 'your_')
+            || str_starts_with($normalized, 'YOUR_');
     }
 
     private function storeBinaryWithFallback(string $path, string $contents, array $options, ?string $preferredDisk, string $errorMessage): array
