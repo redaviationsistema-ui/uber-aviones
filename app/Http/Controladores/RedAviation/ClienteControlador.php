@@ -112,6 +112,9 @@ class ClienteControlador extends ControladorBase
             'trip_label' => ['nullable', 'string', 'max:50'],
             'round_trip' => ['nullable', 'boolean'],
             'return' => ['nullable', 'boolean'],
+            'return_to_origin' => ['nullable', 'boolean'],
+            'return_to_start' => ['nullable', 'boolean'],
+            'close_route' => ['nullable', 'boolean'],
             'overnights' => ['nullable', 'integer', 'min:0'],
             'overnight_nights' => ['nullable', 'integer', 'min:0'],
             'include_iva' => ['nullable', 'boolean'],
@@ -135,6 +138,21 @@ class ClienteControlador extends ControladorBase
         $distanceNm = (float) collect($legs)->sum('distance_nm');
         $passengers = (int) $data['passengers'];
         $tripType = $this->resolveQuoteTripType($data);
+
+        if ($tripType === 'multi_leg') {
+            logger()->info('DEBUG MULTI LEG INPUT', [
+                'trip_type' => $tripType,
+                'legs_count' => count($legs),
+                'legs' => collect($legs)->map(fn (array $leg) => [
+                    'origin' => $leg['origin'] ?? null,
+                    'destination' => $leg['destination'] ?? null,
+                    'distance_km' => $leg['distance_km'] ?? null,
+                    'distance_nm' => $leg['distance_nm'] ?? null,
+                    'departure_datetime' => $leg['departure_datetime'] ?? null,
+                ])->values()->all(),
+            ]);
+        }
+
         $maxLegDistanceKm = (float) collect($legs)->max('distance_km');
         $quotes = Aeronave::with(['images', 'provider'])
             ->whereIn('status', ['active', 'trial_active', 'aprobada', 'available', 'disponible'])
@@ -153,6 +171,8 @@ class ClienteControlador extends ControladorBase
                     'cabin' => $this->normalizeAircraftCategory($aircraft->category) ?? 'Jet privado',
                     'capacity' => $aircraft->capacity,
                     'time' => $this->formatHours($pricing['total_billed_hours']),
+                    'operative_time' => $this->formatHours($pricing['total_billed_hours']),
+                    'billed_time' => $this->formatHours($pricing['total_billed_hours']),
                     'flight_time' => $this->formatHours($pricing['client_display_flight_hours']),
                     'distance_km' => round($distanceKm),
                     'distance_nm' => round($distanceNm),
@@ -235,9 +255,15 @@ class ClienteControlador extends ControladorBase
             'origin' => ['required', 'string', 'max:20'],
             'destination' => ['required', 'string', 'max:20'],
             'departure_datetime' => ['required', 'date'],
+            'return_datetime' => ['nullable', 'date'],
             'passengers' => ['required', 'integer', 'min:1'],
             'trip_type' => ['nullable', 'string', 'max:50'],
             'aircraft_type' => ['nullable', 'string', 'max:100'],
+            'round_trip' => ['nullable', 'boolean'],
+            'return' => ['nullable', 'boolean'],
+            'return_to_origin' => ['nullable', 'boolean'],
+            'return_to_start' => ['nullable', 'boolean'],
+            'close_route' => ['nullable', 'boolean'],
             'provider_id' => ['nullable', 'exists:providers,id'],
             'aircraft_id' => ['nullable', 'exists:aircraft,id'],
             'match_id' => ['nullable'],
@@ -538,6 +564,24 @@ class ClienteControlador extends ControladorBase
             $legs[] = $this->quoteLegPayload($index + 2, $extraOrigin, $extraDestination, $requirement['departure_datetime'] ?? null);
         }
 
+        if (
+            $this->resolveQuoteTripType($data) === 'multi_leg' &&
+            $this->shouldReturnToOrigin($data) &&
+            count($legs) > 0
+        ) {
+            $lastLeg = $legs[count($legs) - 1];
+            $lastDestinationAirport = $this->airportFromPayload($lastLeg['destination_airport']);
+
+            if (! $this->airportsMatch($lastDestinationAirport, $originAirport)) {
+                $legs[] = $this->quoteLegPayload(
+                    count($legs) + 1,
+                    $lastDestinationAirport,
+                    $originAirport,
+                    $data['return_datetime'] ?? null
+                );
+            }
+        }
+
         if ($this->resolveQuoteTripType($data) === 'round_trip' && count($legs) === 1) {
             $legs[] = $this->quoteLegPayload(2, $destinationAirport, $originAirport, $data['return_datetime'] ?? null);
         }
@@ -611,12 +655,14 @@ class ClienteControlador extends ControladorBase
             ? $this->resolveCommercialMarginRate($aircraft, $categoryPricingRule)
             : 0.0;
         $clientLegs = $legs;
+        $appliesMinimumPerLeg = $tripType !== 'multi_leg';
         $clientLegPricings = collect($clientLegs)
-            ->map(function (array $leg) use ($aircraft) {
+            ->map(function (array $leg) use ($aircraft, $appliesMinimumPerLeg) {
                 return $this->calculateLegPricing(
                     $aircraft,
                     $this->airportFromPayload($leg['origin_airport']),
-                    $this->airportFromPayload($leg['destination_airport'])
+                    $this->airportFromPayload($leg['destination_airport']),
+                    $appliesMinimumPerLeg
                 );
             })
             ->values()
@@ -629,10 +675,18 @@ class ClienteControlador extends ControladorBase
         $clientClimbDescentHours = (float) collect($clientLegPricings)->sum('climb_descent_hours');
         $clientReserveHours = (float) collect($clientLegPricings)->sum('reserve_hours');
         $clientAirTimeHours = (float) collect($clientLegPricings)->sum('air_time_hours');
-        $minimumHours = (float) collect($clientLegPricings)->sum('minimum_hours');
-        $outboundHours = (float) ($clientLegPricings[0]['billable_hours'] ?? 0);
-        $returnHours = (float) collect(array_slice($clientLegPricings, 1))->sum('billable_hours');
-        $clientBillableHours = (float) collect($clientLegPricings)->sum('billable_hours');
+        $minimumHours = $tripType === 'multi_leg'
+            ? $this->resolveMinimumHours($aircraft->category)
+            : (float) collect($clientLegPricings)->sum('minimum_hours');
+        $clientBillableHours = $tripType === 'multi_leg'
+            ? max($this->roundUpQuarterHours($clientDisplayFlightHours), $minimumHours)
+            : (float) collect($clientLegPricings)->sum('billable_hours');
+        $outboundHours = $tripType === 'multi_leg'
+            ? (float) ($clientLegPricings[0]['display_flight_hours'] ?? 0)
+            : (float) ($clientLegPricings[0]['billable_hours'] ?? 0);
+        $returnHours = $tripType === 'multi_leg'
+            ? max($clientBillableHours - $outboundHours, 0.0)
+            : (float) collect(array_slice($clientLegPricings, 1))->sum('billable_hours');
         $initialRepositioningPricing = $this->emptyLegPricing();
         $returnToBasePricing = $this->emptyLegPricing();
 
@@ -679,8 +733,30 @@ class ClienteControlador extends ControladorBase
         $expenseFee = $this->shouldApplyAirportExpenses($requestData)
             ? $this->resolveAirportExpenseForAircraft($aircraft)
             : 0.0;
-        $clientFlightCost = (float) collect($clientLegPricings)->sum('leg_cost');
+        $clientFlightCost = $tripType === 'multi_leg'
+            ? $clientBillableHours * $hourlyRate
+            : (float) collect($clientLegPricings)->sum('leg_cost');
         $subtotalOperative = $clientFlightCost + $repositioningCost + $returnToBaseCost + $overnightCost + $expenseFee;
+
+        if ($tripType === 'multi_leg') {
+            logger()->info('DEBUG CLIENT LEG PRICINGS', [
+                'aircraft' => $aircraft->model ?? $aircraft->registration ?? $aircraft->id,
+                'legs_count' => count($clientLegPricings),
+                'legs' => collect($clientLegPricings)->map(fn (array $leg) => [
+                    'origin' => $leg['origin'] ?? null,
+                    'destination' => $leg['destination'] ?? null,
+                    'display_hours' => $leg['display_flight_hours'] ?? null,
+                    'billable_hours' => $leg['billable_hours'] ?? null,
+                    'base_price' => $leg['base_price'] ?? $leg['leg_cost'] ?? null,
+                ])->values()->all(),
+                'client_display_flight_hours' => $clientDisplayFlightHours,
+                'client_billable_hours' => $clientBillableHours,
+                'client_flight_cost' => $clientFlightCost,
+                'total_billed_hours' => $billableHours,
+                'subtotal_operative' => $subtotalOperative,
+            ]);
+        }
+
         $minimumRoutePrice = $this->resolveMinimumRoutePrice($aircraft, $distanceTotal, $categoryPricingRule);
         $subtotalBeforeMargin = max($subtotalOperative, $minimumRoutePrice);
         $minimumAdjustment = max($subtotalBeforeMargin - $subtotalOperative, 0.0);
@@ -836,6 +912,7 @@ class ClienteControlador extends ControladorBase
             'billable_hours' => $billableHours,
             'final_hours' => $finalHours,
             'raw_leg_cost' => $rawLegCost,
+            'base_price' => $rawLegCost,
             'minimum_route_price' => 0,
             'leg_cost' => $rawLegCost,
             'international' => $this->isInternationalLeg($originAirport, $destinationAirport),
@@ -1103,6 +1180,18 @@ class ClienteControlador extends ControladorBase
         return ($roundTrip || $returnTrip) ? 'round_trip' : 'one_way';
     }
 
+    private function shouldReturnToOrigin(array $data): bool
+    {
+        foreach (['return_to_origin', 'return_to_start', 'close_route'] as $key) {
+            if (array_key_exists($key, $data)) {
+                return filter_var($data[$key], FILTER_VALIDATE_BOOL);
+            }
+        }
+
+        return filter_var($data['round_trip'] ?? false, FILTER_VALIDATE_BOOL)
+            || filter_var($data['return'] ?? false, FILTER_VALIDATE_BOOL);
+    }
+
     private function shouldIncludeIva(array $data): bool
     {
         if (! array_key_exists('include_iva', $data)) {
@@ -1183,6 +1272,25 @@ class ClienteControlador extends ControladorBase
                 'passengers' => $data['passengers'] ?? 1,
             ],
         ], $data['requirements'] ?? []);
+
+        if (
+            $this->resolveQuoteTripType($data) === 'multi_leg' &&
+            $this->shouldReturnToOrigin($data) &&
+            $allLegs !== []
+        ) {
+            $lastLeg = $allLegs[count($allLegs) - 1];
+            $lastDestination = strtoupper(trim((string) ($lastLeg['destination'] ?? '')));
+            $origin = strtoupper(trim((string) ($data['origin'] ?? '')));
+
+            if ($lastDestination !== '' && $origin !== '' && $lastDestination !== $origin) {
+                $allLegs[] = [
+                    'origin' => $lastDestination,
+                    'destination' => $origin,
+                    'departure_datetime' => $data['return_datetime'] ?? $lastLeg['departure_datetime'] ?? $data['departure_datetime'],
+                    'passengers' => $data['passengers'] ?? 1,
+                ];
+            }
+        }
 
         foreach ($allLegs as $index => $leg) {
             $origin = strtoupper(trim((string) ($leg['origin'] ?? '')));

@@ -263,6 +263,75 @@ class PlataformaVuelosApiTest extends TestCase
         $this->assertEquals(round($subtotal + $taxes, 2), round($total, 2));
     }
 
+    public function test_multi_leg_preview_applies_minimum_hours_once_to_total_itinerary(): void
+    {
+        $this->seed();
+
+        $aircraft = Aeronave::where('registration', 'XA-LJ45')->firstOrFail();
+
+        $response = $this->postJson('/api/v1/client/quotes/preview', [
+            'origin' => 'MMMX',
+            'destination' => 'MMTO',
+            'departure_datetime' => now()->addDays(3)->toISOString(),
+            'passengers' => 4,
+            'trip_type' => 'multi_leg',
+            'include_iva' => false,
+            'airport_expenses' => false,
+            'apply_margin' => false,
+            'requirements' => [
+                [
+                    'origin' => 'MMTO',
+                    'destination' => 'MMMX',
+                    'departure_datetime' => now()->addDays(3)->addHours(3)->toISOString(),
+                ],
+            ],
+        ])->assertOk();
+
+        $quote = collect($response->json('matches'))
+            ->firstWhere('aircraft_id', $aircraft->id);
+
+        $this->assertNotNull($quote);
+        $this->assertSame('multi_leg', $quote['pricing_breakdown']['trip_type']);
+        $this->assertSame(2.0, (float) $quote['pricing_breakdown']['minimum_hours']);
+        $this->assertSame(2.0, (float) $quote['pricing_breakdown']['billable_hours']);
+        $this->assertSame(10400.0, (float) $quote['pricing_breakdown']['client_flight_cost']);
+
+        foreach ($quote['pricing_breakdown']['client_leg_pricing'] as $legPricing) {
+            $this->assertSame(0.0, (float) $legPricing['minimum_hours']);
+        }
+    }
+
+    public function test_multi_leg_preview_can_close_route_back_to_origin(): void
+    {
+        $this->seed();
+
+        $response = $this->postJson('/api/v1/client/quotes/preview', [
+            'origin' => 'MMMX',
+            'destination' => 'MMTO',
+            'departure_datetime' => now()->addDays(3)->toISOString(),
+            'return_datetime' => now()->addDays(4)->toISOString(),
+            'passengers' => 4,
+            'trip_type' => 'multi_leg',
+            'return_to_origin' => true,
+            'requirements' => [
+                [
+                    'origin' => 'MMTO',
+                    'destination' => 'MMSD',
+                    'departure_datetime' => now()->addDays(3)->addHours(3)->toISOString(),
+                ],
+            ],
+        ])->assertOk();
+
+        $response->assertJsonPath('segment_count', 3);
+        $response->assertJsonPath('legs.2.origin', 'MMSD');
+        $response->assertJsonPath('legs.2.destination', 'MMMX');
+
+        $quote = collect($response->json('matches'))->first();
+
+        $this->assertNotNull($quote);
+        $this->assertCount(3, $quote['pricing_breakdown']['client_leg_pricing']);
+    }
+
     public function test_red_aviation_chat_blocks_contact_leaks(): void
     {
         $this->seed();
