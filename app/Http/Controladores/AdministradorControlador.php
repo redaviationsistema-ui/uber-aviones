@@ -38,12 +38,33 @@ class AdministradorControlador extends ControladorBase
 
     public function users()
     {
-        return $this->ok(['users' => Usuario::with(['profile', 'provider', 'demo', 'activeSuscripcion.plan'])->paginate(25)]);
+        return $this->ok([
+            'users' => Usuario::with([
+                'profile',
+                'provider',
+                'ownedProvider',
+                'demo',
+                'activeSuscripcion.plan',
+                'roles',
+                'identityVerifications',
+            ])->paginate(25),
+        ]);
     }
 
     public function showUsuario(Usuario $user)
     {
-        return $this->ok(['user' => $user->load(['profile', 'provider', 'demo', 'subscriptions.plan'])]);
+        return $this->ok([
+            'user' => $user->load([
+                'profile',
+                'provider',
+                'ownedProvider',
+                'demo',
+                'subscriptions.plan',
+                'activeSuscripcion.plan',
+                'roles',
+                'identityVerifications',
+            ]),
+        ]);
     }
 
     public function updateUsuario(Request $request, Usuario $user)

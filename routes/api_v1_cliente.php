@@ -2,6 +2,7 @@
 
 use App\Http\Controladores\AutenticacionControlador;
 use App\Http\Controladores\AeronaveControlador;
+use App\Http\Controladores\BiometricControlador;
 use App\Http\Controladores\DemoControlador;
 use App\Http\Controladores\SolicitudVueloControlador;
 use App\Http\Controladores\NotificacionControlador;
@@ -17,6 +18,7 @@ Route::prefix('cliente')->middleware(['auth.token', 'role:client,admin'])->group
     Route::get('/dashboard', [SuscripcionControlador::class, 'status']);
     Route::get('/perfil', [AutenticacionControlador::class, 'me']);
     Route::put('/perfil', [AutenticacionControlador::class, 'updatePerfil']);
+    Route::post('/biometric/detect-face', [BiometricControlador::class, 'detectFace']);
 
     Route::post('/demo/activar', [DemoControlador::class, 'activate']);
     Route::get('/demo/estado', [SuscripcionControlador::class, 'status']);

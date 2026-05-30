@@ -7,6 +7,10 @@ return new class extends Migration
 {
     public function up(): void
     {
+        if (DB::getDriverName() !== 'pgsql') {
+            return;
+        }
+
         DB::unprepared(<<<'SQL'
 DO $$
 DECLARE
@@ -69,6 +73,10 @@ SQL);
 
     public function down(): void
     {
+        if (DB::getDriverName() !== 'pgsql') {
+            return;
+        }
+
         DB::unprepared(<<<'SQL'
 ALTER TABLE flight_requests DROP CONSTRAINT IF EXISTS flight_requests_workflow_status_check;
 SQL);

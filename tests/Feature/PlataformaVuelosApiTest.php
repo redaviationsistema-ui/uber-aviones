@@ -3,7 +3,11 @@
 namespace Tests\Feature;
 
 use App\Modelos\Aeronave;
+use App\Modelos\IdentityVerification;
+use App\Modelos\Usuario;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
 class PlataformaVuelosApiTest extends TestCase
@@ -18,6 +22,7 @@ class PlataformaVuelosApiTest extends TestCase
             'name' => 'Nuevo Cliente',
             'email' => 'nuevo@cliente.test',
             'password' => 'password123',
+            'password_confirmation' => 'password123',
             'role' => 'client',
         ])->assertCreated();
 
@@ -41,6 +46,84 @@ class PlataformaVuelosApiTest extends TestCase
             ->assertJsonPath('success', true);
     }
 
+    public function test_client_registration_persists_identity_documents_and_biometric_data(): void
+    {
+        Storage::fake('public');
+        Storage::fake('private');
+
+        $response = $this->post('/api/v1/auth/register', [
+            'name' => 'Cliente Identidad',
+            'email' => 'identidad@cliente.test',
+            'phone' => '+52 555 010 1000',
+            'password' => 'password123',
+            'password_confirmation' => 'password123',
+            'role' => 'client',
+            'birth_date' => '1991-04-25',
+            'nationality' => 'Mexicana',
+            'document_type' => 'INE',
+            'document_number' => 'ABC123456789',
+            'document_expiration' => '2030-12-31',
+            'identity_validation_required' => '1',
+            'ine_curp' => 'TEST910425HDFXXX01',
+            'ine_cic' => '123456789',
+            'ine_ocr' => '987654321',
+            'ine_scan_raw' => 'LECTURA INE DE PRUEBA',
+            'ine_scan_status' => 'scanned',
+            'identity_verification_status' => 'approved',
+            'identity_verification_message' => 'Rostro validado correctamente.',
+            'identity_verified' => '1',
+            'face_detected' => '1',
+            'faces_count' => '1',
+            'face_confidence' => '99.50',
+            'face_match_score' => '99.50',
+            'liveness_score' => '98.10',
+            'image_storage_score' => '100',
+            'biometric_image_saved' => '1',
+            'biometric_captured_at' => now()->toISOString(),
+            'biometric_provider' => 'aws_rekognition',
+            'biometric_template_type' => 'selfie-photo',
+            'quality_brightness' => '82.10',
+            'quality_sharpness' => '88.40',
+            'pose_yaw' => '3.10',
+            'pose_pitch' => '2.20',
+            'pose_roll' => '1.50',
+            'face_occluded' => '0',
+            'ine_front' => UploadedFile::fake()->image('ine-front.jpg'),
+            'ine_back' => UploadedFile::fake()->image('ine-back.jpg'),
+            'selfie_biometric' => UploadedFile::fake()->image('selfie.jpg'),
+        ]);
+
+        $response
+            ->assertCreated()
+            ->assertJsonPath('user.email', 'identidad@cliente.test')
+            ->assertJsonPath('user.identity_verification_status', 'approved')
+            ->assertJsonPath('user.identity_verified', true);
+
+        $user = Usuario::query()
+            ->where('email', 'identidad@cliente.test')
+            ->with('profile', 'identityVerifications')
+            ->firstOrFail();
+
+        $this->assertSame('INE', $user->profile?->document_type);
+        $this->assertSame('ABC123456789', $user->profile?->document_number);
+        $this->assertSame('TEST910425HDFXXX01', $user->profile?->ine_curp);
+        $this->assertTrue((bool) $user->profile?->identity_validation_required);
+        $this->assertNotNull($user->profile?->ine_front_path);
+        $this->assertNotNull($user->profile?->ine_back_path);
+        Storage::disk('private')->assertExists($user->profile->ine_front_path);
+        Storage::disk('private')->assertExists($user->profile->ine_back_path);
+
+        $verification = IdentityVerification::query()
+            ->where('user_id', $user->id)
+            ->first();
+
+        $this->assertNotNull($verification);
+        $this->assertSame('approved', $verification->status);
+        $this->assertTrue($verification->identity_verified);
+        $this->assertNotNull($verification->image_path);
+        Storage::disk('public')->assertExists($verification->image_path);
+    }
+
     public function test_red_aviation_client_flow_creates_blind_request_and_chat(): void
     {
         $this->seed();
@@ -49,6 +132,7 @@ class PlataformaVuelosApiTest extends TestCase
             'name' => 'Cliente Red',
             'email' => 'cliente.red@test.com',
             'password' => 'password123',
+            'password_confirmation' => 'password123',
             'role' => 'client',
         ])->assertCreated();
 
@@ -90,6 +174,7 @@ class PlataformaVuelosApiTest extends TestCase
             'name' => 'Cliente Bloqueado',
             'email' => 'cliente.bloqueado@test.com',
             'password' => 'password123',
+            'password_confirmation' => 'password123',
             'role' => 'client',
         ])->assertCreated();
 
@@ -124,6 +209,46 @@ class PlataformaVuelosApiTest extends TestCase
             ->assertJsonPath('success', true);
     }
 
+    public function test_admin_can_fetch_detailed_user_record(): void
+    {
+        $this->seed();
+
+        $adminLogin = $this->postJson('/api/v1/auth/login', [
+            'email' => 'admin@privateflights.test',
+            'password' => 'password',
+        ])->assertOk();
+
+        $adminToken = $adminLogin->json('token');
+
+        $register = $this->postJson('/api/v1/auth/register', [
+            'name' => 'Cliente Detalle',
+            'email' => 'cliente.detalle@test.com',
+            'password' => 'password123',
+            'password_confirmation' => 'password123',
+            'role' => 'client',
+        ])->assertCreated();
+
+        $clientId = $register->json('user.id');
+
+        $this->withToken($adminToken)
+            ->getJson("/api/v1/admin/users/{$clientId}")
+            ->assertOk()
+            ->assertJsonPath('user.id', $clientId)
+            ->assertJsonPath('user.email', 'cliente.detalle@test.com')
+            ->assertJsonStructure([
+                'success',
+                'user' => [
+                    'id',
+                    'name',
+                    'email',
+                    'roles',
+                    'profile',
+                    'access',
+                    'identity_verifications',
+                ],
+            ]);
+    }
+
     public function test_selected_provider_receives_request_in_provider_queue(): void
     {
         $this->seed();
@@ -141,6 +266,7 @@ class PlataformaVuelosApiTest extends TestCase
             'name' => 'Cliente Cola',
             'email' => 'cliente.cola@test.com',
             'password' => 'password123',
+            'password_confirmation' => 'password123',
             'role' => 'client',
         ])->assertCreated();
 
@@ -340,6 +466,7 @@ class PlataformaVuelosApiTest extends TestCase
             'name' => 'Cliente Protegido',
             'email' => 'cliente.protegido@test.com',
             'password' => 'password123',
+            'password_confirmation' => 'password123',
             'role' => 'client',
         ])->assertCreated();
 

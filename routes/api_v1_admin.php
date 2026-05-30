@@ -7,10 +7,15 @@ use Illuminate\Support\Facades\Route;
 Route::prefix('admin')->middleware(['auth.token', 'role:admin'])->group(function () {
     Route::get('/dashboard-marketplace', [AdministradorControlador::class, 'dashboard']);
     Route::get('/usuarios', [AdministradorControlador::class, 'users']);
+    Route::get('/users', [AdministradorControlador::class, 'users']);
     Route::get('/usuarios/{user}', [AdministradorControlador::class, 'showUsuario']);
+    Route::get('/users/{user}', [AdministradorControlador::class, 'showUsuario']);
     Route::put('/usuarios/{user}', [AdministradorControlador::class, 'updateUsuario']);
+    Route::put('/users/{user}', [AdministradorControlador::class, 'updateUsuario']);
     Route::post('/usuarios/{user}/bloquear', [AdministradorControlador::class, 'blockUsuario']);
+    Route::post('/users/{user}/block', [AdministradorControlador::class, 'blockUsuario']);
     Route::post('/usuarios/{user}/activar', [AdministradorControlador::class, 'activateUsuario']);
+    Route::post('/users/{user}/activate', [AdministradorControlador::class, 'activateUsuario']);
 
     Route::get('/clientes', [AdministradorControlador::class, 'clients']);
     Route::get('/proveedores', [AdministradorControlador::class, 'providers']);

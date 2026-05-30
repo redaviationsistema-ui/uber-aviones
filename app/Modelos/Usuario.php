@@ -9,6 +9,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
+use Illuminate\Support\Facades\Storage;
 
 class Usuario extends Authenticatable
 {
@@ -39,6 +40,18 @@ class Usuario extends Authenticatable
         'contact_strikes',
         'contact_blocked_until',
         'email_verified_at',
+        'identity_verification_status',
+        'identity_verification_message',
+        'identity_verified',
+        'face_detected',
+        'face_match_score',
+        'liveness_score',
+        'image_storage_score',
+        'biometric_image_saved',
+        'biometric_captured_at',
+        'biometric_provider',
+        'biometric_template_type',
+        'biometric_selfie_path',
     ];
 
     protected $hidden = [
@@ -51,6 +64,7 @@ class Usuario extends Authenticatable
         'access',
         'subscription_status',
         'effective_role',
+        'biometric_selfie_url',
     ];
 
     protected function casts(): array
@@ -59,6 +73,13 @@ class Usuario extends Authenticatable
             'email_verified_at' => 'datetime',
             'password' => 'hashed',
             'contact_blocked_until' => 'datetime',
+            'identity_verified' => 'boolean',
+            'face_detected' => 'boolean',
+            'face_match_score' => 'decimal:2',
+            'liveness_score' => 'decimal:2',
+            'image_storage_score' => 'decimal:2',
+            'biometric_image_saved' => 'boolean',
+            'biometric_captured_at' => 'datetime',
         ];
     }
 
@@ -125,6 +146,11 @@ class Usuario extends Authenticatable
     public function apiTokens(): HasMany
     {
         return $this->hasMany(TokenApi::class, 'user_id');
+    }
+
+    public function identityVerifications(): HasMany
+    {
+        return $this->hasMany(IdentityVerification::class, 'user_id');
     }
 
     public function hasPremiumAccess(): bool
@@ -346,5 +372,14 @@ class Usuario extends Authenticatable
     public function getProveedorIdAttribute(): ?int
     {
         return $this->provider_id;
+    }
+
+    public function getBiometricSelfieUrlAttribute(): ?string
+    {
+        if (! $this->biometric_selfie_path) {
+            return null;
+        }
+
+        return Storage::disk('public')->url($this->biometric_selfie_path);
     }
 }

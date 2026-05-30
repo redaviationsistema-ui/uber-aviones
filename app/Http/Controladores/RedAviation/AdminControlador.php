@@ -4,6 +4,7 @@ namespace App\Http\Controladores\RedAviation;
 
 use App\Http\Controladores\ControladorBase;
 use App\Modelos\BanderaAntiBroker;
+use App\Modelos\ContratoReserva;
 use App\Modelos\Demo;
 use App\Modelos\Operacion;
 use App\Modelos\Proveedor;
@@ -48,6 +49,22 @@ class AdminControlador extends ControladorBase
             'users' => Usuario::with(['roles', 'profile', 'provider', 'demo', 'activeSuscripcion.plan'])
                 ->latest()
                 ->paginate(20),
+        ]);
+    }
+
+    public function showUser(Usuario $user)
+    {
+        return $this->ok([
+            'user' => $user->load([
+                'roles',
+                'profile',
+                'demo',
+                'activeSuscripcion.plan',
+                'identityVerifications' => fn ($query) => $query->latest(),
+                'provider.user',
+                'provider.aircraft',
+                'provider.companyDocuments',
+            ]),
         ]);
     }
 
@@ -422,6 +439,23 @@ class AdminControlador extends ControladorBase
         return $this->ok([
             'requests' => $releases,
             'releases' => $releases,
+        ]);
+    }
+
+    public function contracts()
+    {
+        return $this->ok([
+            'contracts' => ContratoReserva::query()
+                ->with([
+                    'signedBy:id,name,email',
+                    'reservation:id,client_id,provider_id,aircraft_id,reservation_code,status,total_amount,currency,confirmed_at',
+                    'reservation.client:id,name,email',
+                    'reservation.provider:id,company_name,commercial_name',
+                    'reservation.aircraft:id,model,registration',
+                ])
+                ->latest('generated_at')
+                ->latest('id')
+                ->paginate(20),
         ]);
     }
 

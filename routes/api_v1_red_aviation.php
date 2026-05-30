@@ -83,6 +83,7 @@ Route::middleware(['auth.token'])->group(function () {
     Route::prefix('admin')->middleware(['role:admin'])->group(function () {
         Route::get('/dashboard', [AdminControlador::class, 'dashboard']);
         Route::get('/users', [AdminControlador::class, 'users']);
+        Route::get('/users/{user}', [AdminControlador::class, 'showUser']);
         Route::post('/users', [AdminControlador::class, 'storeUser']);
         Route::get('/roles', [AdminControlador::class, 'roles']);
         Route::put('/users/{user}', [AdminControlador::class, 'updateUser']);
@@ -96,6 +97,7 @@ Route::middleware(['auth.token'])->group(function () {
         Route::get('/sobrecargos', [AdminControlador::class, 'sobrecargos']);
         Route::get('/requests', [AdminControlador::class, 'requests']);
         Route::get('/releases', [AdminControlador::class, 'releases']);
+        Route::get('/contracts', [AdminControlador::class, 'contracts']);
         Route::post('/requests/{flightRequest}/assign', [AdminControlador::class, 'assign']);
         Route::put('/requests/{flightRequest}/workflow', [AdminControlador::class, 'updateRequestWorkflow']);
         Route::get('/subscriptions', [AdminControlador::class, 'subscriptions']);
