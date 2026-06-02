@@ -320,7 +320,8 @@ class ReservaControlador extends ControladorBase
             'regenerate' => ['nullable', 'boolean'],
         ]);
 
-        $contract = $this->buildReservationContract($reservation, (bool) ($data['regenerate'] ?? false));
+        $shouldRegenerate = (bool) ($data['regenerate'] ?? false);
+        $contract = $this->buildReservationContract($reservation, $shouldRegenerate);
         $termsSnapshot = is_array($contract->terms_snapshot) ? $contract->terms_snapshot : [];
 
         if (is_array($data['contract_snapshot'] ?? null) && ! empty($data['contract_snapshot'])) {
@@ -329,7 +330,8 @@ class ReservaControlador extends ControladorBase
 
         $fullContractHtml = $this->resolvePreferredContractHtml($data, $termsSnapshot);
         if ($fullContractHtml !== '') {
-            $termsSnapshot['full_contract_html'] = $fullContractHtml;
+            $termsSnapshot['full_contract_html_checksum'] = sha1($fullContractHtml);
+            $termsSnapshot['full_contract_html_length'] = strlen($fullContractHtml);
         }
 
         $fullContractText = $this->resolvePreferredContractText($data, $termsSnapshot);
@@ -359,16 +361,25 @@ class ReservaControlador extends ControladorBase
             'La reserva no tiene un nombre y correo de cliente validos para firmar.'
         );
 
-        $pdfRelativePath = $fullContractHtml !== ''
-            ? $contratoPdfServicio->guardarContratoReservaDesdeHtml(
-                (string) $contract->contract_code,
-                (int) $reservation->id,
-                $fullContractHtml
-            )
-            : $contratoPdfServicio->guardarContratoReserva(
-                (string) $contract->contract_code,
-                (int) $reservation->id,
-                $this->buildContractPdfPayload($reservation, $contract)
+        $existingPdfPath = (string) ($contract->contract_pdf_path ?? '');
+        $canReuseExistingPdf = ! $shouldRegenerate
+            && $existingPdfPath !== ''
+            && Storage::disk('local')->exists($existingPdfPath);
+
+        $pdfRelativePath = $canReuseExistingPdf
+            ? $existingPdfPath
+            : (
+                $fullContractHtml !== ''
+                    ? $contratoPdfServicio->guardarContratoReservaDesdeHtml(
+                        (string) $contract->contract_code,
+                        (int) $reservation->id,
+                        $fullContractHtml
+                    )
+                    : $contratoPdfServicio->guardarContratoReserva(
+                        (string) $contract->contract_code,
+                        (int) $reservation->id,
+                        $this->buildContractPdfPayload($reservation, $contract)
+                    )
             );
 
         try {

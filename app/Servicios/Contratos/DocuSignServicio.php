@@ -19,6 +19,8 @@ use Throwable;
 
 class DocuSignServicio
 {
+    private ?ApiClient $apiClient = null;
+
     public function estaConfigurado(): bool
     {
         return $this->configurationDiagnostics()['ok'];
@@ -269,6 +271,10 @@ class DocuSignServicio
 
     private function getApiClient(): ApiClient
     {
+        if ($this->apiClient instanceof ApiClient) {
+            return $this->apiClient;
+        }
+
         if (! class_exists(ApiClient::class)) {
             throw new RuntimeException('La libreria de DocuSign no esta instalada. Ejecuta composer install.');
         }
@@ -300,7 +306,9 @@ class DocuSignServicio
         $accessToken = $response[0]->getAccessToken();
         $config->addDefaultHeader('Authorization', 'Bearer '.$accessToken);
 
-        return $apiClient;
+        $this->apiClient = $apiClient;
+
+        return $this->apiClient;
     }
 
     private function accountId(): string
