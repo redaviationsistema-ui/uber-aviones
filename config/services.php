@@ -67,7 +67,7 @@ return [
         'private_key_path' => env('DOCUSIGN_PRIVATE_KEY_PATH', 'storage/app/docusign/private.key'),
         'frontend_url' => env('APP_FRONTEND_URL', env('FRONTEND_URL', 'http://localhost:5173')),
         'backend_url' => env('APP_BACKEND_URL', env('APP_URL', 'http://localhost:8000')),
-        'return_path' => env('DOCUSIGN_RETURN_PATH', '/cliente/contrato/'),
+        'return_path' => env('DOCUSIGN_RETURN_PATH', '/cliente/historial/'),
         'webhook_secret' => env('DOCUSIGN_WEBHOOK_SECRET'),
     ],
 

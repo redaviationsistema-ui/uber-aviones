@@ -283,13 +283,19 @@ class DocuSignServicio
         throw new RuntimeException('No fue posible descargar el PDF firmado desde DocuSign.');
     }
 
-    public function construirReturnUrl(int $contractId, ?string $returnPath = null): string
+    public function construirReturnUrl(int $contractId, ?string $returnPath = null, array $query = []): string
     {
         $frontendUrl = rtrim((string) config('services.docusign.frontend_url'), '/');
-        $path = $returnPath ?: (string) config('services.docusign.return_path', '/cliente/contrato/');
+        $path = $returnPath ?: (string) config('services.docusign.return_path', '/cliente/historial/');
         $path = '/'.ltrim($path, '/');
 
-        return $frontendUrl.$path.'?contract_id='.$contractId;
+        $queryString = http_build_query(array_filter([
+            'contract_id' => $contractId,
+            'docusign_return' => 1,
+            ...$query,
+        ], fn ($value) => $value !== null && $value !== ''));
+
+        return $frontendUrl.$path.($queryString !== '' ? '?'.$queryString : '');
     }
 
     private function getApiClient(): ApiClient

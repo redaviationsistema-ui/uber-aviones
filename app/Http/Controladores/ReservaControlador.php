@@ -409,7 +409,12 @@ class ReservaControlador extends ControladorBase
             'elapsed_ms' => (int) round((microtime(true) - $requestStartedAt) * 1000),
         ]);
 
-        $returnUrl = $this->resolveDocuSignReturnUrl($docuSignServicio, (int) $contract->id, $data);
+        $returnUrl = $this->resolveDocuSignReturnUrl(
+            $docuSignServicio,
+            (int) $contract->id,
+            (int) $reservation->id,
+            $data
+        );
 
         try {
             $envelopeId = $docuSignServicio->crearEnvelopeParaFirmaEmbebida(
@@ -466,6 +471,7 @@ class ReservaControlador extends ControladorBase
     private function resolveDocuSignReturnUrl(
         DocuSignServicio $docuSignServicio,
         int $contractId,
+        int $reservationId,
         array $data = []
     ): string {
         foreach (['return_url', 'callback_url'] as $key) {
@@ -475,7 +481,14 @@ class ReservaControlador extends ControladorBase
             }
         }
 
-        return $docuSignServicio->construirReturnUrl($contractId, $data['return_path'] ?? null);
+        return $docuSignServicio->construirReturnUrl(
+            $contractId,
+            $data['return_path'] ?? null,
+            [
+                'reservation_id' => $reservationId,
+                'refresh' => 'contract_status',
+            ],
+        );
     }
 
     public function signContract(
