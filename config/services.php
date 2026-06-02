@@ -61,6 +61,8 @@ return [
         'account_id' => env('DOCUSIGN_ACCOUNT_ID'),
         'base_path' => env('DOCUSIGN_BASE_PATH', 'https://demo.docusign.net/restapi'),
         'oauth_base_path' => env('DOCUSIGN_OAUTH_BASE_PATH', 'account-d.docusign.com'),
+        'connect_timeout' => (int) env('DOCUSIGN_CONNECT_TIMEOUT', 10),
+        'request_timeout' => (int) env('DOCUSIGN_REQUEST_TIMEOUT', 30),
         'private_key' => env('DOCUSIGN_PRIVATE_KEY'),
         'private_key_path' => env('DOCUSIGN_PRIVATE_KEY_PATH', 'storage/app/docusign/private.key'),
         'frontend_url' => env('APP_FRONTEND_URL', env('FRONTEND_URL', 'http://localhost:5173')),

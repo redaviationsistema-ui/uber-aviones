@@ -33,7 +33,7 @@ class ContratoPdfServicio
         );
 
         $pdf = Pdf::setOption([
-            'isRemoteEnabled' => true,
+            'isRemoteEnabled' => false,
             'isHtml5ParserEnabled' => true,
             'defaultFont' => 'DejaVu Sans',
             'dpi' => 96,

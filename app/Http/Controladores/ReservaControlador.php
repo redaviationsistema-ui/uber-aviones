@@ -14,6 +14,7 @@ use App\Servicios\Contratos\DocuSignServicio;
 use Barryvdh\DomPDF\Facade\Pdf;
 use JsonException;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use RuntimeException;
@@ -298,6 +299,16 @@ class ReservaControlador extends ControladorBase
         $reservation = $this->resolveReservation($reservation);
         $this->authorizeReservationClient($request, $reservation);
 
+        $requestStartedAt = microtime(true);
+        Log::info('DOCUSIGN 1 - Inicio endpoint', [
+            'reservation_id' => $reservation->id,
+            'user_id' => $request->user()?->id,
+            'has_full_contract_html' => $request->filled('full_contract_html'),
+            'has_document_html' => $request->filled('document_html'),
+            'has_contract_html' => $request->filled('contract_html'),
+            'has_source_contract_path' => $request->filled('source_contract_path'),
+        ]);
+
         if (! $docuSignServicio->estaConfigurado()) {
             return response()->json([
                 'success' => false,
@@ -333,6 +344,13 @@ class ReservaControlador extends ControladorBase
             $termsSnapshot['full_contract_html_checksum'] = sha1($fullContractHtml);
             $termsSnapshot['full_contract_html_length'] = strlen($fullContractHtml);
         }
+
+        Log::info('DOCUSIGN 2 - HTML resuelto', [
+            'reservation_id' => $reservation->id,
+            'html_length' => strlen($fullContractHtml),
+            'using_source_contract_path' => false,
+            'elapsed_ms' => (int) round((microtime(true) - $requestStartedAt) * 1000),
+        ]);
 
         $fullContractText = $this->resolvePreferredContractText($data, $termsSnapshot);
         if ($fullContractText !== '') {
@@ -381,6 +399,13 @@ class ReservaControlador extends ControladorBase
                         $this->buildContractPdfPayload($reservation, $contract)
                     )
             );
+
+        Log::info('DOCUSIGN 2.5 - PDF listo', [
+            'reservation_id' => $reservation->id,
+            'pdf_relative_path' => $pdfRelativePath,
+            'reused_existing_pdf' => $canReuseExistingPdf,
+            'elapsed_ms' => (int) round((microtime(true) - $requestStartedAt) * 1000),
+        ]);
 
         try {
             $envelopeId = $docuSignServicio->crearEnvelopeParaFirmaEmbebida(

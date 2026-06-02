@@ -13,6 +13,7 @@ use DocuSign\eSign\Model\Recipients;
 use DocuSign\eSign\Model\SignHere;
 use DocuSign\eSign\Model\Signer;
 use DocuSign\eSign\Model\Tabs;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use RuntimeException;
 use Throwable;
@@ -158,6 +159,14 @@ class DocuSignServicio
         string $signerEmail,
         string $clientUserId
     ): string {
+        Log::info('DOCUSIGN 5 - Preparando envelope', [
+            'pdf_path' => $pdfAbsolutePath,
+            'pdf_exists' => is_file($pdfAbsolutePath),
+            'pdf_size_bytes' => is_file($pdfAbsolutePath) ? filesize($pdfAbsolutePath) : null,
+            'signer_email' => $signerEmail,
+            'client_user_id' => $clientUserId,
+        ]);
+
         $apiClient = $this->getApiClient();
         $envelopesApi = new EnvelopesApi($apiClient);
 
@@ -199,6 +208,10 @@ class DocuSignServicio
 
         $result = $envelopesApi->createEnvelope($this->accountId(), $envelope);
 
+        Log::info('DOCUSIGN 6 - Envelope creado', [
+            'envelope_id' => (string) $result->getEnvelopeId(),
+        ]);
+
         return (string) $result->getEnvelopeId();
     }
 
@@ -209,6 +222,12 @@ class DocuSignServicio
         string $clientUserId,
         string $returnUrl
     ): string {
+        Log::info('DOCUSIGN 7 - Preparando recipient view', [
+            'envelope_id' => $envelopeId,
+            'return_url' => $returnUrl,
+            'signer_email' => $signerEmail,
+        ]);
+
         $apiClient = $this->getApiClient();
         $envelopesApi = new EnvelopesApi($apiClient);
 
@@ -222,6 +241,10 @@ class DocuSignServicio
         ]);
 
         $result = $envelopesApi->createRecipientView($this->accountId(), $envelopeId, $viewRequest);
+
+        Log::info('DOCUSIGN 8 - Recipient view creado', [
+            'envelope_id' => $envelopeId,
+        ]);
 
         return (string) $result->getUrl();
     }
@@ -285,6 +308,8 @@ class DocuSignServicio
 
         $config = new Configuration();
         $config->setHost((string) config('services.docusign.base_path'));
+        $config->setCurlConnectTimeout((int) config('services.docusign.connect_timeout', 10));
+        $config->setCurlTimeout((int) config('services.docusign.request_timeout', 30));
 
         $apiClient = new ApiClient($config);
         $apiClient->getOAuth()->setOAuthBasePath((string) config('services.docusign.oauth_base_path'));
@@ -292,6 +317,13 @@ class DocuSignServicio
         $privateKey = $this->resolvePrivateKeyContents();
 
         try {
+            Log::info('DOCUSIGN 3 - Solicitando JWT', [
+                'base_path' => (string) config('services.docusign.base_path'),
+                'oauth_base_path' => (string) config('services.docusign.oauth_base_path'),
+                'connect_timeout' => (int) config('services.docusign.connect_timeout', 10),
+                'request_timeout' => (int) config('services.docusign.request_timeout', 30),
+            ]);
+
             $response = $apiClient->requestJWTUserToken(
                 (string) config('services.docusign.integration_key'),
                 (string) config('services.docusign.user_id'),
@@ -299,6 +331,8 @@ class DocuSignServicio
                 ['signature', 'impersonation'],
                 3600
             );
+
+            Log::info('DOCUSIGN 4 - JWT obtenido');
         } catch (Throwable $exception) {
             throw new RuntimeException($this->buildRuntimeErrorMessage($exception), (int) $exception->getCode(), $exception);
         }
