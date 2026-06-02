@@ -1,9 +1,15 @@
 services:
   - type: web
     name: laravel-api
-    env: php
+    runtime: docker
     plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /up
+    autoDeployTrigger: commit
     envVars:
+      - key: PORT
+        value: 10000
       - key: APP_ENV
         value: production
       - key: APP_DEBUG
@@ -38,12 +44,3 @@ services:
         value: false
       - key: AWS_EC2_METADATA_DISABLED
         value: true
-    buildCommand: |
-      composer install --no-dev --optimize-autoloader
-      php artisan optimize:clear
-      php artisan config:clear
-      php artisan cache:clear
-      php artisan route:clear
-      php artisan storage:link
-      php artisan migrate --force
-    startCommand: php artisan optimize:clear && php artisan serve --host 0.0.0.0 --port $PORT
