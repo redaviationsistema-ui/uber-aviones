@@ -1,4 +1,4 @@
-FROM php:8.4-cli
+FROM php:8.4-apache
 
 WORKDIR /var/www
 
@@ -9,29 +9,35 @@ RUN apt-get update && apt-get install -y \
     curl \
     libpng-dev \
     libjpeg-dev \
-    libfreetype6-dev
+    libfreetype6-dev \
+    libzip-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN docker-php-ext-configure gd --with-freetype --with-jpeg
 
-RUN docker-php-ext-install pdo pdo_mysql pdo_pgsql gd
+RUN docker-php-ext-install pdo pdo_mysql pdo_pgsql gd zip
 
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
+RUN a2enmod rewrite headers
+
 COPY . .
 
-# Crear carpetas necesarias de Laravel
 RUN mkdir -p bootstrap/cache \
     storage/framework/cache/data \
     storage/framework/sessions \
     storage/framework/views \
     storage/logs
 
-# Permisos
-RUN chmod -R 777 bootstrap/cache storage
+RUN chown -R www-data:www-data /var/www \
+    && chmod -R 775 bootstrap/cache storage
 
-# Instalar dependencias
 RUN composer install --no-dev --optimize-autoloader
+
+COPY docker/start-apache.sh /usr/local/bin/start-apache
+
+RUN chmod +x /usr/local/bin/start-apache
 
 EXPOSE 10000
 
-CMD ["sh", "-c", "php artisan serve --host=0.0.0.0 --port=${PORT:-10000}"]
+CMD ["start-apache"]
