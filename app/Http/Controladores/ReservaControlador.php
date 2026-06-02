@@ -308,6 +308,14 @@ class ReservaControlador extends ControladorBase
 
         $data = $request->validate([
             'contract_snapshot' => ['nullable', 'array'],
+            'contract_html' => ['nullable', 'string'],
+            'contract_markup' => ['nullable', 'string'],
+            'document_html' => ['nullable', 'string'],
+            'full_contract_html' => ['nullable', 'string'],
+            'contract_plain_text' => ['nullable', 'string'],
+            'full_contract_text' => ['nullable', 'string'],
+            'source_contract_path' => ['nullable', 'string', 'max:500'],
+            'document_source' => ['nullable', 'string', 'max:120'],
             'return_path' => ['nullable', 'string', 'max:255'],
             'regenerate' => ['nullable', 'boolean'],
         ]);
@@ -317,6 +325,24 @@ class ReservaControlador extends ControladorBase
 
         if (is_array($data['contract_snapshot'] ?? null) && ! empty($data['contract_snapshot'])) {
             $termsSnapshot['client_contract_snapshot'] = $data['contract_snapshot'];
+        }
+
+        $fullContractHtml = $this->resolvePreferredContractHtml($data, $termsSnapshot);
+        if ($fullContractHtml !== '') {
+            $termsSnapshot['full_contract_html'] = $fullContractHtml;
+        }
+
+        $fullContractText = $this->resolvePreferredContractText($data, $termsSnapshot);
+        if ($fullContractText !== '') {
+            $termsSnapshot['full_contract_text'] = $fullContractText;
+        }
+
+        if (filled($data['source_contract_path'] ?? null)) {
+            $termsSnapshot['source_contract_path'] = (string) $data['source_contract_path'];
+        }
+
+        if (filled($data['document_source'] ?? null)) {
+            $termsSnapshot['document_source'] = (string) $data['document_source'];
         }
 
         $contract->update([
@@ -333,11 +359,17 @@ class ReservaControlador extends ControladorBase
             'La reserva no tiene un nombre y correo de cliente validos para firmar.'
         );
 
-        $pdfRelativePath = $contratoPdfServicio->guardarContratoReserva(
-            (string) $contract->contract_code,
-            (int) $reservation->id,
-            $this->buildContractPdfPayload($reservation, $contract)
-        );
+        $pdfRelativePath = $fullContractHtml !== ''
+            ? $contratoPdfServicio->guardarContratoReservaDesdeHtml(
+                (string) $contract->contract_code,
+                (int) $reservation->id,
+                $fullContractHtml
+            )
+            : $contratoPdfServicio->guardarContratoReserva(
+                (string) $contract->contract_code,
+                (int) $reservation->id,
+                $this->buildContractPdfPayload($reservation, $contract)
+            );
 
         try {
             $envelopeId = $docuSignServicio->crearEnvelopeParaFirmaEmbebida(
@@ -385,6 +417,8 @@ class ReservaControlador extends ControladorBase
             'contract' => $contract->fresh(),
             'reservation' => $reservation->fresh(['contract']),
             'signing_url' => $signingUrl,
+            'recipient_view_url' => $signingUrl,
+            'embedded_signing_url' => $signingUrl,
             'envelope_id' => $envelopeId,
         ]);
     }
@@ -660,6 +694,44 @@ class ReservaControlador extends ControladorBase
                 'Tiempos de espera extraordinarios, permisos especiales o costos por reprogramación.',
             ],
         ];
+    }
+
+    private function resolvePreferredContractHtml(array $data, array $termsSnapshot): string
+    {
+        $candidates = [
+            $data['full_contract_html'] ?? null,
+            $data['document_html'] ?? null,
+            $data['contract_html'] ?? null,
+            $data['contract_markup'] ?? null,
+            $termsSnapshot['full_contract_html'] ?? null,
+        ];
+
+        foreach ($candidates as $candidate) {
+            $normalized = trim((string) ($candidate ?? ''));
+            if ($normalized !== '') {
+                return $normalized;
+            }
+        }
+
+        return '';
+    }
+
+    private function resolvePreferredContractText(array $data, array $termsSnapshot): string
+    {
+        $candidates = [
+            $data['full_contract_text'] ?? null,
+            $data['contract_plain_text'] ?? null,
+            $termsSnapshot['full_contract_text'] ?? null,
+        ];
+
+        foreach ($candidates as $candidate) {
+            $normalized = trim((string) ($candidate ?? ''));
+            if ($normalized !== '') {
+                return $normalized;
+            }
+        }
+
+        return '';
     }
 
     private function buildPdfItinerarySegments(Reserva $reservation, array $clientSnapshot): array

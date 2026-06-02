@@ -216,6 +216,7 @@ class DocuSignServicio
             'email' => $signerEmail,
             'user_name' => $signerName,
             'client_user_id' => $clientUserId,
+            'recipient_id' => '1',
         ]);
 
         $result = $envelopesApi->createRecipientView($this->accountId(), $envelopeId, $viewRequest);
