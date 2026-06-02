@@ -8,10 +8,16 @@ use App\Modelos\Comision;
 use App\Modelos\Cotizacion;
 use App\Modelos\Reserva;
 use App\Modelos\SolicitudVuelo;
+use App\Servicios\Contratos\ContratoPdfServicio;
+use App\Servicios\Contratos\ContratoReservaServicio;
+use App\Servicios\Contratos\DocuSignServicio;
 use Barryvdh\DomPDF\Facade\Pdf;
 use JsonException;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use RuntimeException;
+use Throwable;
 
 class ReservaControlador extends ControladorBase
 {
@@ -154,7 +160,7 @@ class ReservaControlador extends ControladorBase
         return $this->ok(['reservation' => $reservation->load(['quote', 'aircraft', 'contract'])], 201);
     }
 
-    public function showContract(Request $request, mixed $reservation)
+    public function showContract(Request $request, mixed $reservation, DocuSignServicio $docuSignServicio)
     {
         $reservation = $this->resolveReservation($reservation);
         $this->authorizeReservationClient($request, $reservation);
@@ -162,6 +168,7 @@ class ReservaControlador extends ControladorBase
         return $this->ok([
             'contract' => $this->buildReservationContract($reservation)->fresh(),
             'reservation' => $reservation->load(['quote', 'aircraft', 'provider']),
+            'docusign_enabled' => $docuSignServicio->estaConfigurado(),
         ]);
     }
 
@@ -192,7 +199,202 @@ class ReservaControlador extends ControladorBase
         ]);
     }
 
-    public function signContract(Request $request, mixed $reservation)
+    public function showContractStatusById(Request $request, ContratoReserva $contract)
+    {
+        $contract->loadMissing(['reservation.client', 'reservation.aircraft', 'reservation.provider', 'reservation.payments']);
+        abort_if(! $contract->reservation, 404, 'Contrato sin reserva asociada.');
+        $this->authorizeReservationClient($request, $contract->reservation);
+
+        $contract = $contract->fresh();
+        $latestPayment = $contract->reservation->payments->sortByDesc('id')->first();
+        $normalizedUiStatus = $this->normalizeContractUiStatus($contract);
+        $isSigned = $normalizedUiStatus === 'completed';
+        $signedPdfUrl = filled($contract->signed_pdf_path)
+            ? route('cliente.contratos.pdf-firmado', ['contract' => $contract->id])
+            : null;
+        $nextAction = match (true) {
+            $normalizedUiStatus === 'completed' && $latestPayment?->status !== 'paid' => 'pay',
+            $normalizedUiStatus === 'sent' => 'wait_signature',
+            $normalizedUiStatus === 'generated' => 'sign',
+            in_array($normalizedUiStatus, ['declined', 'voided', 'error'], true) => 'contact_support',
+            default => 'none',
+        };
+
+        return $this->ok([
+            'contract' => $contract,
+            'reservation' => $contract->reservation->fresh(['aircraft', 'provider', 'payments', 'contract']),
+            'payment_order' => $latestPayment,
+            'frontend_state' => [
+                'contract_id' => $contract->id,
+                'ui_status' => $normalizedUiStatus,
+                'ready_for_payment' => $isSigned,
+                'signed_pdf_url' => $signedPdfUrl,
+                'signing_url' => null,
+                'next_action' => $nextAction,
+                'status_message' => $this->buildContractStatusMessage($normalizedUiStatus, $latestPayment?->status),
+            ],
+            'status_summary' => [
+                'contract_status' => $contract->status,
+                'docusign_status' => $contract->docusign_status,
+                'is_signed' => $isSigned,
+                'payment_enabled' => $isSigned,
+                'has_embedded_envelope' => filled($contract->docusign_envelope_id),
+                'has_signed_pdf' => filled($contract->signed_pdf_path),
+                'payment_status' => $latestPayment?->status,
+            ],
+        ]);
+    }
+
+    public function downloadSignedContractPdf(Request $request, ContratoReserva $contract)
+    {
+        $contract->loadMissing(['reservation']);
+        abort_if(! $contract->reservation, 404, 'Contrato sin reserva asociada.');
+        $this->authorizeReservationClient($request, $contract->reservation);
+        abort_if(blank($contract->signed_pdf_path), 404, 'El contrato aun no tiene un PDF firmado disponible.');
+
+        return Storage::disk('local')->download(
+            $contract->signed_pdf_path,
+            ($contract->contract_code ?: 'contrato-firmado-'.$contract->id).'.pdf'
+        );
+    }
+
+    private function normalizeContractUiStatus(ContratoReserva $contract): string
+    {
+        $docusignStatus = strtolower(trim((string) ($contract->docusign_status ?? '')));
+        $contractStatus = strtolower(trim((string) ($contract->status ?? '')));
+
+        if (in_array($docusignStatus, ['completed', 'declined', 'voided', 'error', 'sent'], true)) {
+            return $docusignStatus;
+        }
+
+        if (in_array($contractStatus, ['completed', 'sent', 'generated'], true)) {
+            return $contractStatus;
+        }
+
+        return 'generated';
+    }
+
+    private function buildContractStatusMessage(string $uiStatus, ?string $paymentStatus): string
+    {
+        return match ($uiStatus) {
+            'generated' => 'El contrato ya existe y esta listo para firma.',
+            'sent' => 'El contrato fue enviado a DocuSign y esta pendiente de firma.',
+            'completed' => $paymentStatus === 'paid'
+                ? 'El contrato ya fue firmado y el pago ya fue confirmado.'
+                : 'El contrato ya fue completado. Ya puedes continuar con el pago.',
+            'declined' => 'La firma del contrato fue rechazada por el cliente.',
+            'voided' => 'El sobre de DocuSign fue cancelado o invalidado.',
+            'error' => 'Ocurrio un error con la firma del contrato. Se requiere revision.',
+            default => 'Estado de contrato disponible.',
+        };
+    }
+
+    public function startEmbeddedSigning(
+        Request $request,
+        mixed $reservation,
+        DocuSignServicio $docuSignServicio,
+        ContratoPdfServicio $contratoPdfServicio,
+    ) {
+        $reservation = $this->resolveReservation($reservation);
+        $this->authorizeReservationClient($request, $reservation);
+
+        if (! $docuSignServicio->estaConfigurado()) {
+            return response()->json([
+                'success' => false,
+                'message' => $docuSignServicio->buildConfigurationErrorMessage(),
+                'docusign_debug' => $docuSignServicio->configurationDiagnostics(),
+            ], 422);
+        }
+
+        $data = $request->validate([
+            'contract_snapshot' => ['nullable', 'array'],
+            'return_path' => ['nullable', 'string', 'max:255'],
+            'regenerate' => ['nullable', 'boolean'],
+        ]);
+
+        $contract = $this->buildReservationContract($reservation, (bool) ($data['regenerate'] ?? false));
+        $termsSnapshot = is_array($contract->terms_snapshot) ? $contract->terms_snapshot : [];
+
+        if (is_array($data['contract_snapshot'] ?? null) && ! empty($data['contract_snapshot'])) {
+            $termsSnapshot['client_contract_snapshot'] = $data['contract_snapshot'];
+        }
+
+        $contract->update([
+            'terms_snapshot' => $termsSnapshot,
+            'signer_name' => $reservation->client?->name,
+            'signer_email' => $reservation->client?->email,
+            'client_user_id' => $contract->client_user_id ?: 'client_'.$reservation->id.'_'.Str::lower(Str::random(8)),
+        ]);
+        $contract = $contract->fresh();
+
+        abort_if(
+            blank($contract->signer_name) || blank($contract->signer_email),
+            422,
+            'La reserva no tiene un nombre y correo de cliente validos para firmar.'
+        );
+
+        $pdfRelativePath = $contratoPdfServicio->guardarContratoReserva(
+            (string) $contract->contract_code,
+            (int) $reservation->id,
+            $this->buildContractPdfPayload($reservation, $contract)
+        );
+
+        try {
+            $envelopeId = $docuSignServicio->crearEnvelopeParaFirmaEmbebida(
+                $contratoPdfServicio->rutaAbsoluta($pdfRelativePath),
+                (string) $contract->signer_name,
+                (string) $contract->signer_email,
+                (string) $contract->client_user_id
+            );
+
+            $signingUrl = $docuSignServicio->crearRecipientView(
+                $envelopeId,
+                (string) $contract->signer_name,
+                (string) $contract->signer_email,
+                (string) $contract->client_user_id,
+                $docuSignServicio->construirReturnUrl($contract->id, $data['return_path'] ?? null)
+            );
+        } catch (RuntimeException $exception) {
+            return response()->json([
+                'success' => false,
+                'message' => $exception->getMessage(),
+                'docusign_debug' => array_merge(
+                    $docuSignServicio->configurationDiagnostics(),
+                    [
+                        'runtime_error' => $docuSignServicio->runtimeDiagnosticsFromException(
+                            $exception->getPrevious() instanceof Throwable ? $exception->getPrevious() : $exception
+                        ),
+                    ]
+                ),
+            ], 422);
+        }
+
+        $contract->update([
+            'status' => 'sent',
+            'docusign_envelope_id' => $envelopeId,
+            'docusign_status' => 'sent',
+            'contract_pdf_path' => $pdfRelativePath,
+            'document_url' => $pdfRelativePath,
+            'generated_at' => $contract->generated_at ?: now(),
+            'sent_at' => now(),
+        ]);
+
+        $this->writeAudit($request, 'send', 'reservation_contracts', 'Contrato enviado a DocuSign para firma embebida.');
+
+        return $this->ok([
+            'contract' => $contract->fresh(),
+            'reservation' => $reservation->fresh(['contract']),
+            'signing_url' => $signingUrl,
+            'envelope_id' => $envelopeId,
+        ]);
+    }
+
+    public function signContract(
+        Request $request,
+        mixed $reservation,
+        ContratoReservaServicio $contratoReservaServicio,
+        ContratoPdfServicio $contratoPdfServicio,
+    )
     {
         $reservation = $this->resolveReservation($reservation);
         $this->authorizeReservationClient($request, $reservation);
@@ -215,41 +417,30 @@ class ReservaControlador extends ControladorBase
             ];
         }
 
+        $contract->terms_snapshot = $termsSnapshot;
+        $contract->signer_name ??= $request->user()->name;
+        $contract->signer_email ??= $request->user()->email;
+
+        $signedPdfPath = $contratoPdfServicio->guardarContratoFirmadoManual(
+            (string) $contract->contract_code,
+            (int) $reservation->id,
+            $this->buildContractPdfPayload($reservation, $contract)
+        );
+
         $contract->update([
-            'status' => 'signed',
-            'signed_by_user_id' => $request->user()->id,
-            'signed_at' => now(),
-            'terms_snapshot' => $termsSnapshot,
+            'signer_name' => $contract->signer_name,
+            'signer_email' => $contract->signer_email,
+            'contract_pdf_path' => $contract->contract_pdf_path ?: $signedPdfPath,
+            'document_url' => $signedPdfPath,
         ]);
 
-        $paymentOrder = $reservation->payments()
-            ->whereIn('status', ['pending', 'failed'])
-            ->latest('id')
-            ->first();
-
-        if (! $paymentOrder) {
-            $paymentOrder = $reservation->payments()->create([
-                'user_id' => $request->user()->id,
-                'payment_type' => 'reservation',
-                'amount' => $reservation->total_amount,
-                'currency' => $reservation->currency ?? 'USD',
-                'provider' => 'manual',
-                'status' => 'pending',
-                'transaction_reference' => 'PAY-'.Str::upper(Str::random(10)),
-            ]);
-        }
-
-        if ($reservation->flight_request_id) {
-            $reservation->flightRequest()->update([
-                'status' => 'reserved',
-                'workflow_status' => 'pago pendiente',
-                'payment_status' => 'pending',
-            ]);
-        }
-
-        $reservation->update([
-            'status' => 'pending_payment',
-        ]);
+        $paymentOrder = $contratoReservaServicio->registrarFirma(
+            $reservation,
+            $contract,
+            $request->user(),
+            $termsSnapshot,
+            $signedPdfPath
+        );
 
         $this->writeAudit($request, 'sign', 'reservation_contracts', 'Contrato firmado por cliente.');
 

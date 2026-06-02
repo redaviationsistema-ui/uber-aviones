@@ -43,7 +43,12 @@ Route::prefix('cliente')->middleware(['auth.token', 'role:client,admin'])->group
     Route::get('/reservas/{reservation}/contrato', [ReservaControlador::class, 'showContract']);
     Route::get('/reservas/{reservation}/contrato/pdf', [ReservaControlador::class, 'downloadContractPdf']);
     Route::post('/reservas/{reservation}/contrato/generar', [ReservaControlador::class, 'generateContract']);
+    Route::post('/reservas/{reservation}/contrato/docusign', [ReservaControlador::class, 'startEmbeddedSigning']);
     Route::post('/reservas/{reservation}/contrato/firmar', [ReservaControlador::class, 'signContract']);
+    Route::get('/contratos/{contract}/estado', [ReservaControlador::class, 'showContractStatusById'])
+        ->name('cliente.contratos.estado');
+    Route::get('/contratos/{contract}/pdf-firmado', [ReservaControlador::class, 'downloadSignedContractPdf'])
+        ->name('cliente.contratos.pdf-firmado');
     Route::post('/reservas/{reservation}/calificar', [ReservaControlador::class, 'rateService']);
     Route::post('/reservas/{reservation}/pagar', [PagoControlador::class, 'storeReservaPago']);
     Route::post('/reservas/{reservation}/pago/confirmar', [StripePagoControlador::class, 'confirmReservationPayment']);

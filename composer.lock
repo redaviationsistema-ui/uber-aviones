@@ -4,8 +4,69 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "1df1b8d130d01f662becafd9434f9c7e",
+    "content-hash": "bf3f635e10d4d73ca816de6be3d63e8d",
     "packages": [
+        {
+            "name": "adhocore/jwt",
+            "version": "v1.1.4",
+            "source": {
+                "type": "git",
+                "url": "https://github.com/adhocore/php-jwt.git",
+                "reference": "b7055ae9024a6627f19f9873b5db19b0f1dcc4e7"
+            },
+            "dist": {
+                "type": "zip",
+                "url": "https://api.github.com/repos/adhocore/php-jwt/zipball/b7055ae9024a6627f19f9873b5db19b0f1dcc4e7",
+                "reference": "b7055ae9024a6627f19f9873b5db19b0f1dcc4e7",
+                "shasum": ""
+            },
+            "require": {
+                "php": "^7.0 || ^8.0"
+            },
+            "require-dev": {
+                "phpunit/phpunit": "^7.5 || ^8.5"
+            },
+            "type": "library",
+            "autoload": {
+                "psr-4": {
+                    "Ahc\\Jwt\\": "src/"
+                }
+            },
+            "notification-url": "https://packagist.org/downloads/",
+            "license": [
+                "MIT"
+            ],
+            "authors": [
+                {
+                    "name": "Jitendra Adhikari",
+                    "email": "jiten.adhikary@gmail.com"
+                }
+            ],
+            "description": "Ultra lightweight JSON web token (JWT) library for PHP5.5+.",
+            "keywords": [
+                "auth",
+                "json-web-token",
+                "jwt",
+                "jwt-auth",
+                "jwt-php",
+                "token"
+            ],
+            "support": {
+                "issues": "https://github.com/adhocore/php-jwt/issues",
+                "source": "https://github.com/adhocore/php-jwt/tree/v1.1.4"
+            },
+            "funding": [
+                {
+                    "url": "https://paypal.me/ji10",
+                    "type": "custom"
+                },
+                {
+                    "url": "https://github.com/adhocore",
+                    "type": "github"
+                }
+            ],
+            "time": "2026-05-30T07:58:15+00:00"
+        },
         {
             "name": "aws/aws-crt-php",
             "version": "v1.2.7",
@@ -604,6 +665,65 @@
                 }
             ],
             "time": "2024-02-05T11:56:58+00:00"
+        },
+        {
+            "name": "docusign/esign-client",
+            "version": "v8.8.1",
+            "source": {
+                "type": "git",
+                "url": "https://github.com/docusign/docusign-esign-php-client.git",
+                "reference": "d026fdcb41bec593ec152f5a223f2820324b5124"
+            },
+            "dist": {
+                "type": "zip",
+                "url": "https://api.github.com/repos/docusign/docusign-esign-php-client/zipball/d026fdcb41bec593ec152f5a223f2820324b5124",
+                "reference": "d026fdcb41bec593ec152f5a223f2820324b5124",
+                "shasum": ""
+            },
+            "require": {
+                "adhocore/jwt": "^1.1",
+                "ext-curl": "*",
+                "ext-json": "*",
+                "ext-mbstring": "*",
+                "php": ">=7.4"
+            },
+            "require-dev": {
+                "friendsofphp/php-cs-fixer": "*",
+                "phpunit/phpunit": "~4.8",
+                "satooshi/php-coveralls": "~1.0",
+                "squizlabs/php_codesniffer": "~2.6"
+            },
+            "type": "library",
+            "autoload": {
+                "psr-4": {
+                    "DocuSign\\eSign\\": "src/"
+                }
+            },
+            "notification-url": "https://packagist.org/downloads/",
+            "license": [
+                "MIT"
+            ],
+            "authors": [
+                {
+                    "name": "DocuSign",
+                    "homepage": "https://developers.docusign.com"
+                }
+            ],
+            "description": "The Docusign PHP library makes integrating Docusign into your apps and websites a super fast and painless process. The library is open sourced on GitHub, look for the docusign-esign-php-client repository. Join the eSign revolution!",
+            "homepage": "https://developers.docusign.com",
+            "keywords": [
+                "agreement",
+                "api",
+                "docusign",
+                "eSignature",
+                "php",
+                "sdk"
+            ],
+            "support": {
+                "issues": "https://github.com/docusign/docusign-esign-php-client/issues",
+                "source": "https://github.com/docusign/docusign-esign-php-client/tree/v8.8.1"
+            },
+            "time": "2026-05-27T12:50:12+00:00"
         },
         {
             "name": "dompdf/dompdf",

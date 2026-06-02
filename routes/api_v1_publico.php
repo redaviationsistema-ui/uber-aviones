@@ -3,6 +3,7 @@
 use App\Http\Controladores\AeronaveControlador;
 use App\Http\Controladores\AeropuertoBusquedaControlador;
 use App\Http\Controladores\BiometricControlador;
+use App\Http\Controladores\DocuSignWebhookControlador;
 use App\Http\Controladores\PlanControlador;
 use App\Modelos\Aeropuerto;
 use Illuminate\Support\Facades\Route;
@@ -16,6 +17,7 @@ Route::prefix('public')->group(function () {
     ]));
     Route::get('/aircraft-preview', [AeronaveControlador::class, 'preview']);
     Route::post('/biometric/detect-face', [BiometricControlador::class, 'detectFace']);
+    Route::post('/docusign/webhook', [DocuSignWebhookControlador::class, 'handle']);
 });
 
 Route::get('/airports/search', AeropuertoBusquedaControlador::class);
