@@ -14,8 +14,12 @@ COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
 COPY . .
 
-# Crear carpetas necesarias
-RUN mkdir -p bootstrap/cache storage/framework storage/logs
+# Crear carpetas necesarias de Laravel
+RUN mkdir -p bootstrap/cache \
+    storage/framework/cache/data \
+    storage/framework/sessions \
+    storage/framework/views \
+    storage/logs
 
 # Permisos
 RUN chmod -R 777 bootstrap/cache storage
