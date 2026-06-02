@@ -9,6 +9,14 @@ Route::get('/', function () {
     ]);
 });
 
+Route::get('/health', function () {
+    return response()->json([
+        'status' => 'ok',
+        'app' => config('app.name'),
+        'environment' => app()->environment(),
+    ]);
+});
+
 Route::get('/public/storage/{path}', function (string $path) {
     $path = ltrim(str_replace('\\', '/', $path), '/');
 
