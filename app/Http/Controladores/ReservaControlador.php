@@ -327,6 +327,8 @@ class ReservaControlador extends ControladorBase
             'full_contract_text' => ['nullable', 'string'],
             'source_contract_path' => ['nullable', 'string', 'max:500'],
             'document_source' => ['nullable', 'string', 'max:120'],
+            'return_url' => ['nullable', 'string', 'max:1000'],
+            'callback_url' => ['nullable', 'string', 'max:1000'],
             'return_path' => ['nullable', 'string', 'max:255'],
             'regenerate' => ['nullable', 'boolean'],
         ]);
@@ -407,6 +409,8 @@ class ReservaControlador extends ControladorBase
             'elapsed_ms' => (int) round((microtime(true) - $requestStartedAt) * 1000),
         ]);
 
+        $returnUrl = $this->resolveDocuSignReturnUrl($docuSignServicio, (int) $contract->id, $data);
+
         try {
             $envelopeId = $docuSignServicio->crearEnvelopeParaFirmaEmbebida(
                 $contratoPdfServicio->rutaAbsoluta($pdfRelativePath),
@@ -420,7 +424,7 @@ class ReservaControlador extends ControladorBase
                 (string) $contract->signer_name,
                 (string) $contract->signer_email,
                 (string) $contract->client_user_id,
-                $docuSignServicio->construirReturnUrl($contract->id, $data['return_path'] ?? null)
+                $returnUrl
             );
         } catch (RuntimeException $exception) {
             return response()->json([
@@ -457,6 +461,21 @@ class ReservaControlador extends ControladorBase
             'embedded_signing_url' => $signingUrl,
             'envelope_id' => $envelopeId,
         ]);
+    }
+
+    private function resolveDocuSignReturnUrl(
+        DocuSignServicio $docuSignServicio,
+        int $contractId,
+        array $data = []
+    ): string {
+        foreach (['return_url', 'callback_url'] as $key) {
+            $candidate = trim((string) ($data[$key] ?? ''));
+            if ($candidate !== '' && filter_var($candidate, FILTER_VALIDATE_URL)) {
+                return $candidate;
+            }
+        }
+
+        return $docuSignServicio->construirReturnUrl($contractId, $data['return_path'] ?? null);
     }
 
     public function signContract(
