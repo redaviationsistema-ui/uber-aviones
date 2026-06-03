@@ -302,6 +302,67 @@ class AdminControlador extends ControladorBase
         ]);
     }
 
+    public function updateSobrecargo(Request $request, Usuario $user)
+    {
+        if (! $user->hasRole(Usuario::ROLE_SOBRECARGO) && $user->operational_role !== Usuario::ROLE_SOBRECARGO) {
+            return response()->json([
+                'success' => false,
+                'message' => 'El usuario seleccionado no corresponde a un sobrecargo.',
+            ], 422);
+        }
+
+        $data = $request->validate([
+            'name' => ['sometimes', 'string', 'max:255'],
+            'email' => ['sometimes', 'email', 'max:255', Rule::unique('users', 'email')->ignore($user->id)],
+            'phone' => ['nullable', 'string', 'max:50'],
+            'base' => ['nullable', 'string', 'max:100'],
+            'status' => ['nullable', 'string', 'max:100'],
+            'profile_state' => ['nullable', 'string', 'max:100'],
+            'validation_status' => ['nullable', 'string', 'max:100'],
+            'admin_notes' => ['nullable', 'string'],
+        ]);
+
+        $profile = $user->profile ?: $user->profile()->make(['user_id' => $user->id]);
+        $taxData = $profile->tax_data ?? [];
+
+        $nextProfileState = $data['profile_state'] ?? $data['validation_status'] ?? ($taxData['profile_state'] ?? 'Pendiente');
+        $normalizedUserStatus = $this->normalizeSobrecargoUserStatus(
+            $data['status'] ?? null,
+            $nextProfileState,
+            $user->status
+        );
+
+        $user->fill([
+            'name' => $data['name'] ?? $user->name,
+            'email' => $data['email'] ?? $user->email,
+            'phone' => array_key_exists('phone', $data) ? $data['phone'] : $user->phone,
+            'status' => $normalizedUserStatus,
+            'operational_role' => $user->operational_role ?: Usuario::ROLE_SOBRECARGO,
+        ])->save();
+
+        $profile->fill([
+            'city' => array_key_exists('base', $data) ? $data['base'] : $profile->city,
+            'tax_data' => array_merge($taxData, [
+                'profile_state' => $nextProfileState,
+                'validation_status' => $data['validation_status'] ?? ($taxData['validation_status'] ?? $nextProfileState),
+                'admin_notes' => array_key_exists('admin_notes', $data)
+                    ? $data['admin_notes']
+                    : ($taxData['admin_notes'] ?? null),
+            ]),
+        ]);
+        $profile->save();
+
+        $this->writeAudit($request, 'admin_crew_updated', 'admin_sobrecargos', sprintf(
+            'Admin actualizo el expediente operativo del sobrecargo %s.',
+            $user->email
+        ));
+
+        return $this->ok([
+            'user' => $user->fresh(['roles', 'profile', 'provider']),
+            'profile' => $profile->fresh(),
+        ]);
+    }
+
     public function requests(Request $request)
     {
         $perPage = min(max((int) $request->integer('per_page', 20), 1), 100);
@@ -377,6 +438,27 @@ class AdminControlador extends ControladorBase
                 'has_more_pages' => $requestsPaginator->hasMorePages(),
             ],
         ]);
+    }
+
+    private function normalizeSobrecargoUserStatus(?string $requestedStatus, ?string $profileState, string $fallback): string
+    {
+        $normalizedStatus = Str::lower(trim((string) $requestedStatus));
+        $normalizedProfileState = Str::lower(trim((string) $profileState));
+
+        if (in_array($normalizedStatus, ['active', 'inactive', 'blocked'], true)) {
+            return $normalizedStatus;
+        }
+
+        if (in_array($normalizedStatus, ['suspendido', 'suspended', 'blocked'], true)
+            || in_array($normalizedProfileState, ['suspendido', 'suspended', 'blocked'], true)) {
+            return 'blocked';
+        }
+
+        if (in_array($normalizedProfileState, ['aprobado', 'approved', 'activo', 'active'], true)) {
+            return 'active';
+        }
+
+        return $fallback;
     }
 
     public function releases()

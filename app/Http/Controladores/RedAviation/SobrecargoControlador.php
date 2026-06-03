@@ -455,8 +455,12 @@ class SobrecargoControlador extends ControladorBase
     {
         $data = $request->validate([
             'operation_id' => ['required', 'exists:operations,id'],
-            'title' => ['required', 'string', 'max:150'],
+            'title' => ['nullable', 'string', 'max:150'],
+            'type' => ['nullable', 'string', 'max:150'],
+            'flight' => ['nullable', 'string', 'max:150'],
+            'reference' => ['nullable', 'string', 'max:150'],
             'description' => ['nullable', 'string'],
+            'comment' => ['nullable', 'string'],
             'priority' => ['nullable', 'string', 'max:100'],
             'phase' => ['nullable', 'string', 'max:100'],
             'status' => ['nullable', 'string', 'max:100'],
@@ -464,19 +468,27 @@ class SobrecargoControlador extends ControladorBase
             'action_taken' => ['nullable', 'string', 'max:255'],
         ]);
 
+        $title = trim((string) ($data['title'] ?? $data['type'] ?? ''));
+        abort_if($title === '', 422, 'El tipo o titulo de la incidencia es obligatorio.');
+
+        $description = trim((string) ($data['description'] ?? $data['comment'] ?? ''));
+        $flightReference = trim((string) ($data['flight'] ?? $data['reference'] ?? ''));
+
         $operacion = Operacion::findOrFail($data['operation_id']);
         abort_if($operacion->sobrecargo_user_id !== $request->user()->id, 403);
 
         $timeline = LineaTiempoOperacion::create([
             'operation_id' => $operacion->id,
             'status' => 'incidencia',
-            'title' => $data['title'],
+            'title' => $title,
             'description' => trim(implode(' | ', array_filter([
-                $data['description'] ?? null,
-                $data['priority'] ? 'Prioridad: '.$data['priority'] : null,
-                $data['phase'] ? 'Fase: '.$data['phase'] : null,
-                $data['evidence'] ? 'Evidencia: '.$data['evidence'] : null,
-                $data['action_taken'] ? 'Accion: '.$data['action_taken'] : null,
+                $description ?: null,
+                ! empty($data['priority']) ? 'Prioridad: '.$data['priority'] : null,
+                ! empty($data['phase']) ? 'Fase: '.$data['phase'] : null,
+                ! empty($data['status']) ? 'Estado: '.$data['status'] : null,
+                ! empty($data['evidence']) ? 'Evidencia: '.$data['evidence'] : null,
+                ! empty($data['action_taken']) ? 'Accion: '.$data['action_taken'] : null,
+                $flightReference !== '' ? 'Vuelo: '.$flightReference : null,
             ]))) ?: null,
             'created_by' => $request->user()->id,
         ]);
@@ -484,10 +496,12 @@ class SobrecargoControlador extends ControladorBase
         $operacion->update([
             'status' => 'incidencia',
             'crew_status' => 'crew_incident_reported',
-            'crew_notes' => $data['description'] ?? $operacion->crew_notes,
+            'crew_notes' => $description ?: $operacion->crew_notes,
         ]);
 
-        return $this->ok(['incident' => $timeline], 201);
+        return $this->ok([
+            'incident' => $this->formatIncidentPayload($timeline->fresh(['operacion.solicitudVuelo', 'operacion.aeronave'])),
+        ], 201);
     }
 
     public function storeOperationIncident(Request $request, Operacion $operation)

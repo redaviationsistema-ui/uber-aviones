@@ -4,6 +4,9 @@ namespace Tests\Feature;
 
 use App\Modelos\Aeronave;
 use App\Modelos\IdentityVerification;
+use App\Modelos\Operacion;
+use App\Modelos\Proveedor;
+use App\Modelos\SolicitudVuelo;
 use App\Modelos\Usuario;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
@@ -548,5 +551,79 @@ class PlataformaVuelosApiTest extends TestCase
             ->assertOk()
             ->assertJsonPath('dashboard', '/sobrecargo/dashboard')
             ->assertJsonPath('login_context.effective_role', 'sobrecargo');
+    }
+
+    public function test_sobrecargo_can_store_incident_in_backend_using_frontend_payload_shape(): void
+    {
+        $this->seed();
+
+        $sobrecargo = Usuario::query()->where('email', 'sobrecargo@redaviation.test')->firstOrFail();
+        $provider = Proveedor::query()->firstOrFail();
+        $aircraft = Aeronave::query()->where('provider_id', $provider->id)->firstOrFail();
+        $client = Usuario::query()->where('email', 'cliente@privateflights.test')->firstOrFail();
+
+        $flightRequest = SolicitudVuelo::query()->create([
+            'client_id' => $client->id,
+            'assigned_provider_id' => $provider->id,
+            'assigned_aircraft_id' => $aircraft->id,
+            'assigned_aircraft_model' => $aircraft->model,
+            'origin' => 'MMMX',
+            'destination' => 'MMTO',
+            'departure_datetime' => now()->addDay(),
+            'passengers' => 4,
+            'trip_type' => 'one_way',
+            'status' => 'operador_asignado',
+            'workflow_status' => 'operator_assigned',
+        ]);
+
+        $operation = Operacion::query()->create([
+            'flight_request_id' => $flightRequest->id,
+            'provider_id' => $provider->id,
+            'aircraft_id' => $aircraft->id,
+            'sobrecargo_user_id' => $sobrecargo->id,
+            'status' => 'confirmada',
+            'crew_status' => 'crew_confirmed',
+        ]);
+
+        $login = $this->postJson('/api/v1/auth/login', [
+            'email' => 'sobrecargo@redaviation.test',
+            'password' => 'password',
+        ])->assertOk();
+
+        $token = $login->json('token');
+
+        $this->withToken($token)
+            ->postJson('/api/v1/sobrecargo/incidents', [
+                'operation_id' => $operation->id,
+                'type' => 'Cabina',
+                'flight' => 'OPS-'.$operation->id,
+                'priority' => 'Alta',
+                'phase' => 'En vuelo',
+                'status' => 'Escalada',
+                'comment' => 'Prueba de incidencia desde sobrecargo.',
+                'description' => 'Prueba de incidencia desde sobrecargo.',
+                'evidence' => 'cabina-test.jpg',
+                'action_taken' => 'Escalado',
+            ])
+            ->assertCreated()
+            ->assertJsonPath('incident.operation_id', $operation->id)
+            ->assertJsonPath('incident.type', 'Cabina')
+            ->assertJsonPath('incident.priority', 'Alta')
+            ->assertJsonPath('incident.phase', 'En vuelo')
+            ->assertJsonPath('incident.status', 'Escalada')
+            ->assertJsonPath('incident.evidence', 'cabina-test.jpg')
+            ->assertJsonPath('incident.action_taken', 'Escalado');
+
+        $this->assertDatabaseHas('operation_timeline', [
+            'operation_id' => $operation->id,
+            'status' => 'incidencia',
+            'title' => 'Cabina',
+        ]);
+
+        $this->assertDatabaseHas('operations', [
+            'id' => $operation->id,
+            'status' => 'incidencia',
+            'crew_status' => 'crew_incident_reported',
+        ]);
     }
 }

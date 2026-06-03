@@ -2,6 +2,7 @@
 
 use App\Http\Controladores\AdministradorControlador;
 use App\Http\Controladores\AeronaveControlador;
+use App\Http\Controladores\RedAviation\AdminControlador as RedAviationAdminControlador;
 use Illuminate\Support\Facades\Route;
 
 Route::prefix('admin')->middleware(['auth.token', 'role:admin'])->group(function () {
@@ -23,6 +24,10 @@ Route::prefix('admin')->middleware(['auth.token', 'role:admin'])->group(function
     Route::post('/proveedores/{provider}/aprobar', [AdministradorControlador::class, 'approveProveedor']);
     Route::post('/proveedores/{provider}/rechazar', [AdministradorControlador::class, 'rejectProveedor']);
     Route::post('/proveedores/{provider}/suspender', [AdministradorControlador::class, 'suspendProveedor']);
+    Route::get('/sobrecargos', [RedAviationAdminControlador::class, 'sobrecargos']);
+    Route::put('/sobrecargos/{user}', [RedAviationAdminControlador::class, 'updateSobrecargo']);
+    Route::get('/crew', [RedAviationAdminControlador::class, 'sobrecargos']);
+    Route::put('/crew/{user}', [RedAviationAdminControlador::class, 'updateSobrecargo']);
 
     Route::get('/aeronaves', [AdministradorControlador::class, 'aircraft']);
     Route::get('/aeronaves/{aircraft}', [AdministradorControlador::class, 'showAeronave']);

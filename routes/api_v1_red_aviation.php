@@ -95,6 +95,9 @@ Route::middleware(['auth.token'])->group(function () {
         Route::post('/users/{user}/reset-password', [AdminControlador::class, 'resetUserPassword']);
         Route::get('/operators', [AdminControlador::class, 'operators']);
         Route::get('/sobrecargos', [AdminControlador::class, 'sobrecargos']);
+        Route::get('/crew', [AdminControlador::class, 'sobrecargos']);
+        Route::put('/sobrecargos/{user}', [AdminControlador::class, 'updateSobrecargo']);
+        Route::put('/crew/{user}', [AdminControlador::class, 'updateSobrecargo']);
         Route::get('/requests', [AdminControlador::class, 'requests']);
         Route::get('/releases', [AdminControlador::class, 'releases']);
         Route::get('/contracts', [AdminControlador::class, 'contracts']);
