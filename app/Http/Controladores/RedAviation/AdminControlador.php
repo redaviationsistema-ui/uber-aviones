@@ -46,8 +46,15 @@ class AdminControlador extends ControladorBase
     public function users()
     {
         return $this->ok([
-            'users' => Usuario::with(['roles', 'profile', 'provider', 'demo', 'activeSuscripcion.plan'])
-                ->latest()
+            'users' => Usuario::with([
+                'roles',
+                'profile',
+                'provider',
+                'ownedProvider',
+                'demo',
+                'activeSuscripcion.plan',
+            ])
+                ->latest('id')
                 ->paginate(20),
         ]);
     }
@@ -297,8 +304,15 @@ class AdminControlador extends ControladorBase
     {
         return $this->ok([
             'sobrecargos' => Usuario::whereHas('roles', fn ($query) => $query->where('code', Usuario::ROLE_SOBRECARGO))
-                ->with(['profile', 'provider', 'ownedProvider', 'roles'])
-                ->latest()
+                ->with([
+                    'profile',
+                    'provider',
+                    'ownedProvider',
+                    'roles',
+                    'demo',
+                    'activeSuscripcion.plan',
+                ])
+                ->latest('id')
                 ->paginate(20),
         ]);
     }
@@ -432,8 +446,19 @@ class AdminControlador extends ControladorBase
                     'operations.crew_status',
                 ]),
                 'latestOperation.sobrecargo:id,name',
+                'latestOperation.timeline' => fn ($query) => $query
+                    ->select([
+                        'operation_timeline.id',
+                        'operation_timeline.operation_id',
+                        'operation_timeline.status',
+                        'operation_timeline.title',
+                        'operation_timeline.description',
+                        'operation_timeline.created_at',
+                    ])
+                    ->latest('id')
+                    ->limit(20),
             ])
-            ->latest()
+            ->latest('id')
             ->paginate($perPage);
 
         $requests = $requestsPaginator->getCollection()
@@ -521,6 +546,17 @@ class AdminControlador extends ControladorBase
                     'operations.crew_status',
                 ]),
                 'latestOperation.sobrecargo:id,name',
+                'latestOperation.timeline' => fn ($query) => $query
+                    ->select([
+                        'operation_timeline.id',
+                        'operation_timeline.operation_id',
+                        'operation_timeline.status',
+                        'operation_timeline.title',
+                        'operation_timeline.description',
+                        'operation_timeline.created_at',
+                    ])
+                    ->latest('id')
+                    ->limit(20),
             ])
             ->latest()
             ->limit(120)
@@ -579,6 +615,9 @@ class AdminControlador extends ControladorBase
                 'aircraft_id' => $data['aircraft_id'],
                 'sobrecargo_user_id' => $data['sobrecargo_user_id'] ?? null,
                 'status' => $nextOperationStatus,
+                'crew_status' => $hasAssignedCrew ? 'pending_crew_response' : null,
+                'crew_confirmed_at' => null,
+                'crew_decline_reason' => null,
             ]
         );
 

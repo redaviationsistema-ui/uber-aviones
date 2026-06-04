@@ -406,6 +406,7 @@ class PlataformaVuelosApiTest extends TestCase
         $this->assertSame($sobrecargo->id, data_get($requestPayload, 'operation.sobrecargo_user_id'));
         $this->assertSame($sobrecargo->name, data_get($requestPayload, 'operation.sobrecargo.name'));
         $this->assertSame('pending_crew_response', $requestPayload['crew_status']);
+        $this->assertIsArray(data_get($requestPayload, 'operation.timeline'));
     }
 
     public function test_admin_assign_promotes_payment_confirmed_request_to_tracking_live_when_crew_is_assigned(): void
@@ -457,6 +458,7 @@ class PlataformaVuelosApiTest extends TestCase
             'flight_request_id' => $flightRequest->id,
             'sobrecargo_user_id' => $sobrecargo->id,
             'status' => 'tracking_live',
+            'crew_status' => 'pending_crew_response',
         ]);
 
         $requestPayload = $this->withToken($adminToken)

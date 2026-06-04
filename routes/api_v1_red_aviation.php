@@ -65,6 +65,8 @@ Route::middleware(['auth.token'])->group(function () {
         Route::get('/operations/{operation}', [SobrecargoControlador::class, 'operation']);
         Route::post('/operations/{operation}/respond', [SobrecargoControlador::class, 'respondAssignment']);
         Route::post('/operations/{operation}/checkin', [SobrecargoControlador::class, 'checkinOperation']);
+        Route::post('/operations/{operation}/cabin-ready', [SobrecargoControlador::class, 'markCabinReady']);
+        Route::post('/operations/{operation}/passengers-ready', [SobrecargoControlador::class, 'markPassengersReady']);
         Route::post('/operations/{operation}/start-service', [SobrecargoControlador::class, 'startService']);
         Route::post('/operations/{operation}/complete-service', [SobrecargoControlador::class, 'completeService']);
         Route::post('/operations/{operation}/incident', [SobrecargoControlador::class, 'storeOperationIncident']);

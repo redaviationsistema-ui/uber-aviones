@@ -217,6 +217,88 @@ class SobrecargoControlador extends ControladorBase
         ]);
     }
 
+    public function markCabinReady(Request $request, Operacion $operation)
+    {
+        abort_if($operation->sobrecargo_user_id !== $request->user()->id, 403);
+
+        abort_if(! $operation->crew_checkin_at, 422, 'Primero confirma tu llegada a aeropuerto o base.');
+        abort_if($operation->crew_service_started_at, 422, 'La cabina ya no puede marcarse porque el servicio ya inicio.');
+
+        $data = $request->validate([
+            'note' => ['nullable', 'string'],
+        ]);
+
+        $existingTimeline = $operation->timeline()
+            ->where('status', 'cabina_lista')
+            ->latest('id')
+            ->first();
+
+        if (! $existingTimeline) {
+            $existingTimeline = LineaTiempoOperacion::create([
+                'operation_id' => $operation->id,
+                'status' => 'cabina_lista',
+                'title' => 'Sobrecargo revisa cabina, catering e insumos',
+                'description' => $data['note'] ?: 'Cabina, catering e insumos revisados por el sobrecargo.',
+                'created_by' => $request->user()->id,
+            ]);
+        }
+
+        $operation->update([
+            'status' => 'cabina_lista',
+            'crew_status' => 'crew_enroute',
+            'crew_notes' => $data['note'] ?? $operation->crew_notes,
+        ]);
+
+        return $this->ok([
+            'operation' => $this->formatAssignmentPayload($operation->fresh(['solicitudVuelo', 'aeronave', 'proveedor', 'timeline']), $request->user()->id),
+            'timeline_item' => $existingTimeline,
+        ]);
+    }
+
+    public function markPassengersReady(Request $request, Operacion $operation)
+    {
+        abort_if($operation->sobrecargo_user_id !== $request->user()->id, 403);
+
+        abort_if(! $operation->crew_checkin_at, 422, 'Primero confirma tu llegada a aeropuerto o base.');
+        abort_if($operation->crew_service_started_at, 422, 'Los pasajeros ya no pueden marcarse porque el servicio ya inicio.');
+
+        $hasCabinReady = $operation->timeline()
+            ->where('status', 'cabina_lista')
+            ->exists();
+
+        abort_if(! $hasCabinReady, 422, 'Primero registra que la cabina, catering e insumos estan listos.');
+
+        $data = $request->validate([
+            'note' => ['nullable', 'string'],
+        ]);
+
+        $existingTimeline = $operation->timeline()
+            ->where('status', 'pasajeros_recibidos')
+            ->latest('id')
+            ->first();
+
+        if (! $existingTimeline) {
+            $existingTimeline = LineaTiempoOperacion::create([
+                'operation_id' => $operation->id,
+                'status' => 'pasajeros_recibidos',
+                'title' => 'Sobrecargo recibe pasajeros',
+                'description' => $data['note'] ?: 'Los pasajeros ya fueron recibidos para el servicio.',
+                'created_by' => $request->user()->id,
+            ]);
+        }
+
+        $operation->update([
+            'status' => 'pasajeros_recibidos',
+            'crew_status' => 'crew_enroute',
+            'crew_notes' => $data['note'] ?? $operation->crew_notes,
+        ]);
+
+        return $this->ok([
+            'operation' => $this->formatAssignmentPayload($operation->fresh(['solicitudVuelo', 'aeronave', 'proveedor', 'timeline']), $request->user()->id),
+            'timeline_item' => $existingTimeline,
+        ]);
+    }
+
     public function operation(Request $request, Operacion $operation)
     {
         abort_if($operation->sobrecargo_user_id !== $request->user()->id, 403);
@@ -229,6 +311,15 @@ class SobrecargoControlador extends ControladorBase
     public function startService(Request $request, Operacion $operation)
     {
         abort_if($operation->sobrecargo_user_id !== $request->user()->id, 403);
+
+        abort_if(! $operation->crew_checkin_at, 422, 'Primero confirma tu llegada a aeropuerto o base.');
+
+        $hasPassengersReady = $operation->timeline()
+            ->where('status', 'pasajeros_recibidos')
+            ->exists();
+
+        abort_if(! $hasPassengersReady, 422, 'Primero registra que los pasajeros ya fueron recibidos.');
+        abort_if($operation->crew_service_started_at, 422, 'El servicio ya fue iniciado.');
 
         $operation->update([
             'status' => 'in_progress',

@@ -207,6 +207,11 @@ class VisibilidadServicio
         $operation = $solicitud->relationLoaded('latestOperation')
             ? $solicitud->latestOperation
             : $solicitud->latestOperation()->first();
+        $timeline = $operation
+            ? ($operation->relationLoaded('timeline')
+                ? $operation->timeline->sortByDesc('id')->values()
+                : $operation->timeline()->latest('id')->get())
+            : collect();
         $latestPayment = $reservation?->relationLoaded('latestPayment')
             ? $reservation->latestPayment
             : $reservation?->latestPayment()->first();
@@ -282,6 +287,13 @@ class VisibilidadServicio
                     'id' => $operation->sobrecargo->id,
                     'name' => $operation->sobrecargo->name,
                 ] : null,
+                'timeline' => $timeline->map(fn ($item) => [
+                    'id' => $item->id,
+                    'status' => $item->status,
+                    'title' => $item->title,
+                    'description' => $item->description,
+                    'created_at' => $item->created_at,
+                ])->values(),
             ] : null,
             'client' => $client ? [
                 'id' => $client->id,
