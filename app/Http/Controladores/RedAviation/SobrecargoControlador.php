@@ -52,6 +52,7 @@ class SobrecargoControlador extends ControladorBase
             'phone' => ['nullable', 'string', 'max:50'],
             'email' => ['nullable', 'email', 'max:255', Rule::unique('users', 'email')->ignore($user->id)],
             'base' => ['nullable', 'string', 'max:100'],
+            'base_airport' => ['nullable', 'string', 'max:20'],
             'languages' => ['nullable', 'array'],
             'languages.*' => ['nullable', 'string', 'max:100'],
             'certifications' => ['nullable', 'array'],
@@ -75,8 +76,13 @@ class SobrecargoControlador extends ControladorBase
             'email' => $data['email'] ?? $user->email,
         ])->save();
 
+        $resolvedBase = $data['base_airport'] ?? $data['base'] ?? null;
+
         $profile->fill([
-            'city' => $data['base'] ?? $profile->city,
+            'city' => array_key_exists('base', $data) ? $data['base'] : $profile->city,
+            'base_airport' => array_key_exists('base_airport', $data) || array_key_exists('base', $data)
+                ? $resolvedBase
+                : $profile->base_airport,
             'tax_data' => array_merge($taxData, [
                 'languages' => $data['languages'] ?? ($taxData['languages'] ?? []),
                 'certifications' => $data['certifications'] ?? ($taxData['certifications'] ?? []),
@@ -410,7 +416,7 @@ class SobrecargoControlador extends ControladorBase
             'from' => $data['from'] ?? $data['starts_at'] ?? null,
             'to' => $data['to'] ?? $data['ends_at'] ?? null,
             'state' => $data['state'] ?? $data['status'] ?? 'Disponible',
-            'base' => $data['base'] ?? ($profile->city ?: null),
+            'base' => $data['base'] ?? ($profile->base_airport ?: $profile->city ?: null),
             'coverage' => $data['coverage'] ?? null,
             'restriction' => $data['restriction'] ?? $data['notes'] ?? null,
             'created_at' => now()->toISOString(),
@@ -586,14 +592,15 @@ class SobrecargoControlador extends ControladorBase
             'name' => $user->name,
             'phone' => $user->phone,
             'email' => $user->email,
-            'base' => $profile?->city,
+            'base' => $profile?->base_airport ?: $profile?->city,
+            'base_airport' => $profile?->base_airport,
             'languages' => $taxData['languages'] ?? [],
             'certifications' => $taxData['certifications'] ?? [],
             'experience' => $taxData['experience'] ?? null,
             'bank_data' => $taxData['bank_data'] ?? null,
             'weekly_availability' => $taxData['weekly_availability'] ?? null,
-            'profile_state' => $taxData['profile_state'] ?? 'Pendiente',
-            'current_status' => $taxData['current_status'] ?? 'Disponible',
+            'profile_state' => $taxData['profile_state'] ?? null,
+            'current_status' => $taxData['current_status'] ?? null,
             'preferences' => array_merge([
                 'notify_assignments' => true,
                 'notify_incidents' => true,

@@ -21,6 +21,10 @@ class AutenticacionControlador extends ControladorBase
             'password' => ['required', 'string', 'min:8', 'confirmed'],
             'phone' => ['nullable', 'string', 'max:50'],
             'role' => ['required', Rule::in(['client', 'provider', 'sobrecargo'])],
+            'operational_role' => ['nullable', Rule::in(['sobrecargo'])],
+            'base' => ['nullable', 'string', 'max:100'],
+            'city' => ['nullable', 'string', 'max:100'],
+            'base_airport' => ['nullable', 'string', 'max:20'],
             'birth_date' => ['nullable', 'date'],
             'birthDate' => ['nullable', 'date'],
             'nationality' => ['nullable', 'string', 'max:120'],
@@ -60,6 +64,8 @@ class AutenticacionControlador extends ControladorBase
         ]);
 
         $role = $data['role'];
+        $operationalRole = $data['operational_role']
+            ?? ($role === Usuario::ROLE_SOBRECARGO ? Usuario::ROLE_SOBRECARGO : null);
         $persistedRole = $role === Usuario::ROLE_SOBRECARGO ? Usuario::ROLE_CLIENT : $role;
         $ineFrontPath = $request->hasFile('ine_front')
             ? $request->file('ine_front')->store('identity/ine/front', 'private')
@@ -71,10 +77,12 @@ class AutenticacionControlador extends ControladorBase
             ? $request->file('selfie_biometric')->store('biometric/selfies', 'public')
             : null;
         $birthDate = $data['birth_date'] ?? $data['birthDate'] ?? null;
+        $baseAirport = $data['base_airport'] ?? $data['base'] ?? null;
+        $baseCity = $data['city'] ?? $data['base'] ?? null;
 
         $user = Usuario::create($data + [
             'role' => $persistedRole,
-            'operational_role' => $role === Usuario::ROLE_SOBRECARGO ? Usuario::ROLE_SOBRECARGO : null,
+            'operational_role' => $operationalRole,
             'identity_verification_status' => $data['identity_verification_status'] ?? null,
             'identity_verification_message' => $data['identity_verification_message'] ?? null,
             'identity_verified' => (bool) ($data['identity_verified'] ?? false),
@@ -89,10 +97,8 @@ class AutenticacionControlador extends ControladorBase
             'biometric_selfie_path' => $selfiePath,
         ]);
         $user->syncRoles(
-            $role === Usuario::ROLE_SOBRECARGO
-                ? [Usuario::ROLE_CLIENT, Usuario::ROLE_SOBRECARGO]
-                : [$persistedRole],
-            $role
+            array_values(array_filter(array_unique([$persistedRole, $operationalRole]))),
+            $operationalRole ?: $role
         );
 
         $user->profile()->updateOrCreate(
@@ -111,6 +117,8 @@ class AutenticacionControlador extends ControladorBase
                 'ine_scan_status' => $data['ine_scan_status'] ?? null,
                 'ine_front_path' => $ineFrontPath,
                 'ine_back_path' => $ineBackPath,
+                'city' => $baseCity,
+                'base_airport' => $baseAirport,
             ]
         );
 
@@ -184,7 +192,7 @@ class AutenticacionControlador extends ControladorBase
         $user = $request->user()->loadMissing([
             'provider:id,user_id,company_name,commercial_name,approval_status,jet_a_price,margin_percent,fixed_fee,notes',
             'ownedProvider:id,user_id,company_name,commercial_name,approval_status,jet_a_price,margin_percent,fixed_fee,notes',
-            'profile:id,user_id,company_name,business_type,country,city,address,avatar,avatar_url,tax_data',
+            'profile:id,user_id,company_name,business_type,country,city,base_airport,address,avatar,avatar_url,tax_data,birth_date,nationality,document_type,document_number,document_expiration,identity_validation_required,ine_curp,ine_cic,ine_ocr,ine_scan_raw,ine_scan_status,ine_front_path,ine_back_path',
             'roles:id,code,name',
             'demo:id,user_id,status,started_at,expires_at',
             'activeSuscripcion:id,user_id,plan_id,status,started_at,expires_at',

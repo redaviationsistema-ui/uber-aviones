@@ -29,6 +29,7 @@ class Perfil extends Model
         'tax_data',
         'country',
         'city',
+        'base_airport',
         'address',
         'avatar',
         'avatar_url',

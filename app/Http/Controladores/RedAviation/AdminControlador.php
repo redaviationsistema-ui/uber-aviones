@@ -297,6 +297,7 @@ class AdminControlador extends ControladorBase
     {
         return $this->ok([
             'sobrecargos' => Usuario::whereHas('roles', fn ($query) => $query->where('code', Usuario::ROLE_SOBRECARGO))
+                ->with(['profile', 'provider', 'ownedProvider', 'roles'])
                 ->latest()
                 ->paginate(20),
         ]);
@@ -316,6 +317,7 @@ class AdminControlador extends ControladorBase
             'email' => ['sometimes', 'email', 'max:255', Rule::unique('users', 'email')->ignore($user->id)],
             'phone' => ['nullable', 'string', 'max:50'],
             'base' => ['nullable', 'string', 'max:100'],
+            'base_airport' => ['nullable', 'string', 'max:20'],
             'status' => ['nullable', 'string', 'max:100'],
             'profile_state' => ['nullable', 'string', 'max:100'],
             'validation_status' => ['nullable', 'string', 'max:100'],
@@ -342,9 +344,18 @@ class AdminControlador extends ControladorBase
 
         $profile->fill([
             'city' => array_key_exists('base', $data) ? $data['base'] : $profile->city,
+            'base_airport' => array_key_exists('base_airport', $data) || array_key_exists('base', $data)
+                ? ($data['base_airport'] ?? $data['base'])
+                : $profile->base_airport,
             'tax_data' => array_merge($taxData, [
                 'profile_state' => $nextProfileState,
                 'validation_status' => $data['validation_status'] ?? ($taxData['validation_status'] ?? $nextProfileState),
+                'current_status' => match ($normalizedUserStatus) {
+                    'active' => 'active',
+                    'blocked' => 'suspended',
+                    'inactive' => 'inactive',
+                    default => $taxData['current_status'] ?? null,
+                },
                 'admin_notes' => array_key_exists('admin_notes', $data)
                     ? $data['admin_notes']
                     : ($taxData['admin_notes'] ?? null),
