@@ -9,7 +9,7 @@ class TramoReserva extends Model
 {
     protected $table = 'reservation_legs';
 
-    protected $fillable = ['reservation_id', 'leg_order', 'origin', 'destination', 'departure_datetime', 'arrival_datetime', 'passengers', 'status'];
+    protected $fillable = ['reservation_id', 'leg_order', 'origin', 'origin_airport_id', 'destination', 'destination_airport_id', 'departure_datetime', 'arrival_datetime', 'passengers', 'status'];
 
     protected function casts(): array
     {
@@ -22,5 +22,15 @@ class TramoReserva extends Model
     public function reservation(): BelongsTo
     {
         return $this->belongsTo(Reserva::class);
+    }
+
+    public function originAirport(): BelongsTo
+    {
+        return $this->belongsTo(Aeropuerto::class, 'origin_airport_id');
+    }
+
+    public function destinationAirport(): BelongsTo
+    {
+        return $this->belongsTo(Aeropuerto::class, 'destination_airport_id');
     }
 }

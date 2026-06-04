@@ -3,6 +3,7 @@
 namespace App\Http\Controladores;
 
 use App\Modelos\Aeronave;
+use App\Modelos\Aeropuerto;
 use App\Modelos\DisponibilidadAeronave;
 use App\Modelos\DocumentoAeronave;
 use App\Modelos\ImagenAeronave;
@@ -48,6 +49,7 @@ class AeronaveControlador extends ControladorBase
                 'registration',
                 'capacity',
                 'base_airport',
+                'base_airport_id',
                 'range_km',
                 'speed_kmh',
                 'coverage',
@@ -82,7 +84,10 @@ class AeronaveControlador extends ControladorBase
                 'updated_at',
             ])
             ->with([
-                'provider:id,user_id,company_name,commercial_name',
+                'provider' => fn ($query) => $query
+                    ->select(['id', 'user_id', 'company_name', 'commercial_name'])
+                    ->withCount('aircraft'),
+                'baseAirport:id,icao,iata',
                 'images:id,aircraft_id,kind,title,image_url,is_main,visible_to_client,sort_order',
                 'availability:id,aircraft_id,start_datetime,end_datetime,status,notes',
                 'documents:id,aircraft_id,type,file_url,document_type,document_name,document_url,storage_disk,storage_path,thumbnail_path,thumbnail_url,expires_at,created_at,updated_at',
@@ -91,7 +96,7 @@ class AeronaveControlador extends ControladorBase
         $providerPlan = null;
 
         if ($request->user()->hasRole('provider') && ! $request->user()->hasRole('admin')) {
-            $query->where('provider_id', $request->user()->provider_id);
+            $query->where('provider_id', $request->user()->resolvedProviderId());
             $providerAircraftCount = $query->toBase()->getCountForPagination();
             $providerPlan = $request->user()->loadMissing('activeSuscripcion.plan')->activeSuscripcion?->plan;
         }
@@ -142,7 +147,7 @@ class AeronaveControlador extends ControladorBase
     {
         $this->authorizeProveedorAeronave($request, $aircraft);
 
-        $aircraft->update($this->normalizeAircraftInput($request->validate($this->rules(false, $aircraft))));
+        $aircraft->update($this->normalizeAircraftInput($request->validate($this->rules(false, $aircraft)), $aircraft));
 
         return $this->ok([
             'aircraft' => $this->formatAircraftPayload(
@@ -187,11 +192,18 @@ class AeronaveControlador extends ControladorBase
 
         $start = Carbon::parse($data['departure_datetime']);
         $end = $start->copy()->addHours(4);
+        $originAirport = $this->findAirportByCode($data['origin']);
 
-        $aircraft = Aeronave::with(['provider.user', 'images'])
+        $aircraft = Aeronave::with(['provider.user', 'images', 'baseAirport:id,icao,iata'])
             ->whereIn('status', ['active', 'trial_active'])
             ->where('capacity', '>=', $data['passengers'])
-            ->where('base_airport', $data['origin'])
+            ->where(function ($query) use ($data, $originAirport) {
+                $query->where('base_airport', $data['origin']);
+
+                if ($originAirport) {
+                    $query->orWhere('base_airport_id', $originAirport->id);
+                }
+            })
             ->whereHas('provider', fn ($query) => $query->where('approval_status', 'approved'))
             ->whereDoesntHave('availability', function ($query) use ($start, $end) {
                 $query->whereIn('status', ['occupied', 'blocked', 'maintenance'])
@@ -499,7 +511,7 @@ class AeronaveControlador extends ControladorBase
         $query = DisponibilidadAeronave::with('aircraft');
 
         if ($request->user()->hasRole('provider') && ! $request->user()->hasRole('admin')) {
-            $query->whereHas('aircraft', fn ($scope) => $scope->where('provider_id', $request->user()->provider?->id));
+            $query->whereHas('aircraft', fn ($scope) => $scope->where('provider_id', $request->user()->resolvedProviderId()));
         }
 
         return $this->ok(['availability' => $query->latest()->paginate(30)]);
@@ -712,7 +724,7 @@ class AeronaveControlador extends ControladorBase
         };
     }
 
-    private function normalizeAircraftInput(array $data): array
+    private function normalizeAircraftInput(array $data, ?Aeronave $aircraft = null): array
     {
         if (! array_key_exists('speed_kmh', $data) && array_key_exists('speed_knots', $data)) {
             $data['speed_kmh'] = (int) round(((float) $data['speed_knots']) * 1.852);
@@ -745,6 +757,7 @@ class AeronaveControlador extends ControladorBase
 
         if (array_key_exists('base_airport', $data)) {
             $data['base_airport'] = $this->normalizeNullableString($data['base_airport']);
+            $data['base_airport_id'] = $this->findAirportByCode($data['base_airport'])?->id;
         }
 
         if (array_key_exists('registration', $data)) {
@@ -811,7 +824,9 @@ class AeronaveControlador extends ControladorBase
     {
         $providerUser = $aircraft->provider?->user;
         $plan = $planOverride ?? $providerUser?->activeSuscripcion?->plan;
-        $providerAircraftCount = $providerAircraftCountOverride ?? ($aircraft->provider?->aircraft()->count() ?? 1);
+        $providerAircraftCount = $providerAircraftCountOverride
+            ?? $aircraft->provider?->aircraft_count
+            ?? ($aircraft->provider?->aircraft()->count() ?? 1);
         $monthlyBase = (float) ($plan?->price_monthly ?? $plan?->price_yearly ?? $plan?->price ?? 0);
         $monthlyPerAircraft = $providerAircraftCount > 0 && $monthlyBase > 0
             ? round($monthlyBase / $providerAircraftCount, 2)
@@ -826,6 +841,7 @@ class AeronaveControlador extends ControladorBase
 
         return [
             ...$aircraft->attributesToArray(),
+            'base_airport' => $aircraft->resolvedBaseAirportCode(),
             'year' => $aircraft->model_year,
             'climb_descent_minutes' => $aircraft->climb_descent_minutes ?: $this->resolveClimbDescentMinutesForCategory($aircraft->category),
             'amenities' => $this->parseAmenities($aircraft->amenities),
@@ -865,7 +881,7 @@ class AeronaveControlador extends ControladorBase
             return;
         }
 
-        abort_if($aircraft->provider_id !== $request->user()->provider_id, 403, 'No puedes gestionar esta aeronave.');
+        abort_if($aircraft->provider_id !== $request->user()->resolvedProviderId(), 403, 'No puedes gestionar esta aeronave.');
     }
 
     private function formatPublicAircraftPayload(Aeronave $aircraft): array
@@ -894,6 +910,7 @@ class AeronaveControlador extends ControladorBase
             'model' => $aircraft->model,
             'category' => $this->normalizeAircraftCategory($aircraft->category) ?? 'Cabina ejecutiva',
             'capacity' => $aircraft->capacity,
+            'base_airport' => $aircraft->resolvedBaseAirportCode(),
             'range_km' => $aircraft->range_km,
             'climb_descent_minutes' => $aircraft->climb_descent_minutes ?: $this->resolveClimbDescentMinutesForCategory($aircraft->category),
             'status' => $aircraft->status,
@@ -1232,5 +1249,19 @@ class AeronaveControlador extends ControladorBase
         }
 
         return $path;
+    }
+
+    private function findAirportByCode(?string $code): ?Aeropuerto
+    {
+        $normalizedCode = strtoupper(trim((string) $code));
+
+        if ($normalizedCode === '') {
+            return null;
+        }
+
+        return Aeropuerto::query()
+            ->where('icao', $normalizedCode)
+            ->orWhere('iata', $normalizedCode)
+            ->first();
     }
 }

@@ -2,6 +2,11 @@
 
 namespace App\Http\Controladores;
 
+use App\Enumeraciones\EstadoAeronave;
+use App\Enumeraciones\EstadoDisponibilidad;
+use App\Enumeraciones\EstadoProveedor;
+use App\Enumeraciones\EstadoSolicitudVuelo;
+use App\Modelos\Aeropuerto;
 use App\Modelos\Aeronave;
 use App\Modelos\SolicitudVuelo;
 use Carbon\Carbon;
@@ -49,9 +54,14 @@ class SolicitudVueloControlador extends ControladorBase
             $data['return_datetime'] = Carbon::parse($data['return_date'].' '.$data['return_time']);
         }
 
+        $originAirport = $this->findAirportByCode($data['origin']);
+        $destinationAirport = $this->findAirportByCode($data['destination']);
+
         $flightRequest = SolicitudVuelo::create($data + [
             'client_id' => $request->user()->id,
-            'status' => 'pending',
+            'origin_airport_id' => $originAirport?->id,
+            'destination_airport_id' => $destinationAirport?->id,
+            'status' => EstadoSolicitudVuelo::Pending->value,
         ]);
 
         $this->matchAeronave($flightRequest);
@@ -97,12 +107,26 @@ class SolicitudVueloControlador extends ControladorBase
         $end = $start->copy()->addHours(4);
 
         $aircraft = Aeronave::with('provider')
-            ->where('status', 'active')
+            ->where('status', EstadoAeronave::Active->value)
             ->where('capacity', '>=', $flightRequest->passengers)
-            ->where('base_airport', $flightRequest->origin)
-            ->whereHas('provider', fn ($query) => $query->where('approval_status', 'approved'))
+            ->where(function ($query) use ($flightRequest) {
+                $originCode = $flightRequest->resolvedOriginCode();
+
+                if ($flightRequest->origin_airport_id) {
+                    $query->where('base_airport_id', $flightRequest->origin_airport_id);
+                }
+
+                if ($originCode) {
+                    $query->orWhere('base_airport', $originCode);
+                }
+            })
+            ->whereHas('provider', fn ($query) => $query->where('approval_status', EstadoProveedor::Approved->value))
             ->whereDoesntHave('availability', function ($query) use ($start, $end) {
-                $query->whereIn('status', ['occupied', 'blocked', 'maintenance'])
+                $query->whereIn('status', [
+                    EstadoDisponibilidad::Occupied->value,
+                    EstadoDisponibilidad::Blocked->value,
+                    EstadoDisponibilidad::Maintenance->value,
+                ])
                     ->where('start_datetime', '<', $end)
                     ->where('end_datetime', '>', $start);
             })
@@ -120,7 +144,25 @@ class SolicitudVueloControlador extends ControladorBase
         }
 
         if ($aircraft->isNotEmpty()) {
-            $flightRequest->update(['status' => 'matched']);
+            $flightRequest->update(['status' => EstadoSolicitudVuelo::Matched->value]);
         }
+    }
+
+    private function findAirportByCode(string $code): ?Aeropuerto
+    {
+        $normalizedCode = strtoupper(trim($code));
+
+        if ($normalizedCode === '') {
+            return null;
+        }
+
+        return Aeropuerto::query()
+            ->where(function ($query) use ($normalizedCode) {
+                $query->where('icao', $normalizedCode)
+                    ->orWhere('iata', $normalizedCode)
+                    ->orWhere('icao_code', $normalizedCode)
+                    ->orWhere('iata_code', $normalizedCode);
+            })
+            ->first();
     }
 }

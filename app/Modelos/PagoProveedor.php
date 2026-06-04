@@ -3,6 +3,7 @@
 namespace App\Modelos;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class PagoProveedor extends Model
 {
@@ -16,5 +17,15 @@ class PagoProveedor extends Model
             'released_at' => 'datetime',
             'paid_at' => 'datetime',
         ];
+    }
+
+    public function provider(): BelongsTo
+    {
+        return $this->belongsTo(Proveedor::class, 'provider_id');
+    }
+
+    public function commission(): BelongsTo
+    {
+        return $this->belongsTo(Comision::class, 'commission_id');
     }
 }

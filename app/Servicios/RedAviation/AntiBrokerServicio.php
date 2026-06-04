@@ -70,7 +70,12 @@ class AntiBrokerServicio
             'new_values' => ['message_sanitized' => $revision['sanitized'], 'flags' => $revision['flags']],
         ]);
 
-        $admin = Usuario::where('role', Usuario::ROLE_ADMIN)->first();
+        $admin = Usuario::query()
+            ->where(function ($query) {
+                $query->where('role', Usuario::ROLE_ADMIN)
+                    ->orWhereHas('roles', fn ($roles) => $roles->where('code', Usuario::ROLE_ADMIN));
+            })
+            ->first();
         if ($admin) {
             Notificacion::create([
                 'user_id' => $admin->id,

@@ -265,9 +265,23 @@ class VisibilidadServicio
                 'contract_status' => $reservation->contract?->status,
                 'payment_status' => $solicitud->payment_status ?? $latestPayment?->status,
             ] : null,
+            'crew_id' => $operation?->sobrecargo_user_id,
+            'sobrecargo_id' => $operation?->sobrecargo_user_id,
+            'crew_name' => $operation?->sobrecargo?->name,
+            'sobrecargo' => $operation?->sobrecargo ? [
+                'id' => $operation->sobrecargo->id,
+                'name' => $operation->sobrecargo->name,
+            ] : null,
+            'crew_status' => $operation?->crew_status,
             'operation' => $operation ? [
                 'id' => $operation->id,
                 'status' => $operation->status,
+                'sobrecargo_user_id' => $operation->sobrecargo_user_id,
+                'crew_status' => $operation->crew_status,
+                'sobrecargo' => $operation->sobrecargo ? [
+                    'id' => $operation->sobrecargo->id,
+                    'name' => $operation->sobrecargo->name,
+                ] : null,
             ] : null,
             'client' => $client ? [
                 'id' => $client->id,

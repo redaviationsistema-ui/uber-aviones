@@ -8,6 +8,6 @@ class RoleServicio
 {
     public function hasRole(Usuario $user, string $role): bool
     {
-        return $user->role === $role;
+        return $user->hasRole($role);
     }
 }

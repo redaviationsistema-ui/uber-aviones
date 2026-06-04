@@ -22,6 +22,16 @@ class ChatProtegido extends Model
         return $this->belongsTo(Proveedor::class, 'provider_id');
     }
 
+    public function client(): BelongsTo
+    {
+        return $this->belongsTo(Usuario::class, 'client_id');
+    }
+
+    public function admin(): BelongsTo
+    {
+        return $this->belongsTo(Usuario::class, 'admin_id');
+    }
+
     public function mensajes(): HasMany
     {
         return $this->hasMany(MensajeChat::class, 'chat_id');

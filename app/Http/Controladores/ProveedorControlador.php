@@ -37,26 +37,38 @@ class ProveedorControlador extends ControladorBase
         $user = $request->user()->loadMissing('provider', 'profile');
         $provider = $user->provider;
         abort_if(! $provider, 404, 'Proveedor no encontrado.');
+        $providerId = $user->resolvedProviderId();
+        $aircraftCounts = Aeronave::query()
+            ->where('provider_id', $providerId)
+            ->selectRaw('status, COUNT(*) as total')
+            ->groupBy('status')
+            ->pluck('total', 'status');
 
         return $this->ok([
             'provider' => $this->formatCompanyPayload($user),
             'metrics' => [
-                'aircraft' => $provider->aircraft()->count(),
-                'active_aircraft' => $provider->aircraft()->whereIn('status', ['active', 'trial_active'])->count(),
-                'inactive_aircraft' => $provider->aircraft()->whereIn('status', ['inactive', 'blocked', 'archived', 'suspended'])->count(),
-                'pending_requests' => SolicitudVuelo::whereHas('matches', function ($query) use ($provider) {
-                    $query->where('provider_id', $provider->id)
-                        ->whereIn('status', ['pending', 'sent_to_provider']);
-                })->count(),
-                'active_operations' => Operacion::where('provider_id', $provider->id)
+                'aircraft' => (int) $aircraftCounts->sum(),
+                'active_aircraft' => (int) $aircraftCounts->only(['active', 'trial_active'])->sum(),
+                'inactive_aircraft' => (int) $aircraftCounts->only(['inactive', 'blocked', 'archived', 'suspended'])->sum(),
+                'pending_requests' => (int) DB::table('request_matches')
+                    ->where('provider_id', $providerId)
+                    ->whereIn('status', ['pending', 'sent_to_provider'])
+                    ->distinct()
+                    ->count('flight_request_id'),
+                'active_operations' => Operacion::where('provider_id', $providerId)
                     ->whereNotIn('status', ['finalizada', 'cancelada', 'completed', 'cancelled'])
                     ->count(),
-                'open_incidents' => LineaTiempoOperacion::whereHas('operacion', fn ($query) => $query->where('provider_id', $provider->id))
-                    ->where('status', 'incidencia')
+                'open_incidents' => (int) DB::table('operation_timeline')
+                    ->join('operations', 'operations.id', '=', 'operation_timeline.operation_id')
+                    ->where('operations.provider_id', $providerId)
+                    ->where('operation_timeline.status', 'incidencia')
                     ->count(),
-                'pending_quotes' => $provider->quotes()->where('status', 'pending')->count(),
-                'reservations' => $provider->reservations()->count(),
-                'pending_payments' => PagoProveedor::where('provider_id', $provider->id)
+                'pending_quotes' => (int) DB::table('quotes')
+                    ->where('provider_id', $providerId)
+                    ->where('status', 'pending')
+                    ->count(),
+                'reservations' => Reserva::where('provider_id', $providerId)->count(),
+                'pending_payments' => PagoProveedor::where('provider_id', $providerId)
                     ->whereIn('status', ['pending', 'held'])
                     ->count(),
             ],
@@ -208,7 +220,7 @@ class ProveedorControlador extends ControladorBase
 
     public function requests(Request $request)
     {
-        $providerId = $request->user()->provider_id;
+        $providerId = $request->user()->resolvedProviderId();
         abort_if(! $providerId, 404, 'Proveedor no encontrado.');
 
         $perPage = min(max((int) $request->integer('per_page', 20), 1), 100);

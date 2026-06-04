@@ -42,8 +42,23 @@ class Pago extends Model
         return $this->belongsTo(Reserva::class);
     }
 
+    public function user(): BelongsTo
+    {
+        return $this->belongsTo(Usuario::class, 'user_id');
+    }
+
     public function flightRequest(): BelongsTo
     {
         return $this->belongsTo(SolicitudVuelo::class, 'flight_request_id');
+    }
+
+    public function subscription(): BelongsTo
+    {
+        return $this->belongsTo(Suscripcion::class, 'subscription_id');
+    }
+
+    public function paymentMethod(): BelongsTo
+    {
+        return $this->belongsTo(MetodoPago::class, 'payment_method_id');
     }
 }

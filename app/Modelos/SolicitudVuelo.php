@@ -20,7 +20,9 @@ class SolicitudVuelo extends Model
         'assigned_aircraft_id',
         'assigned_aircraft_model',
         'origin',
+        'origin_airport_id',
         'destination',
+        'destination_airport_id',
         'departure_datetime',
         'return_datetime',
         'departure_date',
@@ -83,6 +85,16 @@ class SolicitudVuelo extends Model
         return $this->belongsTo(Aeronave::class, 'assigned_aircraft_id');
     }
 
+    public function originAirport(): BelongsTo
+    {
+        return $this->belongsTo(Aeropuerto::class, 'origin_airport_id');
+    }
+
+    public function destinationAirport(): BelongsTo
+    {
+        return $this->belongsTo(Aeropuerto::class, 'destination_airport_id');
+    }
+
     public function matches(): HasMany
     {
         return $this->hasMany(CoincidenciaSolicitud::class, 'flight_request_id');
@@ -116,5 +128,35 @@ class SolicitudVuelo extends Model
     public function chatsProtegidos(): HasMany
     {
         return $this->hasMany(ChatProtegido::class, 'flight_request_id');
+    }
+
+    public function resolvedOriginCode(): ?string
+    {
+        if ($this->relationLoaded('originAirport')) {
+            return $this->originAirport?->icao ?: $this->originAirport?->iata ?: $this->origin;
+        }
+
+        if ($this->origin_airport_id) {
+            $airport = $this->originAirport()->first(['icao', 'iata']);
+
+            return $airport?->icao ?: $airport?->iata ?: $this->origin;
+        }
+
+        return $this->origin;
+    }
+
+    public function resolvedDestinationCode(): ?string
+    {
+        if ($this->relationLoaded('destinationAirport')) {
+            return $this->destinationAirport?->icao ?: $this->destinationAirport?->iata ?: $this->destination;
+        }
+
+        if ($this->destination_airport_id) {
+            $airport = $this->destinationAirport()->first(['icao', 'iata']);
+
+            return $airport?->icao ?: $airport?->iata ?: $this->destination;
+        }
+
+        return $this->destination;
     }
 }

@@ -428,7 +428,10 @@ class AdminControlador extends ControladorBase
                     'operations.id',
                     'operations.flight_request_id',
                     'operations.status',
+                    'operations.sobrecargo_user_id',
+                    'operations.crew_status',
                 ]),
+                'latestOperation.sobrecargo:id,name',
             ])
             ->latest()
             ->paginate($perPage);
@@ -514,7 +517,10 @@ class AdminControlador extends ControladorBase
                     'operations.id',
                     'operations.flight_request_id',
                     'operations.status',
+                    'operations.sobrecargo_user_id',
+                    'operations.crew_status',
                 ]),
+                'latestOperation.sobrecargo:id,name',
             ])
             ->latest()
             ->limit(120)
@@ -560,20 +566,28 @@ class AdminControlador extends ControladorBase
             'sobrecargo_user_id' => ['nullable', 'exists:users,id'],
         ]);
 
+        $hasAssignedCrew = ! empty($data['sobrecargo_user_id']);
+        $nextWorkflowStatus = $hasAssignedCrew
+            ? 'tracking_live'
+            : ($flightRequest->workflow_status ?: 'operador_asignado');
+        $nextOperationStatus = $hasAssignedCrew ? 'tracking_live' : 'operador_asignado';
+
         $operacion = Operacion::updateOrCreate(
             ['flight_request_id' => $flightRequest->id],
             [
                 'provider_id' => $data['provider_id'],
                 'aircraft_id' => $data['aircraft_id'],
                 'sobrecargo_user_id' => $data['sobrecargo_user_id'] ?? null,
-                'status' => 'operador_asignado',
+                'status' => $nextOperationStatus,
             ]
         );
 
         $operacion->timeline()->create([
-            'status' => 'operador_asignado',
+            'status' => $nextOperationStatus,
             'title' => 'Asignacion manual',
-            'description' => 'Admin Red Aviation realizo el matching manual.',
+            'description' => $hasAssignedCrew
+                ? 'Admin Red Aviation asigno proveedor, aeronave y sobrecargo. La operacion paso a tracking en vivo.'
+                : 'Admin Red Aviation realizo el matching manual.',
             'created_by' => $request->user()->id,
         ]);
 
@@ -581,7 +595,7 @@ class AdminControlador extends ControladorBase
         $visibilityPayload = $flightRequest->visibility_payload ?? [];
 
         $flightRequest->update([
-            'workflow_status' => 'operador_asignado',
+            'workflow_status' => $nextWorkflowStatus,
             'assigned_provider_id' => $data['provider_id'],
             'assigned_aircraft_id' => $data['aircraft_id'],
             'assigned_aircraft_model' => $aircraft?->model,
@@ -592,6 +606,8 @@ class AdminControlador extends ControladorBase
                 'aircraft_model' => $aircraft?->model,
                 'aircraft_category' => $aircraft?->category,
                 'aircraft_capacity' => $aircraft?->capacity,
+                'operational_status' => $nextWorkflowStatus,
+                'operational_ready' => $hasAssignedCrew,
             ],
         ]);
 
@@ -625,7 +641,23 @@ class AdminControlador extends ControladorBase
             $adminNote = $data['admin_note'] ?? '';
             $contractStatus = null;
             $paymentStatus = $data['payment_status'] ?? $flightRequest->payment_status;
-            $normalizedWorkflowStatus = Str::lower(trim((string) ($data['workflow_status'] ?? $flightRequest->workflow_status ?? '')));
+            $operation = Operacion::query()
+                ->where('flight_request_id', $flightRequest->id)
+                ->latest('id')
+                ->first();
+
+            $requestedWorkflowStatus = $data['workflow_status'] ?? $flightRequest->workflow_status;
+            $normalizedWorkflowStatus = Str::lower(trim((string) ($requestedWorkflowStatus ?? '')));
+            $operationHasAssignedCrew = (bool) $operation?->sobrecargo_user_id;
+
+            if (
+                $operationHasAssignedCrew
+                && in_array($normalizedWorkflowStatus, ['payment_confirmed', 'pago confirmado', 'flight_confirmed', 'vuelo confirmado', 'tracking_live', 'tracking en vivo'], true)
+            ) {
+                $requestedWorkflowStatus = 'tracking_live';
+                $normalizedWorkflowStatus = 'tracking_live';
+            }
+
             $nextRequestStatus = $this->resolveFlightRequestStatusForWorkflow(
                 $data['status'] ?? null,
                 $normalizedWorkflowStatus,
@@ -634,11 +666,15 @@ class AdminControlador extends ControladorBase
 
             $flightRequest->fill([
                 'status' => $nextRequestStatus,
-                'workflow_status' => $data['workflow_status'] ?? $flightRequest->workflow_status,
+                'workflow_status' => $requestedWorkflowStatus ?? $flightRequest->workflow_status,
                 'payment_status' => $data['payment_status'] ?? $flightRequest->payment_status,
                 'notes' => $data['notes'] ?? $flightRequest->notes,
                 'visibility_payload' => [
                     ...$visibilityPayload,
+                    'operational_status' => $requestedWorkflowStatus ?? ($visibilityPayload['operational_status'] ?? null),
+                    'operational_ready' => $operationHasAssignedCrew
+                        ? true
+                        : (bool) ($visibilityPayload['operational_ready'] ?? false),
                     'admin_flow' => [
                         'state' => $adminFlowState,
                         'reason' => $adminReason,
@@ -659,8 +695,8 @@ class AdminControlador extends ControladorBase
             if ($reservation) {
                 $reservationUpdates = [];
 
-                if (! empty($data['workflow_status'])) {
-                    $reservationUpdates['status'] = match ($data['workflow_status']) {
+                if ($requestedWorkflowStatus) {
+                    $reservationUpdates['status'] = match ($requestedWorkflowStatus) {
                         'cancelada', 'cancelled' => 'cancelled',
                         'pago confirmado', 'payment_confirmed' => 'confirmed',
                         'tracking en vivo', 'tracking_live', 'vuelo confirmado', 'flight_confirmed' => 'confirmed',
@@ -712,14 +748,13 @@ class AdminControlador extends ControladorBase
                 $paymentStatus ??= $reservation->latestPayment?->status ?? $reservation->status;
             }
 
-            $operation = Operacion::query()
-                ->where('flight_request_id', $flightRequest->id)
-                ->latest('id')
-                ->first();
+            if ($operation && $requestedWorkflowStatus) {
+                if (in_array($normalizedWorkflowStatus, ['tracking_live', 'tracking en vivo'], true)) {
+                    $operation->update(['status' => 'tracking_live']);
+                }
 
-            if ($operation && ! empty($data['workflow_status'])) {
                 $operation->timeline()->create([
-                    'status' => $data['workflow_status'],
+                    'status' => $requestedWorkflowStatus,
                     'title' => 'Actualizacion manual del flujo',
                     'description' => $adminNote ?: 'Admin actualizo el flujo de la solicitud.',
                     'created_by' => $request->user()->id,

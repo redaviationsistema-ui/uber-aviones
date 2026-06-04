@@ -22,6 +22,7 @@ class Aeronave extends Model
         'registration',
         'capacity',
         'base_airport',
+        'base_airport_id',
         'range_km',
         'speed_kmh',
         'coverage',
@@ -86,6 +87,11 @@ class Aeronave extends Model
         return $this->belongsTo(Proveedor::class, 'provider_id');
     }
 
+    public function baseAirport(): BelongsTo
+    {
+        return $this->belongsTo(Aeropuerto::class, 'base_airport_id');
+    }
+
     public function availability(): HasMany
     {
         return $this->hasMany(DisponibilidadAeronave::class, 'aircraft_id');
@@ -104,5 +110,20 @@ class Aeronave extends Model
     public function suscripcionesAeronave(): HasMany
     {
         return $this->hasMany(SuscripcionAeronave::class, 'aircraft_id');
+    }
+
+    public function resolvedBaseAirportCode(): ?string
+    {
+        if ($this->relationLoaded('baseAirport')) {
+            return $this->baseAirport?->icao ?: $this->baseAirport?->iata ?: $this->base_airport;
+        }
+
+        if ($this->base_airport_id) {
+            $airport = $this->baseAirport()->first(['icao', 'iata']);
+
+            return $airport?->icao ?: $airport?->iata ?: $this->base_airport;
+        }
+
+        return $this->base_airport;
     }
 }

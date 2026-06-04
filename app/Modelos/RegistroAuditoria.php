@@ -3,6 +3,7 @@
 namespace App\Modelos;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class RegistroAuditoria extends Model
 {
@@ -16,5 +17,10 @@ class RegistroAuditoria extends Model
             'old_values' => 'array',
             'new_values' => 'array',
         ];
+    }
+
+    public function user(): BelongsTo
+    {
+        return $this->belongsTo(Usuario::class, 'user_id');
     }
 }

@@ -2,6 +2,7 @@
 
 namespace App\Http\Controladores;
 
+use App\Modelos\Aeropuerto;
 use App\Modelos\IdentityVerification;
 use App\Modelos\TokenApi;
 use App\Modelos\Proveedor;
@@ -79,6 +80,7 @@ class AutenticacionControlador extends ControladorBase
         $birthDate = $data['birth_date'] ?? $data['birthDate'] ?? null;
         $baseAirport = $data['base_airport'] ?? $data['base'] ?? null;
         $baseCity = $data['city'] ?? $data['base'] ?? null;
+        $resolvedBaseAirport = $this->findAirportByCode($baseAirport);
 
         $user = Usuario::create($data + [
             'role' => $persistedRole,
@@ -119,6 +121,7 @@ class AutenticacionControlador extends ControladorBase
                 'ine_back_path' => $ineBackPath,
                 'city' => $baseCity,
                 'base_airport' => $baseAirport,
+                'base_airport_id' => $resolvedBaseAirport?->id,
             ]
         );
 
@@ -192,7 +195,8 @@ class AutenticacionControlador extends ControladorBase
         $user = $request->user()->loadMissing([
             'provider:id,user_id,company_name,commercial_name,approval_status,jet_a_price,margin_percent,fixed_fee,notes',
             'ownedProvider:id,user_id,company_name,commercial_name,approval_status,jet_a_price,margin_percent,fixed_fee,notes',
-            'profile:id,user_id,company_name,business_type,country,city,base_airport,address,avatar,avatar_url,tax_data,birth_date,nationality,document_type,document_number,document_expiration,identity_validation_required,ine_curp,ine_cic,ine_ocr,ine_scan_raw,ine_scan_status,ine_front_path,ine_back_path',
+            'profile:id,user_id,company_name,business_type,country,city,base_airport,base_airport_id,address,avatar,avatar_url,tax_data,birth_date,nationality,document_type,document_number,document_expiration,identity_validation_required,ine_curp,ine_cic,ine_ocr,ine_scan_raw,ine_scan_status,ine_front_path,ine_back_path',
+            'profile.baseAirport:id,icao,iata,name',
             'roles:id,code,name',
             'demo:id,user_id,status,started_at,expires_at',
             'activeSuscripcion:id,user_id,plan_id,status,started_at,expires_at',
@@ -208,8 +212,8 @@ class AutenticacionControlador extends ControladorBase
                 'phone' => $user->phone,
                 'role' => $user->role,
                 'operational_role' => $user->operational_role,
-                'provider_id' => $user->provider_id,
-                'proveedor_id' => $user->provider_id,
+                'provider_id' => $user->resolvedProviderId(),
+                'proveedor_id' => $user->resolvedProviderId(),
                 'status' => $user->status,
                 'identity_verification_status' => $user->identity_verification_status,
                 'identity_verification_message' => $user->identity_verification_message,
@@ -243,6 +247,20 @@ class AutenticacionControlador extends ControladorBase
             'access' => $user->accessStatus(),
             'login_context' => $user->loginContext(),
         ]);
+    }
+
+    private function findAirportByCode(?string $code): ?Aeropuerto
+    {
+        $normalizedCode = strtoupper(trim((string) $code));
+
+        if ($normalizedCode === '') {
+            return null;
+        }
+
+        return Aeropuerto::query()
+            ->where('icao', $normalizedCode)
+            ->orWhere('iata', $normalizedCode)
+            ->first();
     }
 
     public function redirectDashboard(Request $request)

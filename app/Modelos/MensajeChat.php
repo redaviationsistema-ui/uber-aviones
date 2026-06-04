@@ -22,4 +22,14 @@ class MensajeChat extends Model
     {
         return $this->belongsTo(ChatProtegido::class, 'chat_id');
     }
+
+    public function sender(): BelongsTo
+    {
+        return $this->belongsTo(Usuario::class, 'sender_id');
+    }
+
+    public function flags()
+    {
+        return $this->hasMany(BanderaAntiBroker::class, 'message_id');
+    }
 }

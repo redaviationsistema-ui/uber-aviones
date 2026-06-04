@@ -3,6 +3,7 @@
 namespace App\Modelos;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Plan extends Model
 {
@@ -43,5 +44,15 @@ class Plan extends Model
             'is_enterprise' => 'boolean',
             'is_active' => 'boolean',
         ];
+    }
+
+    public function subscriptions(): HasMany
+    {
+        return $this->hasMany(Suscripcion::class, 'plan_id');
+    }
+
+    public function aircraftSubscriptions(): HasMany
+    {
+        return $this->hasMany(SuscripcionAeronave::class, 'plan_id');
     }
 }

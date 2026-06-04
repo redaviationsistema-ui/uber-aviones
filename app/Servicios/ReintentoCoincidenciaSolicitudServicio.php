@@ -2,6 +2,11 @@
 
 namespace App\Servicios;
 
+use App\Enumeraciones\EstadoAeronave;
+use App\Enumeraciones\EstadoDisponibilidad;
+use App\Enumeraciones\EstadoProveedor;
+use App\Enumeraciones\EstadoSolicitudVuelo;
+use App\Enumeraciones\EstadoWorkflowSolicitud;
 use App\Modelos\Aeronave;
 use App\Modelos\SolicitudVuelo;
 use Carbon\Carbon;
@@ -18,8 +23,8 @@ class ReintentoCoincidenciaSolicitudServicio
 
         if ($acceptedCount > 0) {
             $flightRequest->update([
-                'status' => 'matched',
-                'workflow_status' => 'aceptada',
+                'status' => EstadoSolicitudVuelo::Matched->value,
+                'workflow_status' => EstadoWorkflowSolicitud::Aceptada->value,
             ]);
 
             return [
@@ -36,8 +41,8 @@ class ReintentoCoincidenciaSolicitudServicio
         if ($pendingCount > 0) {
             $visibilityPayload = $flightRequest->visibility_payload ?? [];
             $flightRequest->update([
-                'status' => 'matched',
-                'workflow_status' => 'buscando_operador',
+                'status' => EstadoSolicitudVuelo::Matched->value,
+                'workflow_status' => EstadoWorkflowSolicitud::BuscandoOperador->value,
                 'assigned_provider_id' => null,
                 'assigned_aircraft_id' => null,
                 'assigned_aircraft_model' => null,
@@ -63,8 +68,8 @@ class ReintentoCoincidenciaSolicitudServicio
         if ($newMatches > 0) {
             $visibilityPayload = $flightRequest->visibility_payload ?? [];
             $flightRequest->update([
-                'status' => 'matched',
-                'workflow_status' => 'buscando_operador',
+                'status' => EstadoSolicitudVuelo::Matched->value,
+                'workflow_status' => EstadoWorkflowSolicitud::BuscandoOperador->value,
                 'assigned_provider_id' => null,
                 'assigned_aircraft_id' => null,
                 'assigned_aircraft_model' => null,
@@ -87,8 +92,8 @@ class ReintentoCoincidenciaSolicitudServicio
 
         $visibilityPayload = $flightRequest->visibility_payload ?? [];
         $flightRequest->update([
-            'status' => 'pending',
-            'workflow_status' => 'sin_opciones_disponibles',
+            'status' => EstadoSolicitudVuelo::Pending->value,
+            'workflow_status' => EstadoWorkflowSolicitud::SinOpcionesDisponibles->value,
             'assigned_provider_id' => null,
             'assigned_aircraft_id' => null,
             'assigned_aircraft_model' => null,
@@ -122,17 +127,31 @@ class ReintentoCoincidenciaSolicitudServicio
             ->values();
 
         $query = Aeronave::with('provider')
-            ->where('status', 'active')
+            ->where('status', EstadoAeronave::Active->value)
             ->where('capacity', '>=', $flightRequest->passengers)
-            ->whereHas('provider', fn ($scope) => $scope->where('approval_status', 'approved'))
+            ->whereHas('provider', fn ($scope) => $scope->where('approval_status', EstadoProveedor::Approved->value))
             ->whereDoesntHave('availability', function ($scope) use ($start, $end) {
-                $scope->whereIn('status', ['occupied', 'blocked', 'maintenance'])
+                $scope->whereIn('status', [
+                    EstadoDisponibilidad::Occupied->value,
+                    EstadoDisponibilidad::Blocked->value,
+                    EstadoDisponibilidad::Maintenance->value,
+                ])
                     ->where('start_datetime', '<', $end)
                     ->where('end_datetime', '>', $start);
             });
 
-        if ($flightRequest->origin) {
-            $query->where('base_airport', $flightRequest->origin);
+        if ($flightRequest->origin_airport_id || $flightRequest->origin) {
+            $originCode = $flightRequest->resolvedOriginCode();
+
+            $query->where(function ($scope) use ($flightRequest, $originCode) {
+                if ($flightRequest->origin_airport_id) {
+                    $scope->where('base_airport_id', $flightRequest->origin_airport_id);
+                }
+
+                if ($originCode) {
+                    $scope->orWhere('base_airport', $originCode);
+                }
+            });
         }
 
         if ($existingAircraftIds->isNotEmpty()) {

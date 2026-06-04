@@ -42,5 +42,9 @@ class DocumentoAeronave extends Model
     {
         return $this->belongsTo(Aeronave::class);
     }
-}
 
+    public function provider(): BelongsTo
+    {
+        return $this->belongsTo(Proveedor::class, 'provider_id');
+    }
+}

@@ -345,8 +345,8 @@ class Usuario extends Authenticatable
             'operational_role' => $this->operational_role,
             'effective_role' => $this->effectiveRole(),
             'roles' => $this->roleCodes(),
-            'provider_id' => $this->provider_id,
-            'proveedor_id' => $this->provider_id,
+            'provider_id' => $this->resolvedProviderId(),
+            'proveedor_id' => $this->resolvedProviderId(),
             'status' => $this->status,
             'subscription_status' => $this->resolvedSubscriptionStatus(),
             'plan_id' => $this->resolvedPlanId(),
@@ -371,7 +371,7 @@ class Usuario extends Authenticatable
 
     public function getProveedorIdAttribute(): ?int
     {
-        return $this->provider_id;
+        return $this->resolvedProviderId();
     }
 
     public function getBiometricSelfieUrlAttribute(): ?string
@@ -381,5 +381,18 @@ class Usuario extends Authenticatable
         }
 
         return Storage::disk('public')->url($this->biometric_selfie_path);
+    }
+
+    public function resolvedProviderId(): ?int
+    {
+        if ($this->provider_id) {
+            return (int) $this->provider_id;
+        }
+
+        if ($this->relationLoaded('ownedProvider')) {
+            return $this->ownedProvider?->id;
+        }
+
+        return $this->ownedProvider()->value('id');
     }
 }

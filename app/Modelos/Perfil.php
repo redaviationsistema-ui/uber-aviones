@@ -30,6 +30,7 @@ class Perfil extends Model
         'country',
         'city',
         'base_airport',
+        'base_airport_id',
         'address',
         'avatar',
         'avatar_url',
@@ -48,5 +49,10 @@ class Perfil extends Model
     public function user(): BelongsTo
     {
         return $this->belongsTo(Usuario::class, 'user_id');
+    }
+
+    public function baseAirport(): BelongsTo
+    {
+        return $this->belongsTo(Aeropuerto::class, 'base_airport_id');
     }
 }
