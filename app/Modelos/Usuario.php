@@ -118,8 +118,9 @@ class Usuario extends Authenticatable
     public function activeSuscripcion(): HasOne
     {
         return $this->hasOne(Suscripcion::class, 'user_id')
-            ->where('status', 'active')
-            ->where('expires_at', '>', now())
+            ->select('subscriptions.*')
+            ->where('subscriptions.status', 'active')
+            ->where('subscriptions.expires_at', '>', now())
             ->latestOfMany();
     }
 
@@ -151,6 +152,11 @@ class Usuario extends Authenticatable
     public function identityVerifications(): HasMany
     {
         return $this->hasMany(IdentityVerification::class, 'user_id');
+    }
+
+    public function disponibilidadesSobrecargo(): HasMany
+    {
+        return $this->hasMany(SobrecargoDisponibilidad::class, 'sobrecargo_id');
     }
 
     public function hasPremiumAccess(): bool
@@ -391,6 +397,16 @@ class Usuario extends Authenticatable
 
         if ($this->relationLoaded('ownedProvider')) {
             return $this->ownedProvider?->id;
+        }
+
+        $canResolveOwnedProvider = in_array(self::ROLE_PROVIDER, [$this->role, $this->operational_role], true);
+
+        if (! $canResolveOwnedProvider && $this->relationLoaded('roles')) {
+            $canResolveOwnedProvider = $this->hasRole(self::ROLE_PROVIDER);
+        }
+
+        if (! $canResolveOwnedProvider) {
+            return null;
         }
 
         return $this->ownedProvider()->value('id');

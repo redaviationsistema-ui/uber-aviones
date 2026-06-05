@@ -18,6 +18,12 @@ use Illuminate\Support\Facades\Schema;
 
 class ClienteControlador extends ControladorBase
 {
+    private const DEFAULT_CLIENT_AIRCRAFT_PAGE_SIZE = 18;
+    private const MAX_CLIENT_AIRCRAFT_PAGE_SIZE = 36;
+    private const DEFAULT_CLIENT_QUOTES_LIMIT = 12;
+    private const DEFAULT_CLIENT_FLIGHT_REQUESTS_PAGE_SIZE = 10;
+    private const MAX_CLIENT_FLIGHT_REQUESTS_PAGE_SIZE = 25;
+
     private const TIME_MODE_DIRECT = 'direct';
     private const TIME_MODE_DIRECT_PLUS_CLIMB = 'direct_plus_climb';
     private const TIME_MODE_OPERATIONAL = 'operational';
@@ -108,12 +114,35 @@ class ClienteControlador extends ControladorBase
             'origin' => ['nullable', 'string', 'max:20'],
             'base_airport' => ['nullable', 'string', 'max:20'],
             'passengers' => ['nullable', 'integer', 'min:1'],
+            'per_page' => ['nullable', 'integer', 'min:1', 'max:'.self::MAX_CLIENT_AIRCRAFT_PAGE_SIZE],
         ]);
 
         $origin = strtoupper(trim((string) ($data['origin'] ?? $data['base_airport'] ?? '')));
         $passengers = (int) ($data['passengers'] ?? 0);
+        $perPage = (int) ($data['per_page'] ?? self::DEFAULT_CLIENT_AIRCRAFT_PAGE_SIZE);
 
-        $aircraft = Aeronave::with(['images', 'provider'])
+        $aircraft = Aeronave::query()
+            ->select([
+                'id',
+                'provider_id',
+                'model',
+                'manufacturer',
+                'registration',
+                'capacity',
+                'category',
+                'range_km',
+                'base_airport',
+                'hourly_rate',
+                'minimum_hours',
+                'climb_descent_minutes',
+                'overnight_fee',
+                'currency',
+                'status',
+            ])
+            ->with([
+                'images:id,aircraft_id,kind,title,image_url,is_main,sort_order,visible_to_client',
+                'provider:id,company_name,commercial_name,jet_a_price',
+            ])
             ->whereIn('status', ['active', 'trial_active', 'aprobada', 'available', 'disponible'])
             ->when($passengers > 0, fn ($query) => $query->where('capacity', '>=', $passengers))
             ->when($origin !== '', function ($query) use ($origin) {
@@ -124,13 +153,20 @@ class ClienteControlador extends ControladorBase
             })
             ->orderByRaw('upper(coalesce(base_airport, \'\')) asc')
             ->orderByRaw('coalesce(hourly_rate, 0) asc')
-            ->get()
-            ->values();
+            ->paginate($perPage);
 
         return $this->ok([
-            'aircraft' => $aircraft->map(fn (Aeronave $aircraft) => $this->aircraftPreviewPayload($aircraft))->values(),
+            'aircraft' => $aircraft->getCollection()->map(
+                fn (Aeronave $aircraft) => $this->aircraftPreviewPayload($aircraft)
+            )->values(),
             'origin' => $origin ?: null,
             'passengers' => $passengers ?: null,
+            'meta' => [
+                'current_page' => $aircraft->currentPage(),
+                'per_page' => $aircraft->perPage(),
+                'total' => $aircraft->total(),
+                'last_page' => $aircraft->lastPage(),
+            ],
         ]);
     }
 
@@ -164,6 +200,7 @@ class ClienteControlador extends ControladorBase
             'aircraft_type' => ['nullable', 'string', 'max:100'],
             'requirements' => ['nullable', 'array'],
             'notes' => ['nullable', 'string'],
+            'limit' => ['nullable', 'integer', 'min:1', 'max:24'],
         ]);
 
         $originAirport = $this->findActiveAirport($data['origin']);
@@ -179,6 +216,7 @@ class ClienteControlador extends ControladorBase
         $distanceNm = (float) collect($legs)->sum('distance_nm');
         $passengers = (int) $data['passengers'];
         $tripType = $this->resolveQuoteTripType($data);
+        $quotesLimit = (int) ($data['limit'] ?? self::DEFAULT_CLIENT_QUOTES_LIMIT);
 
         if ($tripType === 'multi_leg') {
             logger()->info('DEBUG MULTI LEG INPUT', [
@@ -195,11 +233,45 @@ class ClienteControlador extends ControladorBase
         }
 
         $maxLegDistanceKm = (float) collect($legs)->max('distance_km');
-        $quotes = Aeronave::with(['images', 'provider'])
+        $quotes = Aeronave::query()
+            ->select([
+                'id',
+                'provider_id',
+                'model',
+                'manufacturer',
+                'registration',
+                'capacity',
+                'category',
+                'range_km',
+                'base_airport',
+                'hourly_rate',
+                'minimum_hours',
+                'climb_descent_minutes',
+                'overnight_fee',
+                'currency',
+                'status',
+            ])
+            ->with([
+                'images:id,aircraft_id,kind,title,image_url,is_main,sort_order,visible_to_client',
+                'provider:id,company_name,commercial_name,jet_a_price',
+            ])
             ->whereIn('status', ['active', 'trial_active', 'aprobada', 'available', 'disponible'])
             ->where('capacity', '>=', $passengers)
+            ->where('hourly_rate', '>', 0)
+            ->where(function ($query) use ($maxLegDistanceKm) {
+                $query->whereNull('range_km')
+                    ->orWhere('range_km', '>=', $maxLegDistanceKm);
+            })
+            ->when(! empty($data['origin']), function ($query) use ($data) {
+                $origin = strtoupper(trim((string) $data['origin']));
+                $query->orderByRaw(
+                    'case when upper(coalesce(base_airport, \'\')) = ? then 0 else 1 end',
+                    [$origin],
+                );
+            })
+            ->orderByRaw('coalesce(hourly_rate, 0) asc')
+            ->limit(max($quotesLimit * 2, $quotesLimit))
             ->get()
-            ->filter(fn (Aeronave $aircraft) => $this->aircraftCanQuote($aircraft, $maxLegDistanceKm))
             ->map(function (Aeronave $aircraft) use ($data, $distanceKm, $distanceNm, $legs, $tripType) {
                 $pricing = $this->previewPricingForAircraft($aircraft, $tripType, $legs, $data);
                 $currency = $aircraft->currency ?: 'USD';
@@ -299,6 +371,7 @@ class ClienteControlador extends ControladorBase
                 fn (array $quote) => strtoupper((string) $quote['source_origin']) === strtoupper((string) $data['origin']) ? 0 : 1,
                 fn (array $quote) => $quote['total'],
             ])
+            ->take($quotesLimit)
             ->values();
 
         return $this->ok([
@@ -547,13 +620,61 @@ class ClienteControlador extends ControladorBase
 
     public function indexFlightRequests(Request $request)
     {
-        $solicitudes = SolicitudVuelo::with(['matches.aircraft.images', 'chatsProtegidos', 'operaciones.timeline', 'legs'])
+        $data = $request->validate([
+            'per_page' => ['nullable', 'integer', 'min:1', 'max:'.self::MAX_CLIENT_FLIGHT_REQUESTS_PAGE_SIZE],
+        ]);
+        $perPage = (int) ($data['per_page'] ?? self::DEFAULT_CLIENT_FLIGHT_REQUESTS_PAGE_SIZE);
+
+        $solicitudes = SolicitudVuelo::query()
+            ->select([
+                'id',
+                'client_id',
+                'assigned_provider_id',
+                'assigned_aircraft_id',
+                'assigned_aircraft_model',
+                'origin',
+                'destination',
+                'departure_datetime',
+                'passengers',
+                'trip_type',
+                'aircraft_type',
+                'requirements',
+                'visibility_payload',
+                'base_price',
+                'operational_fee',
+                'priority_price',
+                'final_price',
+                'currency',
+                'pricing_context',
+                'notes',
+                'status',
+                'workflow_status',
+            ])
+            ->with([
+                'assignedAircraft:id,model,category,capacity',
+                'assignedAircraft.images:id,aircraft_id,kind,title,image_url,is_main,sort_order,visible_to_client',
+                'latestOperation:id,flight_request_id,status',
+                'chatsProtegidos:id,flight_request_id,status',
+                'legs:id,flight_request_id,leg_order,origin,destination,departure_datetime,arrival_datetime,passengers,distance_km',
+            ])
             ->where('client_id', $request->user()->id)
             ->latest()
-            ->get()
-            ->map(fn ($solicitud) => $this->visibilidadServicio->solicitudParaCliente($solicitud));
+            ->paginate($perPage);
 
-        return $this->ok(['flight_requests' => $solicitudes]);
+        return $this->ok([
+            'flight_requests' => $solicitudes->getCollection()->map(
+                fn ($solicitud) => $this->visibilidadServicio->solicitudParaCliente($solicitud, [
+                    'include_matches' => false,
+                    'include_timeline' => false,
+                ])
+            )->values(),
+            'meta' => [
+                'current_page' => $solicitudes->currentPage(),
+                'per_page' => $solicitudes->perPage(),
+                'total' => $solicitudes->total(),
+                'last_page' => $solicitudes->lastPage(),
+            ],
+        ]);
     }
 
     public function showFlightRequest(Request $request, SolicitudVuelo $flightRequest)
@@ -562,7 +683,17 @@ class ClienteControlador extends ControladorBase
 
         return $this->ok([
             'flight_request' => $this->visibilidadServicio->solicitudParaCliente(
-                $flightRequest->load(['matches.aircraft.images', 'chatsProtegidos', 'operaciones.timeline', 'legs'])
+                $flightRequest->load([
+                    'assignedAircraft:id,model,category,capacity',
+                    'assignedAircraft.images:id,aircraft_id,kind,title,image_url,is_main,sort_order,visible_to_client',
+                    'matches:id,flight_request_id,aircraft_id,status,estimated_price,visibility_payload',
+                    'matches.aircraft:id,model,capacity,category',
+                    'matches.aircraft.images:id,aircraft_id,kind,title,image_url,is_main,sort_order,visible_to_client',
+                    'chatsProtegidos:id,flight_request_id,status',
+                    'latestOperation:id,flight_request_id,status',
+                    'latestOperation.timeline:id,operation_id,status,title,description,created_at',
+                    'legs:id,flight_request_id,leg_order,origin,destination,departure_datetime,arrival_datetime,passengers,distance_km',
+                ])
             ),
         ]);
     }

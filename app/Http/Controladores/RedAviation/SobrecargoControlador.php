@@ -4,12 +4,16 @@ namespace App\Http\Controladores\RedAviation;
 
 use App\Http\Controladores\ControladorBase;
 use App\Modelos\AsignacionSobrecargo;
+use App\Modelos\CatalogoDisponibilidadEstatus;
 use App\Modelos\ChecklistItem;
 use App\Modelos\ChecklistOperacion;
 use App\Modelos\LineaTiempoOperacion;
 use App\Modelos\Operacion;
+use App\Modelos\SobrecargoDisponibilidad;
 use App\Modelos\Usuario;
 use App\Servicios\RedAviation\VisibilidadServicio;
+use Carbon\Carbon;
+use Carbon\CarbonPeriod;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
 
@@ -33,11 +37,15 @@ class SobrecargoControlador extends ControladorBase
 
     public function profile(Request $request)
     {
-        $user = $request->user()->loadMissing(['profile', 'provider', 'roles']);
+        $user = $request->user()->loadMissing([
+            'profile:id,user_id,avatar,avatar_url,city,base_airport,birth_date,nationality,document_type,document_number,document_expiration,identity_validation_required,tax_data',
+            'provider:id,user_id,company_name,commercial_name',
+            'roles:id,code,name',
+        ]);
 
         return $this->ok([
             'profile' => $this->formatProfilePayload($user),
-            'user' => $user,
+            'user' => $this->serializeCrewUser($user),
         ]);
     }
 
@@ -475,73 +483,162 @@ class SobrecargoControlador extends ControladorBase
 
     public function availability(Request $request)
     {
-        $profile = $request->user()->loadMissing('profile')->profile;
-        $availability = collect($profile?->tax_data['availability'] ?? [])->values();
+        $data = $request->validate([
+            'from' => ['nullable', 'date'],
+            'to' => ['nullable', 'date'],
+        ]);
+        $from = $data['from'] ?? now()->toDateString();
+        $to = $data['to'] ?? now()->addDays(30)->toDateString();
+
+        $storedAvailability = SobrecargoDisponibilidad::query()
+            ->with(['estatus', 'aprobadoPor:id,name', 'createdBy:id,name'])
+            ->where('sobrecargo_id', $request->user()->id)
+            ->whereDate('fecha', '>=', $from)
+            ->whereDate('fecha', '<=', $to)
+            ->orderBy('fecha')
+            ->get()
+            ->keyBy(fn (SobrecargoDisponibilidad $item) => $item->fecha?->toDateString());
+
+        $availability = $this->buildAvailabilityRangePayload($storedAvailability, $from, $to);
 
         return $this->ok([
             'availability' => $availability,
+            'statuses' => $this->availabilityStatusesPayload($request->user()),
+            'from' => $from,
+            'to' => $to,
+        ]);
+    }
+
+    public function availabilityLog(Request $request, string $availabilityId)
+    {
+        $availability = SobrecargoDisponibilidad::query()
+            ->with(['estatus', 'createdBy:id,name', 'aprobadoPor:id,name'])
+            ->where('sobrecargo_id', $request->user()->id)
+            ->find($availabilityId);
+
+        abort_if(! $availability, 404, 'No existe el registro de disponibilidad solicitado.');
+
+        return $this->ok([
+            'availability' => $this->formatAvailabilityPayload($availability),
+            'bitacora' => collect($availability->bitacora ?? [])->values(),
+        ]);
+    }
+
+    public function availabilityStatuses(Request $request)
+    {
+        $statuses = CatalogoDisponibilidadEstatus::query()
+            ->where('activo', true)
+            ->orderBy('orden')
+            ->get()
+            ->filter(function (CatalogoDisponibilidadEstatus $status) use ($request) {
+                if ($request->user()->hasRole(Usuario::ROLE_ADMIN)) {
+                    return $status->seleccionable_admin;
+                }
+
+                return $status->seleccionable_sobrecargo;
+            })
+            ->map(fn (CatalogoDisponibilidadEstatus $status) => [
+                'id' => $status->id,
+                'clave' => $status->clave,
+                'nombre' => $status->nombre,
+                'descripcion' => $status->descripcion,
+                'color' => $status->color,
+                'icono' => $status->icono,
+                'orden' => $status->orden,
+                'seleccionable_sobrecargo' => $status->seleccionable_sobrecargo,
+                'seleccionable_admin' => $status->seleccionable_admin,
+                'permite_asignacion' => $status->permite_asignacion,
+            ])
+            ->values();
+
+        return $this->ok([
+            'statuses' => $statuses,
         ]);
     }
 
     public function storeAvailability(Request $request)
     {
         $data = $request->validate([
+            'dias' => ['nullable', 'array'],
+            'dias.*.fecha' => ['required_with:dias', 'date'],
+            'dias.*.estatus_id' => ['nullable', 'integer'],
+            'dias.*.status_id' => ['nullable', 'integer'],
+            'dias.*.status_key' => ['nullable', 'string', 'max:50'],
+            'dias.*.clave' => ['nullable', 'string', 'max:50'],
+            'dias.*.status' => ['nullable', 'string', 'max:100'],
+            'dias.*.state' => ['nullable', 'string', 'max:100'],
+            'dias.*.motivo' => ['nullable', 'string', 'max:255'],
+            'dias.*.comentario' => ['nullable', 'string'],
+            'fecha' => ['nullable', 'date'],
             'from' => ['nullable', 'date'],
             'to' => ['nullable', 'date'],
             'starts_at' => ['nullable', 'date'],
             'ends_at' => ['nullable', 'date'],
+            'estatus_id' => ['nullable', 'integer'],
+            'status_id' => ['nullable', 'integer'],
+            'status_key' => ['nullable', 'string', 'max:50'],
+            'clave' => ['nullable', 'string', 'max:50'],
             'status' => ['nullable', 'string', 'max:100'],
             'state' => ['nullable', 'string', 'max:100'],
+            'motivo' => ['nullable', 'string', 'max:255'],
+            'comentario' => ['nullable', 'string'],
             'base' => ['nullable', 'string', 'max:100'],
             'coverage' => ['nullable', 'string', 'max:150'],
             'restriction' => ['nullable', 'string', 'max:255'],
             'notes' => ['nullable', 'string', 'max:255'],
+            'operacion_id' => ['nullable', 'exists:operations,id'],
         ]);
 
-        $profile = $request->user()->loadMissing('profile')->profile ?: $request->user()->profile()->make(['user_id' => $request->user()->id]);
-        $taxData = $profile->tax_data ?? [];
-        $availability = collect($taxData['availability'] ?? []);
+        $saved = collect();
 
-        $block = [
-            'id' => now()->timestamp.$availability->count(),
-            'from' => $data['from'] ?? $data['starts_at'] ?? null,
-            'to' => $data['to'] ?? $data['ends_at'] ?? null,
-            'state' => $data['state'] ?? $data['status'] ?? 'Disponible',
-            'base' => $data['base'] ?? ($profile->base_airport ?: $profile->city ?: null),
-            'coverage' => $data['coverage'] ?? null,
-            'restriction' => $data['restriction'] ?? $data['notes'] ?? null,
-            'created_at' => now()->toISOString(),
-        ];
+        if (! empty($data['dias'])) {
+            foreach ($data['dias'] as $day) {
+                $status = $this->resolveAvailabilityStatus($request, $day);
+                $saved->push(
+                    $this->upsertAvailabilityRecord(
+                        $request,
+                        $status,
+                        Carbon::parse($day['fecha'])->toDateString(),
+                        $day
+                    )
+                );
+            }
 
-        $profile->fill([
-            'tax_data' => array_merge($taxData, [
-                'availability' => $availability->push($block)->values()->all(),
-            ]),
-        ]);
-        $profile->save();
+            return $this->ok([
+                'availability' => $saved->map(fn (SobrecargoDisponibilidad $item) => $this->formatAvailabilityPayload($item))->values(),
+            ], 201);
+        }
+
+        $status = $this->resolveAvailabilityStatus($request, $data);
+        $startDate = $data['fecha'] ?? $data['from'] ?? $data['starts_at'] ?? null;
+        $endDate = $data['to'] ?? $data['ends_at'] ?? $startDate;
+
+        abort_if(! $startDate || ! $endDate, 422, 'Debes indicar una fecha o rango de fechas.');
+
+        $start = Carbon::parse($startDate)->startOfDay();
+        $end = Carbon::parse($endDate)->startOfDay();
+        abort_if($start->gt($end), 422, 'La fecha inicial no puede ser mayor a la final.');
+
+        foreach (CarbonPeriod::create($start, $end) as $date) {
+            $saved->push(
+                $this->upsertAvailabilityRecord($request, $status, $date->toDateString(), $data)
+            );
+        }
 
         return $this->ok([
-            'availability' => $block,
+            'availability' => $saved->map(fn (SobrecargoDisponibilidad $item) => $this->formatAvailabilityPayload($item))->values(),
         ], 201);
     }
 
     public function destroyAvailability(Request $request, string $availabilityId)
     {
-        $profile = $request->user()->loadMissing('profile')->profile;
-        abort_if(! $profile, 404, 'No existe perfil operativo para este sobrecargo.');
+        $availability = SobrecargoDisponibilidad::query()
+            ->where('sobrecargo_id', $request->user()->id)
+            ->find($availabilityId);
 
-        $taxData = $profile->tax_data ?? [];
-        $availability = collect($taxData['availability'] ?? []);
-        $filtered = $availability->reject(fn (array $item) => (string) ($item['id'] ?? '') === $availabilityId)->values();
+        abort_if(! $availability, 404, 'No existe el bloqueo solicitado.');
 
-        abort_if($filtered->count() === $availability->count(), 404, 'No existe el bloqueo solicitado.');
-
-        $profile->fill([
-            'tax_data' => array_merge($taxData, [
-                'availability' => $filtered->all(),
-            ]),
-        ]);
-        $profile->save();
+        $availability->delete();
 
         return $this->ok([
             'message' => 'Disponibilidad eliminada correctamente.',
@@ -678,6 +775,11 @@ class SobrecargoControlador extends ControladorBase
     {
         $profile = $user->profile;
         $taxData = $profile?->tax_data ?? [];
+        $documents = is_array($taxData['documents'] ?? null) ? $taxData['documents'] : [];
+        $approvedDocuments = collect($documents)
+            ->filter(fn ($item) => is_array($item) && in_array(strtolower((string) ($item['status'] ?? '')), ['aprobado', 'approved', 'vigente', 'validado'], true))
+            ->count();
+        $pendingDocuments = max(count($documents) - $approvedDocuments, 0);
 
         return [
             'name' => $user->name,
@@ -699,11 +801,262 @@ class SobrecargoControlador extends ControladorBase
                 'personal_coverage' => 'Centro / Bajio',
                 'escalation_mode' => 'Operador primero',
             ], $taxData['preferences'] ?? []),
-            'documents' => $taxData['documents'] ?? [],
-            'availability' => $taxData['availability'] ?? [],
+            'documents' => $documents,
+            'documents_summary' => count($documents)
+                ? sprintf('%d aprobados / %d pendientes', $approvedDocuments, $pendingDocuments)
+                : '',
             'photo' => $profile?->avatar_url ?: $profile?->avatar,
-            'provider' => $user->provider,
+            'provider' => $user->provider ? [
+                'id' => $user->provider->id,
+                'company_name' => $user->provider->company_name,
+                'commercial_name' => $user->provider->commercial_name,
+            ] : null,
         ];
+    }
+
+    private function formatAvailabilityPayload(SobrecargoDisponibilidad $availability): array
+    {
+        $status = $availability->estatus;
+
+        return [
+            'id' => $availability->id,
+            'fecha' => $availability->fecha?->toDateString(),
+            'from' => $availability->fecha?->toDateString(),
+            'to' => $availability->fecha?->toDateString(),
+            'estatus_id' => $availability->estatus_id,
+            'status_id' => $availability->estatus_id,
+            'clave' => $status?->clave,
+            'status' => $status?->clave,
+            'nombre' => $status?->nombre,
+            'state' => $status?->nombre,
+            'descripcion' => $status?->descripcion,
+            'color' => $status?->color,
+            'icono' => $status?->icono,
+            'permite_asignacion' => (bool) $status?->permite_asignacion,
+            'motivo' => $availability->motivo,
+            'comentario' => $availability->comentario,
+            'restriction' => $availability->comentario,
+            'origen' => $availability->origen,
+            'created_by' => $availability->created_by,
+            'created_by_nombre' => $availability->createdBy?->name,
+            'operacion_id' => $availability->operacion_id,
+            'aprobado_por' => $availability->aprobado_por,
+            'aprobado_por_nombre' => $availability->aprobadoPor?->name,
+            'aprobado_at' => optional($availability->aprobado_at)?->toISOString(),
+            'created_at' => optional($availability->created_at)?->toISOString(),
+            'updated_at' => optional($availability->updated_at)?->toISOString(),
+        ];
+    }
+
+    private function formatSyntheticAvailabilityPayload(string $date, CatalogoDisponibilidadEstatus $status): array
+    {
+        return [
+            'id' => null,
+            'fecha' => $date,
+            'from' => $date,
+            'to' => $date,
+            'estatus_id' => $status->id,
+            'status_id' => $status->id,
+            'clave' => $status->clave,
+            'status' => $status->clave,
+            'nombre' => $status->nombre,
+            'state' => $status->nombre,
+            'descripcion' => $status->descripcion,
+            'color' => $status->color,
+            'icono' => $status->icono,
+            'permite_asignacion' => (bool) $status->permite_asignacion,
+            'motivo' => null,
+            'comentario' => null,
+            'restriction' => null,
+            'origen' => 'SISTEMA',
+            'created_by' => null,
+            'created_by_nombre' => null,
+            'operacion_id' => null,
+            'aprobado_por' => null,
+            'aprobado_por_nombre' => null,
+            'aprobado_at' => null,
+            'created_at' => null,
+            'updated_at' => null,
+        ];
+    }
+
+    private function resolveAvailabilityStatus(Request $request, array $data): CatalogoDisponibilidadEstatus
+    {
+        $statusId = $data['estatus_id'] ?? $data['status_id'] ?? null;
+        $statusKey = $data['status_key'] ?? $data['clave'] ?? null;
+        $statusLabel = $data['state'] ?? $data['status'] ?? null;
+
+        $query = CatalogoDisponibilidadEstatus::query()->where('activo', true);
+
+        if ($statusId) {
+            $query->whereKey($statusId);
+        } elseif ($statusKey) {
+            $query->where('clave', strtoupper(trim($statusKey)));
+        } elseif ($statusLabel) {
+            $query->where('clave', $this->normalizeAvailabilityStatusKey($statusLabel));
+        } else {
+            abort(422, 'Debes indicar un estatus para registrar la disponibilidad.');
+        }
+
+        $status = $query->first();
+        abort_if(! $status, 422, 'El estatus de disponibilidad no existe o no esta activo.');
+
+        $canSelect = $request->user()->hasRole(Usuario::ROLE_ADMIN)
+            ? $status->seleccionable_admin
+            : $status->seleccionable_sobrecargo;
+
+        abort_if(! $canSelect, 422, 'No puedes seleccionar ese estatus desde este perfil.');
+
+        return $status;
+    }
+
+    private function normalizeAvailabilityStatusKey(string $value): string
+    {
+        return match (strtoupper(trim($value))) {
+            'DISPONIBLE' => 'DISPONIBLE',
+            'NO DISPONIBLE', 'NO_DISPONIBLE' => 'NO_DISPONIBLE',
+            'DESCANSO' => 'DESCANSO',
+            'EN OPERACION', 'EN_OPERACION' => 'EN_OPERACION',
+            'BLOQUEO SOLICITADO', 'BLOQUEO_SOLICITADO' => 'BLOQUEO_SOLICITADO',
+            'BLOQUEO APROBADO', 'BLOQUEO_APROBADO' => 'BLOQUEO_APROBADO',
+            'BLOQUEO RECHAZADO', 'BLOQUEO_RECHAZADO' => 'BLOQUEO_RECHAZADO',
+            'POR CONFIRMAR', 'POR_CONFIRMAR' => 'POR_CONFIRMAR',
+            default => strtoupper(str_replace(' ', '_', trim($value))),
+        };
+    }
+
+    private function buildAvailabilityLog(?SobrecargoDisponibilidad $existing, CatalogoDisponibilidadEstatus $status, int $userId, array $data): array
+    {
+        $log = collect($existing?->bitacora ?? []);
+
+        $log->push([
+            'timestamp' => now()->toISOString(),
+            'user_id' => $userId,
+            'previous_estatus_id' => $existing?->estatus_id,
+            'new_estatus_id' => $status->id,
+            'motivo' => $data['motivo'] ?? null,
+            'comentario' => $data['comentario'] ?? $data['restriction'] ?? $data['notes'] ?? null,
+        ]);
+
+        return $log->values()->all();
+    }
+
+    private function upsertAvailabilityRecord(
+        Request $request,
+        CatalogoDisponibilidadEstatus $status,
+        string $date,
+        array $data
+    ): SobrecargoDisponibilidad {
+        $existing = SobrecargoDisponibilidad::query()
+            ->where('sobrecargo_id', $request->user()->id)
+            ->whereDate('fecha', $date)
+            ->first();
+
+        return SobrecargoDisponibilidad::query()->updateOrCreate(
+            [
+                'sobrecargo_id' => $request->user()->id,
+                'fecha' => $date,
+            ],
+            [
+                'estatus_id' => $status->id,
+                'motivo' => $data['motivo'] ?? null,
+                'comentario' => $data['comentario'] ?? $data['restriction'] ?? $data['notes'] ?? null,
+                'origen' => $request->user()->hasRole(Usuario::ROLE_ADMIN) ? 'ADMIN' : 'SOBRECARGO',
+                'operacion_id' => $data['operacion_id'] ?? null,
+                'created_by' => $existing?->created_by ?? $request->user()->id,
+                'updated_by' => $request->user()->id,
+                'bitacora' => $this->buildAvailabilityLog($existing, $status, $request->user()->id, $data),
+            ],
+        )->loadMissing(['estatus', 'aprobadoPor:id,name', 'createdBy:id,name']);
+    }
+
+    private function buildAvailabilityRangePayload($storedAvailability, string $from, string $to)
+    {
+        $defaultStatus = $this->porConfirmarStatus();
+        $days = collect();
+
+        foreach (CarbonPeriod::create(Carbon::parse($from)->startOfDay(), Carbon::parse($to)->startOfDay()) as $date) {
+            $dateKey = $date->toDateString();
+            $stored = $storedAvailability->get($dateKey);
+            $days->push(
+                $stored
+                    ? $this->formatAvailabilityPayload($stored)
+                    : $this->formatSyntheticAvailabilityPayload($dateKey, $defaultStatus)
+            );
+        }
+
+        return $days->values();
+    }
+
+    private function availabilityStatusesPayload(Usuario $user)
+    {
+        return CatalogoDisponibilidadEstatus::query()
+            ->where('activo', true)
+            ->orderBy('orden')
+            ->get()
+            ->filter(function (CatalogoDisponibilidadEstatus $status) use ($user) {
+                if ($user->hasRole(Usuario::ROLE_ADMIN)) {
+                    return $status->seleccionable_admin;
+                }
+
+                return $status->seleccionable_sobrecargo;
+            })
+            ->map(fn (CatalogoDisponibilidadEstatus $status) => [
+                'id' => $status->id,
+                'clave' => $status->clave,
+                'nombre' => $status->nombre,
+                'descripcion' => $status->descripcion,
+                'color' => $status->color,
+                'icono' => $status->icono,
+                'orden' => $status->orden,
+                'seleccionable_sobrecargo' => $status->seleccionable_sobrecargo,
+                'seleccionable_admin' => $status->seleccionable_admin,
+                'permite_asignacion' => $status->permite_asignacion,
+            ])
+            ->values();
+    }
+
+    private function serializeCrewUser(Usuario $user): array
+    {
+        return [
+            'id' => $user->id,
+            'name' => $user->name,
+            'email' => $user->email,
+            'phone' => $user->phone,
+            'role' => $user->role,
+            'operational_role' => $user->operational_role,
+            'effective_role' => $user->effectiveRole(),
+            'status' => $user->status,
+            'roles' => $user->roles->map(fn ($role) => [
+                'id' => $role->id,
+                'code' => $role->code,
+                'name' => $role->name,
+            ])->values(),
+            'profile' => $user->profile ? [
+                'city' => $user->profile->city,
+                'base_airport' => $user->profile->base_airport,
+                'birth_date' => $user->profile->birth_date,
+                'nationality' => $user->profile->nationality,
+                'document_type' => $user->profile->document_type,
+                'document_number' => $user->profile->document_number,
+                'document_expiration' => $user->profile->document_expiration,
+                'identity_validation_required' => $user->profile->identity_validation_required,
+                'avatar' => $user->profile->avatar,
+                'avatar_url' => $user->profile->avatar_url,
+            ] : null,
+            'provider' => $user->provider ? [
+                'id' => $user->provider->id,
+                'company_name' => $user->provider->company_name,
+                'commercial_name' => $user->provider->commercial_name,
+            ] : null,
+        ];
+    }
+
+    private function porConfirmarStatus(): CatalogoDisponibilidadEstatus
+    {
+        return CatalogoDisponibilidadEstatus::query()
+            ->where('clave', 'POR_CONFIRMAR')
+            ->firstOrFail();
     }
 
     private function formatAssignmentPayload(Operacion $operation, int $userId): array
@@ -744,6 +1097,15 @@ class SobrecargoControlador extends ControladorBase
             'aircraft' => $operation->aeronave?->model,
             'aircraft_model' => $operation->aeronave?->model,
             'provider_name' => $operation->proveedor?->commercial_name ?: $operation->proveedor?->company_name,
+            'timeline' => $operation->timeline
+                ->map(fn (LineaTiempoOperacion $item) => [
+                    'id' => $item->id,
+                    'status' => $item->status,
+                    'title' => $item->title,
+                    'description' => $item->description,
+                    'created_at' => optional($item->created_at)?->toISOString(),
+                ])
+                ->values(),
         ];
     }
 

@@ -11,9 +11,12 @@ use App\Modelos\Usuario;
 
 class VisibilidadServicio
 {
-    public function solicitudParaCliente(SolicitudVuelo $solicitud): array
+    public function solicitudParaCliente(SolicitudVuelo $solicitud, array $options = []): array
     {
-        $preferredMatch = $this->matchPreferidoParaCliente($solicitud);
+        $includeTimeline = (bool) ($options['include_timeline'] ?? true);
+        $includeMatches = (bool) ($options['include_matches'] ?? true);
+        $summaryOnly = ! $includeTimeline || ! $includeMatches;
+        $preferredMatch = $includeMatches ? $this->matchPreferidoParaCliente($solicitud) : null;
         $visibilityPayload = $solicitud->visibility_payload ?? [];
         $assignedAircraft = $solicitud->relationLoaded('assignedAircraft')
             ? $solicitud->assignedAircraft
@@ -23,18 +26,41 @@ class VisibilidadServicio
             ? $solicitud->chatsProtegidos->sortByDesc('id')->first()
             : $solicitud->chatsProtegidos()->latest('id')->first();
 
-        $operacion = $solicitud->relationLoaded('operaciones')
-            ? $solicitud->operaciones->sortByDesc('id')->first()
-            : $solicitud->operaciones()->latest('id')->first();
+        $operacion = $solicitud->relationLoaded('latestOperation')
+            ? $solicitud->latestOperation
+            : ($solicitud->relationLoaded('operaciones')
+                ? $solicitud->operaciones->sortByDesc('id')->first()
+                : $solicitud->operaciones()->latest('id')->first());
 
-        $timeline = $operacion
+        $timeline = $includeTimeline && $operacion
             ? ($operacion->relationLoaded('timeline')
                 ? $operacion->timeline->sortByDesc('id')->take(4)->values()
                 : $operacion->timeline()->latest('id')->limit(4)->get())
             : collect();
 
+        $matches = $includeMatches
+            ? $solicitud->matches->map(fn ($match) => [
+                'id' => $match->id,
+                'aircraft_id' => $match->aircraft_id,
+                'status' => $match->status,
+                'estimated_price' => $match->estimated_price,
+                'visibility_payload' => $match->visibility_payload,
+                'aircraft' => $match->aircraft
+                    ? $this->aeronaveVisibleParaCliente($match->aircraft, $solicitud->aircraft_type)
+                    : [
+                        'model' => null,
+                        'capacity' => null,
+                        'category' => $solicitud->aircraft_type,
+                        'main_image' => null,
+                        'images' => [],
+                        'amenities' => [],
+                    ],
+            ])->values()
+            : collect();
+
         return [
             'id' => $solicitud->id,
+            'flight_request_id' => $solicitud->id,
             'origin' => $solicitud->origin,
             'destination' => $solicitud->destination,
             'departure_datetime' => $solicitud->departure_datetime,
@@ -78,6 +104,7 @@ class VisibilidadServicio
             'legs' => $this->visibleLegs($solicitud),
             'notes' => $solicitud->notes,
             'status' => $solicitud->workflow_status ?? $solicitud->status,
+            'summary_only' => $summaryOnly,
             'chat' => $chat ? [
                 'id' => $chat->id,
                 'status' => $chat->status,
@@ -93,23 +120,7 @@ class VisibilidadServicio
                     'created_at' => $item->created_at,
                 ])->values(),
             ] : null,
-            'matched_options' => $solicitud->matches->map(fn ($match) => [
-                'id' => $match->id,
-                'aircraft_id' => $match->aircraft_id,
-                'status' => $match->status,
-                'estimated_price' => $match->estimated_price,
-                'visibility_payload' => $match->visibility_payload,
-                'aircraft' => $match->aircraft
-                    ? $this->aeronaveVisibleParaCliente($match->aircraft, $solicitud->aircraft_type)
-                    : [
-                        'model' => null,
-                        'capacity' => null,
-                        'category' => $solicitud->aircraft_type,
-                        'main_image' => null,
-                        'images' => [],
-                        'amenities' => [],
-                    ],
-            ])->values(),
+            'matched_options' => $matches,
         ];
     }
 

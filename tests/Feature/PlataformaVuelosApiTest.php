@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Modelos\Aeronave;
+use App\Modelos\CatalogoDisponibilidadEstatus;
 use App\Modelos\IdentityVerification;
 use App\Modelos\Operacion;
 use App\Modelos\Proveedor;
@@ -808,5 +809,184 @@ class PlataformaVuelosApiTest extends TestCase
             'status' => 'incidencia',
             'crew_status' => 'crew_incident_reported',
         ]);
+    }
+
+    public function test_sobrecargo_availability_is_persisted_in_normalized_tables(): void
+    {
+        $this->seed();
+
+        $token = $this->postJson('/api/v1/auth/login', [
+            'email' => 'sobrecargo@redaviation.test',
+            'password' => 'password',
+        ])->assertOk()->json('token');
+
+        $availableStatus = CatalogoDisponibilidadEstatus::query()
+            ->where('clave', 'DISPONIBLE')
+            ->firstOrFail();
+
+        $response = $this->withToken($token)
+            ->postJson('/api/v1/sobrecargo/availability', [
+                'from' => now()->addDays(2)->toDateString(),
+                'to' => now()->addDays(3)->toDateString(),
+                'estatus_id' => $availableStatus->id,
+                'motivo' => 'Guardia activa',
+                'comentario' => 'Disponible para asignacion.',
+            ])
+            ->assertCreated()
+            ->assertJsonPath('success', true);
+
+        $this->assertCount(2, $response->json('availability'));
+
+        $sobrecargo = Usuario::query()->where('email', 'sobrecargo@redaviation.test')->firstOrFail();
+
+        $this->assertDatabaseHas('sobrecargo_disponibilidades', [
+            'sobrecargo_id' => $sobrecargo->id,
+            'estatus_id' => $availableStatus->id,
+            'motivo' => 'Guardia activa',
+        ]);
+
+        $this->withToken($token)
+            ->getJson('/api/v1/sobrecargo/availability')
+            ->assertOk()
+            ->assertJsonPath('availability.0.clave', 'DISPONIBLE')
+            ->assertJsonPath('availability.0.state', 'Disponible');
+    }
+
+    public function test_sobrecargo_can_fetch_status_catalog_and_delete_availability_record(): void
+    {
+        $this->seed();
+
+        $token = $this->postJson('/api/v1/auth/login', [
+            'email' => 'sobrecargo@redaviation.test',
+            'password' => 'password',
+        ])->assertOk()->json('token');
+
+        $this->withToken($token)
+            ->getJson('/api/v1/sobrecargo/availability/statuses')
+            ->assertOk()
+            ->assertJsonPath('statuses.0.clave', 'DISPONIBLE');
+
+        $status = CatalogoDisponibilidadEstatus::query()
+            ->where('clave', 'BLOQUEO_SOLICITADO')
+            ->firstOrFail();
+
+        $created = $this->withToken($token)
+            ->postJson('/api/v1/sobrecargo/availability', [
+                'fecha' => now()->addDays(5)->toDateString(),
+                'status_key' => $status->clave,
+                'notes' => 'Solicitud personal',
+            ])
+            ->assertCreated();
+
+        $availabilityId = data_get($created->json('availability'), '0.id');
+
+        $this->withToken($token)
+            ->deleteJson("/api/v1/sobrecargo/availability/{$availabilityId}")
+            ->assertOk()
+            ->assertJsonPath('message', 'Disponibilidad eliminada correctamente.');
+
+        $this->assertDatabaseMissing('sobrecargo_disponibilidades', [
+            'id' => $availabilityId,
+        ]);
+    }
+
+    public function test_sobrecargo_availability_range_fills_missing_days_as_por_confirmar(): void
+    {
+        $this->seed();
+
+        $token = $this->postJson('/api/v1/auth/login', [
+            'email' => 'sobrecargo@redaviation.test',
+            'password' => 'password',
+        ])->assertOk()->json('token');
+
+        $status = CatalogoDisponibilidadEstatus::query()->where('clave', 'DESCANSO')->firstOrFail();
+        $targetDate = now()->addDays(2)->toDateString();
+
+        $this->withToken($token)
+            ->postJson('/api/v1/sobrecargo/availability', [
+                'fecha' => $targetDate,
+                'estatus_id' => $status->id,
+            ])
+            ->assertCreated();
+
+        $this->withToken($token)
+            ->getJson('/api/v1/sobrecargo/availability?from='.$targetDate.'&to='.now()->addDays(4)->toDateString())
+            ->assertOk()
+            ->assertJsonPath('availability.0.clave', 'DESCANSO')
+            ->assertJsonPath('availability.1.clave', 'POR_CONFIRMAR')
+            ->assertJsonPath('availability.2.clave', 'POR_CONFIRMAR');
+    }
+
+    public function test_sobrecargo_can_store_batch_days_payload(): void
+    {
+        $this->seed();
+
+        $token = $this->postJson('/api/v1/auth/login', [
+            'email' => 'sobrecargo@redaviation.test',
+            'password' => 'password',
+        ])->assertOk()->json('token');
+
+        $available = CatalogoDisponibilidadEstatus::query()->where('clave', 'DISPONIBLE')->firstOrFail();
+        $rest = CatalogoDisponibilidadEstatus::query()->where('clave', 'DESCANSO')->firstOrFail();
+
+        $this->withToken($token)
+            ->postJson('/api/v1/sobrecargo/availability', [
+                'dias' => [
+                    [
+                        'fecha' => now()->addDays(6)->toDateString(),
+                        'estatus_id' => $available->id,
+                        'comentario' => 'Guardia abierta',
+                    ],
+                    [
+                        'fecha' => now()->addDays(7)->toDateString(),
+                        'estatus_id' => $rest->id,
+                        'comentario' => 'Descanso programado',
+                    ],
+                ],
+            ])
+            ->assertCreated()
+            ->assertJsonCount(2, 'availability');
+    }
+
+    public function test_admin_can_manage_crew_availability_module(): void
+    {
+        $this->seed();
+
+        $adminToken = $this->postJson('/api/v1/auth/login', [
+            'email' => 'admin@privateflights.test',
+            'password' => 'password',
+        ])->assertOk()->json('token');
+
+        $crew = Usuario::query()->where('email', 'sobrecargo@redaviation.test')->firstOrFail();
+        $requestedStatus = CatalogoDisponibilidadEstatus::query()->where('clave', 'BLOQUEO_SOLICITADO')->firstOrFail();
+
+        $createResponse = $this->withToken($adminToken)
+            ->postJson('/api/v1/admin/sobrecargos/disponibilidad', [
+                'sobrecargo_id' => $crew->id,
+                'fecha' => now()->addDays(8)->toDateString(),
+                'estatus_id' => $requestedStatus->id,
+                'comentario' => 'Bloqueo cargado por admin',
+            ])
+            ->assertCreated();
+
+        $availabilityId = data_get($createResponse->json('availability'), '0.id');
+
+        $this->withToken($adminToken)
+            ->getJson('/api/v1/admin/sobrecargos/disponibilidad?from='.now()->addDays(8)->toDateString().'&to='.now()->addDays(9)->toDateString())
+            ->assertOk()
+            ->assertJsonPath('crew_members.0.availability.0.clave', 'BLOQUEO_SOLICITADO')
+            ->assertJsonPath('crew_members.0.availability.1.clave', 'POR_CONFIRMAR');
+
+        $this->withToken($adminToken)
+            ->postJson("/api/v1/admin/sobrecargos/disponibilidad/{$availabilityId}/aprobar-bloqueo", [
+                'comentario' => 'Aprobado por operaciones',
+            ])
+            ->assertOk()
+            ->assertJsonPath('availability.clave', 'BLOQUEO_APROBADO');
+
+        $this->withToken($adminToken)
+            ->getJson("/api/v1/admin/sobrecargos/disponibilidad/{$availabilityId}/bitacora")
+            ->assertOk()
+            ->assertJsonCount(2, 'bitacora');
     }
 }

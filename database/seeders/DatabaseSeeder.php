@@ -16,6 +16,8 @@ class DatabaseSeeder extends Seeder
 {
     public function run(): void
     {
+        $this->call(CatalogoDisponibilidadEstatusSeeder::class);
+
         $admin = Usuario::firstOrCreate(
             ['email' => 'admin@privateflights.test'],
             [

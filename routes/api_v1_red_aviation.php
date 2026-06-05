@@ -43,6 +43,7 @@ Route::middleware(['auth.token'])->group(function () {
         Route::get('/my-dashboard', [OperadorControlador::class, 'dashboard']);
         Route::get('/my-aircraft', [OperadorControlador::class, 'indexAircraft']);
         Route::get('/aircraft', [OperadorControlador::class, 'indexAircraft']);
+        Route::get('/aircraft/{aircraft}', [OperadorControlador::class, 'showAircraft']);
         Route::put('/aircraft/{aircraft}', [OperadorControlador::class, 'updateAircraft']);
         Route::post('/aircraft/{aircraft}/subscribe', [OperadorControlador::class, 'subscribeAircraft']);
         Route::get('/aircraft/{aircraft}/images', [AeronaveControlador::class, 'images']);
@@ -74,7 +75,9 @@ Route::middleware(['auth.token'])->group(function () {
         Route::get('/documents', [SobrecargoControlador::class, 'documents']);
         Route::post('/documents', [SobrecargoControlador::class, 'storeDocument']);
         Route::put('/documents/{documentId}', [SobrecargoControlador::class, 'updateDocument']);
+        Route::get('/availability/statuses', [SobrecargoControlador::class, 'availabilityStatuses']);
         Route::get('/availability', [SobrecargoControlador::class, 'availability']);
+        Route::get('/availability/{availabilityId}/bitacora', [SobrecargoControlador::class, 'availabilityLog']);
         Route::post('/availability', [SobrecargoControlador::class, 'storeAvailability']);
         Route::delete('/availability/{availabilityId}', [SobrecargoControlador::class, 'destroyAvailability']);
         Route::get('/incidents', [SobrecargoControlador::class, 'listIncidents']);
@@ -100,6 +103,11 @@ Route::middleware(['auth.token'])->group(function () {
         Route::get('/crew', [AdminControlador::class, 'sobrecargos']);
         Route::put('/sobrecargos/{user}', [AdminControlador::class, 'updateSobrecargo']);
         Route::put('/crew/{user}', [AdminControlador::class, 'updateSobrecargo']);
+        Route::get('/sobrecargos/disponibilidad', [AdminControlador::class, 'crewAvailability']);
+        Route::post('/sobrecargos/disponibilidad', [AdminControlador::class, 'storeCrewAvailability']);
+        Route::get('/sobrecargos/disponibilidad/{availability}/bitacora', [AdminControlador::class, 'crewAvailabilityLog']);
+        Route::post('/sobrecargos/disponibilidad/{availability}/aprobar-bloqueo', [AdminControlador::class, 'approveCrewAvailabilityBlock']);
+        Route::post('/sobrecargos/disponibilidad/{availability}/rechazar-bloqueo', [AdminControlador::class, 'rejectCrewAvailabilityBlock']);
         Route::get('/requests', [AdminControlador::class, 'requests']);
         Route::get('/releases', [AdminControlador::class, 'releases']);
         Route::get('/contracts', [AdminControlador::class, 'contracts']);

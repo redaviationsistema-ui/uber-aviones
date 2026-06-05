@@ -10,6 +10,7 @@ use App\Modelos\Usuario;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 
 class AutenticacionControlador extends ControladorBase
@@ -68,6 +69,17 @@ class AutenticacionControlador extends ControladorBase
         $operationalRole = $data['operational_role']
             ?? ($role === Usuario::ROLE_SOBRECARGO ? Usuario::ROLE_SOBRECARGO : null);
         $persistedRole = $role === Usuario::ROLE_SOBRECARGO ? Usuario::ROLE_CLIENT : $role;
+
+        if ($role === Usuario::ROLE_SOBRECARGO && ! $this->hasValidAfacLicenseEvidence($data)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'La licencia no fue validada como documento AFAC. Escanea una licencia AFAC valida antes de registrarte.',
+                'errors' => [
+                    'document_type' => ['La licencia debe mostrar evidencia AFAC valida.'],
+                ],
+            ], 422);
+        }
+
         $ineFrontPath = $request->hasFile('ine_front')
             ? $request->file('ine_front')->store('identity/ine/front', 'private')
             : null;
@@ -161,7 +173,7 @@ class AutenticacionControlador extends ControladorBase
             $user->forceFill(['provider_id' => $provider->id])->save();
         }
 
-        return $this->authenticatedResponse($request, $user->fresh(['provider', 'ownedProvider', 'profile', 'roles', 'demo', 'activeSuscripcion.plan']), 201);
+        return $this->authenticatedResponse($request, $user->fresh(), 201);
     }
 
     public function login(Request $request)
@@ -187,63 +199,15 @@ class AutenticacionControlador extends ControladorBase
             ], 403);
         }
 
-        return $this->authenticatedResponse($request, $user->load(['provider', 'ownedProvider', 'profile', 'roles', 'demo', 'activeSuscripcion.plan']));
+        return $this->authenticatedResponse($request, $user);
     }
 
     public function me(Request $request)
     {
-        $user = $request->user()->loadMissing([
-            'provider:id,user_id,company_name,commercial_name,approval_status,jet_a_price,margin_percent,fixed_fee,notes',
-            'ownedProvider:id,user_id,company_name,commercial_name,approval_status,jet_a_price,margin_percent,fixed_fee,notes',
-            'profile:id,user_id,company_name,business_type,country,city,base_airport,base_airport_id,address,avatar,avatar_url,tax_data,birth_date,nationality,document_type,document_number,document_expiration,identity_validation_required,ine_curp,ine_cic,ine_ocr,ine_scan_raw,ine_scan_status,ine_front_path,ine_back_path',
-            'profile.baseAirport:id,icao,iata,name',
-            'roles:id,code,name',
-            'demo:id,user_id,status,started_at,expires_at',
-            'activeSuscripcion:id,user_id,plan_id,status,started_at,expires_at',
-            'activeSuscripcion.plan:id,name,code,billing_cycle,price_monthly,price_yearly,max_aircraft,max_users,has_priority,has_concierge,has_reports,is_enterprise',
-            'paymentMethods:id,user_id,type,brand,last_four,provider,is_default',
-        ]);
+        $user = $this->loadAuthUser($request->user());
 
         return $this->ok([
-            'user' => [
-                'id' => $user->id,
-                'name' => $user->name,
-                'email' => $user->email,
-                'phone' => $user->phone,
-                'role' => $user->role,
-                'operational_role' => $user->operational_role,
-                'provider_id' => $user->resolvedProviderId(),
-                'proveedor_id' => $user->resolvedProviderId(),
-                'status' => $user->status,
-                'identity_verification_status' => $user->identity_verification_status,
-                'identity_verification_message' => $user->identity_verification_message,
-                'identity_verified' => $user->identity_verified,
-                'face_detected' => $user->face_detected,
-                'face_match_score' => $user->face_match_score,
-                'liveness_score' => $user->liveness_score,
-                'image_storage_score' => $user->image_storage_score,
-                'biometric_image_saved' => $user->biometric_image_saved,
-                'biometric_captured_at' => $user->biometric_captured_at,
-                'biometric_provider' => $user->biometric_provider,
-                'biometric_template_type' => $user->biometric_template_type,
-                'biometric_selfie_path' => $user->biometric_selfie_path,
-                'biometric_selfie_url' => $user->biometric_selfie_path
-                    ? Storage::disk('public')->url($user->biometric_selfie_path)
-                    : null,
-                'provider' => $user->provider,
-                'owned_provider' => $user->ownedProvider,
-                'ownedProvider' => $user->ownedProvider,
-                'profile' => $user->profile,
-                'roles' => $user->roles,
-                'demo' => $user->demo,
-                'active_suscripcion' => $user->activeSuscripcion,
-                'activeSuscripcion' => $user->activeSuscripcion,
-                'payment_methods' => $user->paymentMethods,
-                'paymentMethods' => $user->paymentMethods,
-                'access' => $user->accessStatus(),
-                'subscription_status' => $user->resolvedSubscriptionStatus(),
-                'effective_role' => $user->effectiveRole(),
-            ],
+            'user' => $this->serializeAuthUser($user),
             'access' => $user->accessStatus(),
             'login_context' => $user->loginContext(),
         ]);
@@ -261,6 +225,35 @@ class AutenticacionControlador extends ControladorBase
             ->where('icao', $normalizedCode)
             ->orWhere('iata', $normalizedCode)
             ->first();
+    }
+
+    private function hasValidAfacLicenseEvidence(array $data): bool
+    {
+        $documentType = Str::of((string) ($data['document_type'] ?? ''))->upper()->value();
+        $scanRaw = Str::of((string) ($data['ine_scan_raw'] ?? ''))->upper()->value();
+        $scanStatus = Str::of((string) ($data['ine_scan_status'] ?? ''))->lower()->value();
+        $documentNumber = trim((string) ($data['document_number'] ?? ''));
+
+        if (! str_contains($documentType, 'LICENCIA')) {
+            return false;
+        }
+
+        if (! preg_match('/^\d{8,}-\d{2,}$/', $documentNumber)) {
+            return false;
+        }
+
+        $hasAfacMarkers = str_contains($scanRaw, 'AFAC')
+            || str_contains($scanRaw, 'LICENCIA FEDERAL')
+            || str_contains($scanRaw, 'PERSONAL TECNICO AERONAUTICO')
+            || str_contains($scanRaw, '"AFAC"')
+            || str_contains($scanRaw, '"AFAC_DETECTED": TRUE')
+            || str_contains($scanRaw, '"AUTORIDAD_DOCUMENTO": "AFAC"');
+
+        if (! $hasAfacMarkers) {
+            return false;
+        }
+
+        return in_array($scanStatus, ['scanned', 'partial'], true);
     }
 
     public function redirectDashboard(Request $request)
@@ -340,10 +333,11 @@ class AutenticacionControlador extends ControladorBase
 
     private function authenticatedResponse(Request $request, Usuario $user, int $status = 200)
     {
+        $user = $this->loadAuthUser($user);
         $plainToken = TokenApi::issue($user, 'browser-session');
 
         return $this->ok([
-            'user' => $user,
+            'user' => $this->serializeAuthUser($user),
             'access' => $user->accessStatus(),
             'login_context' => $user->loginContext(),
             'token' => $plainToken,
@@ -359,6 +353,135 @@ class AutenticacionControlador extends ControladorBase
             false,
             $this->authCookieSameSite($request)
         );
+    }
+
+    private function loadAuthUser(Usuario $user): Usuario
+    {
+        $relations = $this->usesSlimClientAuthPayload($user)
+            ? [
+                'profile:id,user_id,company_name,business_type,country,city,base_airport,base_airport_id,address,avatar,avatar_url,tax_data',
+                'profile.baseAirport:id,icao,iata,name',
+                'roles:id,code,name',
+                'demo:id,user_id,status,started_at,expires_at',
+                'activeSuscripcion' => fn ($query) => $query->select([
+                    'subscriptions.id',
+                    'subscriptions.user_id',
+                    'subscriptions.plan_id',
+                    'subscriptions.status',
+                    'subscriptions.started_at',
+                    'subscriptions.expires_at',
+                ]),
+                'activeSuscripcion.plan:id,name,code,billing_cycle,price_monthly,price_yearly,max_aircraft,max_users,has_priority,has_concierge,has_reports,is_enterprise',
+            ]
+            : [
+                'provider:id,user_id,company_name,commercial_name,approval_status,jet_a_price,margin_percent,fixed_fee,notes',
+                'ownedProvider:id,user_id,company_name,commercial_name,approval_status,jet_a_price,margin_percent,fixed_fee,notes',
+                'profile:id,user_id,company_name,business_type,country,city,base_airport,base_airport_id,address,avatar,avatar_url,tax_data,birth_date,nationality,document_type,document_number,document_expiration,identity_validation_required,ine_curp,ine_cic,ine_ocr,ine_scan_raw,ine_scan_status,ine_front_path,ine_back_path',
+                'profile.baseAirport:id,icao,iata,name',
+                'roles:id,code,name',
+                'demo:id,user_id,status,started_at,expires_at',
+                'activeSuscripcion' => fn ($query) => $query->select([
+                    'subscriptions.id',
+                    'subscriptions.user_id',
+                    'subscriptions.plan_id',
+                    'subscriptions.status',
+                    'subscriptions.started_at',
+                    'subscriptions.expires_at',
+                ]),
+                'activeSuscripcion.plan:id,name,code,billing_cycle,price_monthly,price_yearly,max_aircraft,max_users,has_priority,has_concierge,has_reports,is_enterprise',
+                'paymentMethods:id,user_id,type,brand,last_four,provider,is_default',
+            ];
+
+        return $user->loadMissing($relations);
+    }
+
+    private function usesSlimClientAuthPayload(Usuario $user): bool
+    {
+        return $user->role === Usuario::ROLE_CLIENT && $user->operational_role !== Usuario::ROLE_SOBRECARGO;
+    }
+
+    private function serializeAuthUser(Usuario $user): array
+    {
+        $providerId = $user->resolvedProviderId();
+        $profile = $user->profile;
+        $basePayload = [
+            'id' => $user->id,
+            'name' => $user->name,
+            'email' => $user->email,
+            'phone' => $user->phone,
+            'role' => $user->role,
+            'operational_role' => $user->operational_role,
+            'provider_id' => $providerId,
+            'proveedor_id' => $providerId,
+            'status' => $user->status,
+            'identity_verification_status' => $user->identity_verification_status,
+            'identity_verification_message' => $user->identity_verification_message,
+            'identity_verified' => $user->identity_verified,
+            'face_detected' => $user->face_detected,
+            'face_match_score' => $user->face_match_score,
+            'liveness_score' => $user->liveness_score,
+            'image_storage_score' => $user->image_storage_score,
+            'biometric_image_saved' => $user->biometric_image_saved,
+            'biometric_captured_at' => $user->biometric_captured_at,
+            'biometric_provider' => $user->biometric_provider,
+            'biometric_template_type' => $user->biometric_template_type,
+            'biometric_selfie_path' => $user->biometric_selfie_path,
+            'biometric_selfie_url' => $user->biometric_selfie_path
+                ? Storage::disk('public')->url($user->biometric_selfie_path)
+                : null,
+            'profile' => $profile ? [
+                'company_name' => $profile->company_name,
+                'business_type' => $profile->business_type,
+                'country' => $profile->country,
+                'city' => $profile->city,
+                'base_airport' => $profile->base_airport,
+                'base_airport_id' => $profile->base_airport_id,
+                'address' => $profile->address,
+                'avatar' => $profile->avatar,
+                'avatar_url' => $profile->avatar_url,
+                'tax_data' => $profile->tax_data,
+                'base_airport_record' => $profile->baseAirport ? [
+                    'id' => $profile->baseAirport->id,
+                    'icao' => $profile->baseAirport->icao,
+                    'iata' => $profile->baseAirport->iata,
+                    'name' => $profile->baseAirport->name,
+                ] : null,
+            ] : null,
+            'roles' => $user->roles->map(fn ($role) => [
+                'id' => $role->id,
+                'code' => $role->code,
+                'name' => $role->name,
+            ])->values(),
+            'demo' => $user->demo ? [
+                'status' => $user->demo->status,
+                'started_at' => $user->demo->started_at,
+                'expires_at' => $user->demo->expires_at,
+            ] : null,
+            'active_suscripcion' => $user->activeSuscripcion ? [
+                'id' => $user->activeSuscripcion->id,
+                'plan_id' => $user->activeSuscripcion->plan_id,
+                'status' => $user->activeSuscripcion->status,
+                'started_at' => $user->activeSuscripcion->started_at,
+                'expires_at' => $user->activeSuscripcion->expires_at,
+                'plan' => $user->activeSuscripcion->plan,
+            ] : null,
+            'subscription_status' => $user->resolvedSubscriptionStatus(),
+            'effective_role' => $user->effectiveRole(),
+        ];
+
+        $basePayload['activeSuscripcion'] = $basePayload['active_suscripcion'];
+
+        if ($this->usesSlimClientAuthPayload($user)) {
+            return $basePayload;
+        }
+
+        $basePayload['provider'] = $user->provider;
+        $basePayload['owned_provider'] = $user->ownedProvider;
+        $basePayload['ownedProvider'] = $user->ownedProvider;
+        $basePayload['payment_methods'] = $user->paymentMethods;
+        $basePayload['paymentMethods'] = $user->paymentMethods;
+
+        return $basePayload;
     }
 
     private function authCookieName(): string

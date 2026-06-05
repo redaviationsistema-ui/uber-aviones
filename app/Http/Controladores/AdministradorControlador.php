@@ -38,32 +38,49 @@ class AdministradorControlador extends ControladorBase
 
     public function users()
     {
+        $users = Usuario::query()
+            ->select([
+                'id',
+                'name',
+                'email',
+                'phone',
+                'role',
+                'operational_role',
+                'provider_id',
+                'status',
+                'updated_at',
+            ])
+            ->with([
+                'profile:id,user_id,company_name,city,base_airport,tax_data',
+                'provider:id,user_id,company_name,commercial_name,approval_status',
+                'ownedProvider:id,user_id,company_name,commercial_name,approval_status',
+                'demo:id,user_id,status,started_at,expires_at',
+                'activeSuscripcion:id,user_id,plan_id,status,started_at,expires_at',
+                'activeSuscripcion.plan:id,name,code,billing_cycle',
+                'roles:id,code,name',
+            ])
+            ->paginate(25);
+
         return $this->ok([
-            'users' => Usuario::with([
-                'profile',
-                'provider',
-                'ownedProvider',
-                'demo',
-                'activeSuscripcion.plan',
-                'roles',
-                'identityVerifications',
-            ])->paginate(25),
+            'users' => $users->through(fn (Usuario $user) => $this->serializeAdminUserSummary($user)),
         ]);
     }
 
     public function showUsuario(Usuario $user)
     {
+        $user->load([
+            'profile',
+            'provider',
+            'ownedProvider',
+            'demo',
+            'subscriptions.plan',
+            'activeSuscripcion.plan',
+            'roles',
+            'identityVerifications',
+        ]);
+
         return $this->ok([
-            'user' => $user->load([
-                'profile',
-                'provider',
-                'ownedProvider',
-                'demo',
-                'subscriptions.plan',
-                'activeSuscripcion.plan',
-                'roles',
-                'identityVerifications',
-            ]),
+            'user' => $this->serializeAdminUserDetail($user),
         ]);
     }
 
@@ -284,5 +301,57 @@ class AdministradorControlador extends ControladorBase
         }
 
         return $this->settings();
+    }
+
+    private function serializeAdminUserSummary(Usuario $user): array
+    {
+        return [
+            'id' => $user->id,
+            'name' => $user->name,
+            'email' => $user->email,
+            'phone' => $user->phone,
+            'role' => $user->role,
+            'operational_role' => $user->operational_role,
+            'effective_role' => $user->effectiveRole(),
+            'provider_id' => $user->provider_id,
+            'proveedor_id' => $user->provider_id,
+            'status' => $user->status,
+            'updated_at' => $user->updated_at,
+            'roles' => $user->roles,
+            'profile' => $user->profile ? [
+                'company_name' => $user->profile->company_name,
+                'city' => $user->profile->city,
+                'base_airport' => $user->profile->base_airport,
+                'tax_data' => $user->profile->tax_data,
+            ] : null,
+            'provider' => $user->provider ? [
+                'id' => $user->provider->id,
+                'company_name' => $user->provider->company_name,
+                'commercial_name' => $user->provider->commercial_name,
+                'approval_status' => $user->provider->approval_status,
+            ] : null,
+            'ownedProvider' => $user->ownedProvider ? [
+                'id' => $user->ownedProvider->id,
+                'company_name' => $user->ownedProvider->company_name,
+                'commercial_name' => $user->ownedProvider->commercial_name,
+                'approval_status' => $user->ownedProvider->approval_status,
+            ] : null,
+            'demo' => $user->demo,
+            'active_suscripcion' => $user->activeSuscripcion,
+            'activeSuscripcion' => $user->activeSuscripcion,
+        ];
+    }
+
+    private function serializeAdminUserDetail(Usuario $user): array
+    {
+        $summary = $this->serializeAdminUserSummary($user);
+        $summary['profile'] = $user->profile;
+        $summary['provider'] = $user->provider;
+        $summary['ownedProvider'] = $user->ownedProvider;
+        $summary['subscriptions'] = $user->subscriptions;
+        $summary['identityVerifications'] = $user->identityVerifications;
+        $summary['identity_verifications'] = $user->identityVerifications;
+
+        return $summary;
     }
 }

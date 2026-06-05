@@ -14,6 +14,7 @@ use App\Http\Intermediarios\VerificarDemo;
 use App\Http\Intermediarios\VerificarProveedorAprobado;
 use App\Http\Intermediarios\VerificarSuscripcion;
 use App\Http\Intermediarios\ForzarRespuestaJson;
+use App\Http\Intermediarios\CorsIntermediario;
 use App\Http\Intermediarios\RolIntermediario;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
@@ -38,6 +39,7 @@ return Application::configure(basePath: dirname(__DIR__))
         LiberarPagosProveedorComando::class,
     ])
     ->withMiddleware(function (Middleware $middleware): void {
+        $middleware->append(CorsIntermediario::class);
         $middleware->append(HandleCors::class);
 
         $middleware->alias([
@@ -60,10 +62,10 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withExceptions(function (Exceptions $exceptions): void {
         $exceptions->render(function (AuthenticationException $exception, Request $request) {
             if ($request->is('api/*')) {
-                return response()->json([
+                return agregarCabecerasCorsApi($request, response()->json([
                     'success' => false,
                     'message' => 'Unauthenticated.',
-                ], 401);
+                ], 401));
             }
 
             return null;
@@ -75,11 +77,11 @@ return Application::configure(basePath: dirname(__DIR__))
             }
 
             if ($exception instanceof ValidationException) {
-                return response()->json([
+                return agregarCabecerasCorsApi($request, response()->json([
                     'success' => false,
                     'message' => 'Datos invalidos.',
                     'errors' => $exception->errors(),
-                ], $exception->status);
+                ], $exception->status));
             }
 
             $status = $exception instanceof HttpExceptionInterface
@@ -93,9 +95,42 @@ return Application::configure(basePath: dirname(__DIR__))
                     : 'No se pudo procesar la solicitud.';
             }
 
-            return response()->json([
+            return agregarCabecerasCorsApi($request, response()->json([
                 'success' => false,
                 'message' => $message,
-            ], $status);
+            ], $status));
         });
     })->create();
+
+function agregarCabecerasCorsApi(Request $request, \Illuminate\Http\JsonResponse $response): \Illuminate\Http\JsonResponse
+{
+    if (! $request->is('api/*')) {
+        return $response;
+    }
+
+    $origin = trim((string) $request->headers->get('Origin', ''));
+    $allowedOrigins = collect(explode(',', (string) env('CORS_ALLOWED_ORIGINS', '')))
+        ->map(fn ($item) => trim($item))
+        ->filter()
+        ->values();
+
+    if ($allowedOrigins->isEmpty()) {
+        $allowedOrigins = collect([
+            'http://localhost:5173',
+            'http://127.0.0.1:5173',
+            'https://redskyg.com',
+            'https://www.redskyg.com',
+            rtrim((string) env('APP_URL', ''), '/'),
+        ])->filter()->values();
+    }
+
+    if ($origin !== '' && $allowedOrigins->contains($origin)) {
+        $response->headers->set('Access-Control-Allow-Origin', $origin);
+        $response->headers->set('Access-Control-Allow-Credentials', 'true');
+        $response->headers->set('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+        $response->headers->set('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept');
+        $response->headers->set('Vary', 'Origin');
+    }
+
+    return $response;
+}

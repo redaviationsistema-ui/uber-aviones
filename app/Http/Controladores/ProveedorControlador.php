@@ -411,6 +411,7 @@ class ProveedorControlador extends ControladorBase
     {
         $providerId = $request->user()->provider_id;
         abort_if(! $providerId, 404, 'Proveedor no encontrado.');
+        $perPage = min(max((int) $request->integer('per_page', 20), 1), 50);
 
         $activeStatuses = ['confirmada', 'confirmed', 'en_preparacion', 'preparacion', 'preparing', 'lista', 'ready', 'en_vuelo', 'in_progress', 'in_flight', 'incidencia'];
         $assignedCrewIds = Operacion::query()
@@ -421,21 +422,34 @@ class ProveedorControlador extends ControladorBase
             ->all();
 
         $crew = Usuario::query()
-            ->with(['roles', 'profile'])
+            ->select([
+                'id',
+                'provider_id',
+                'name',
+                'email',
+                'phone',
+                'status',
+                'role',
+                'operational_role',
+                'created_at',
+                'updated_at',
+            ])
+            ->with(['profile:id,user_id,city,business_type'])
             ->where('provider_id', $providerId)
             ->where(function ($query) {
                 $query->whereHas('roles', fn ($roles) => $roles->whereIn('code', ['sobrecargo']))
                     ->orWhere('operational_role', 'sobrecargo');
             })
             ->latest()
-            ->get()
-            ->map(function (Usuario $user) use ($assignedCrewIds) {
+            ->paginate($perPage);
+
+        $collection = $crew->getCollection()->map(function (Usuario $user) use ($assignedCrewIds) {
                 $hasActiveOperation = in_array($user->id, $assignedCrewIds, true);
 
                 return [
                     'id' => $user->id,
                     'name' => $user->name,
-                    'role' => $user->operational_role ?: $user->effectiveRole(),
+                    'role' => $user->operational_role ?: $user->role ?: 'sobrecargo',
                     'base' => $user->profile?->city,
                     'availability' => $user->status !== 'active'
                         ? 'No disponible'
@@ -450,7 +464,15 @@ class ProveedorControlador extends ControladorBase
             })
             ->values();
 
-        return $this->ok(['crew' => $crew]);
+        return $this->ok([
+            'crew' => $collection,
+            'meta' => [
+                'current_page' => $crew->currentPage(),
+                'per_page' => $crew->perPage(),
+                'total' => $crew->total(),
+                'last_page' => $crew->lastPage(),
+            ],
+        ]);
     }
 
     public function commissions(Request $request)

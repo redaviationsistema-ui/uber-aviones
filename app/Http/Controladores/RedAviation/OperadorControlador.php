@@ -19,6 +19,9 @@ use Illuminate\Validation\Rule;
 
 class OperadorControlador extends ControladorBase
 {
+    private const DEFAULT_OPERATOR_AIRCRAFT_PAGE_SIZE = 24;
+    private const MAX_OPERATOR_AIRCRAFT_PAGE_SIZE = 50;
+
     private const AIRCRAFT_CATEGORIES = [
         'Helicoptero',
         'Turboprop',
@@ -93,6 +96,7 @@ class OperadorControlador extends ControladorBase
 
         $data = $this->normalizeAircraftInput($request->validate($this->aircraftRules()));
         $isApproved = $request->user()->provider?->approval_status === 'approved';
+        $user = $request->user()->loadMissing('activeSuscripcion.plan');
 
         $aeronave = Aeronave::create($data + [
             'provider_id' => $request->user()->provider_id,
@@ -102,7 +106,10 @@ class OperadorControlador extends ControladorBase
 
         return $this->ok([
             'aircraft' => $this->formatAircraftPayload(
-                $aeronave->fresh(['provider.user.activeSuscripcion.plan', 'availability', 'documents', 'images'])
+                $aeronave->fresh(['images', 'documents', 'suscripcionesAeronave' => fn ($q) => $q->where('status', 'active')->with('plan')->latest('id')]),
+                $user->activeSuscripcion?->plan,
+                Aeronave::where('provider_id', $request->user()->provider_id)->count(),
+                true
             ),
             'message' => $isApproved
                 ? 'La aeronave fue registrada y quedó activa.'
@@ -115,18 +122,67 @@ class OperadorControlador extends ControladorBase
         $user = $request->user()->loadMissing('activeSuscripcion.plan');
         $plan = $user->activeSuscripcion?->plan;
         $providerId = $request->user()->provider_id;
+        $perPage = min(max((int) $request->integer('per_page', self::DEFAULT_OPERATOR_AIRCRAFT_PAGE_SIZE), 1), self::MAX_OPERATOR_AIRCRAFT_PAGE_SIZE);
         abort_if(! $providerId, 422, 'El usuario proveedor no tiene provider_id asignado.');
 
-        $aircraft = Aeronave::with([
-            'provider.user.activeSuscripcion.plan',
-            'availability',
-            'documents',
-            'images',
-            'suscripcionesAeronave' => fn ($q) => $q->where('status', 'active')->with('plan')->latest('id'),
-        ])->where('provider_id', $providerId)->latest()->get();
+        $aircraft = Aeronave::query()
+            ->select([
+                'id',
+                'provider_id',
+                'model',
+                'manufacturer',
+                'category',
+                'model_year',
+                'registration',
+                'capacity',
+                'range_km',
+                'speed_kmh',
+                'amenities',
+                'base_airport',
+                'coverage',
+                'airport_expenses_usd',
+                'hourly_rate',
+                'minimum_hours',
+                'climb_descent_minutes',
+                'fuel_burn_gph',
+                'engine_reserve_rate',
+                'insurance_rate',
+                'maintenance_rate',
+                'crew_rate',
+                'repositioning_fee',
+                'overnight_fee',
+                'operational_cost',
+                'currency',
+                'status',
+                'notes',
+                'created_at',
+                'updated_at',
+            ])
+            ->with([
+                'images:id,aircraft_id,kind,title,image_url,is_main,visible_to_client,sort_order',
+                'documents:id,aircraft_id,type,document_type,document_name,status,expires_at',
+                'suscripcionesAeronave' => fn ($q) => $q
+                    ->select([
+                        'id',
+                        'aircraft_id',
+                        'plan_id',
+                        'status',
+                        'payment_provider',
+                        'payment_reference',
+                        'ends_at',
+                    ])
+                    ->where('status', 'active')
+                    ->with('plan:id,name,code,billing_cycle,max_aircraft')
+                    ->latest('id'),
+            ])
+            ->where('provider_id', $providerId)
+            ->latest()
+            ->paginate($perPage);
 
         return $this->ok([
-            'aircraft' => $aircraft->map(fn (Aeronave $item) => $this->formatAircraftPayload($item, $plan, $aircraft->count())),
+            'aircraft' => $aircraft->getCollection()->map(
+                fn (Aeronave $item) => $this->formatAircraftPayload($item, $plan, $aircraft->total(), false)
+            )->values(),
             'membership' => $plan ? [
                 'plan_id' => $plan->id,
                 'plan_name' => $plan->name,
@@ -135,6 +191,33 @@ class OperadorControlador extends ControladorBase
                 'price_yearly' => $plan->price_yearly,
                 'max_aircraft' => $plan->max_aircraft,
             ] : null,
+            'meta' => [
+                'current_page' => $aircraft->currentPage(),
+                'per_page' => $aircraft->perPage(),
+                'total' => $aircraft->total(),
+                'last_page' => $aircraft->lastPage(),
+            ],
+        ]);
+    }
+
+    public function showAircraft(Request $request, Aeronave $aircraft)
+    {
+        abort_if($aircraft->provider_id !== $request->user()->provider_id, 403);
+
+        $user = $request->user()->loadMissing('activeSuscripcion.plan');
+
+        return $this->ok([
+            'aircraft' => $this->formatAircraftPayload(
+                $aircraft->load([
+                    'images',
+                    'availability',
+                    'documents',
+                    'suscripcionesAeronave' => fn ($q) => $q->where('status', 'active')->with('plan')->latest('id'),
+                ]),
+                $user->activeSuscripcion?->plan,
+                Aeronave::where('provider_id', $request->user()->provider_id)->count(),
+                true
+            ),
         ]);
     }
 
@@ -148,9 +231,15 @@ class OperadorControlador extends ControladorBase
 
         return $this->ok([
             'aircraft' => $this->formatAircraftPayload(
-                $aircraft->fresh(['provider.user.activeSuscripcion.plan', 'availability', 'documents', 'images']),
+                $aircraft->fresh([
+                    'images',
+                    'availability',
+                    'documents',
+                    'suscripcionesAeronave' => fn ($q) => $q->where('status', 'active')->with('plan')->latest('id'),
+                ]),
                 $user->activeSuscripcion?->plan,
-                Aeronave::where('provider_id', $request->user()->provider_id)->count()
+                Aeronave::where('provider_id', $request->user()->provider_id)->count(),
+                true
             ),
         ]);
     }
@@ -513,36 +602,61 @@ class OperadorControlador extends ControladorBase
         return self::CATEGORY_CLIMB_DESCENT_MINUTES[$this->normalizeAircraftCategory($category) ?? ''] ?? 30;
     }
 
-    private function formatAircraftPayload(Aeronave $aircraft, $plan = null, ?int $fleetCount = null): array
+    private function formatAircraftPayload(Aeronave $aircraft, $plan = null, ?int $fleetCount = null, bool $includeDetails = false): array
     {
-        $providerUser = $aircraft->provider?->user;
-        $resolvedPlan = $plan ?? $providerUser?->activeSuscripcion?->plan;
-        $aircraftCount = max($fleetCount ?? ($aircraft->provider?->aircraft()->count() ?? 1), 1);
+        $resolvedPlan = $plan;
+        $aircraftCount = max($fleetCount ?? 1, 1);
         $monthlyBase = (float) ($resolvedPlan?->price_monthly ?? $resolvedPlan?->price_yearly ?? $resolvedPlan?->price ?? 0);
         $monthlyPerAircraft = $monthlyBase > 0 ? round($monthlyBase / $aircraftCount, 2) : null;
-        $images = $aircraft->images
+        $images = ($aircraft->relationLoaded('images') ? $aircraft->images : collect())
             ->sortBy([
                 ['is_main', 'desc'],
                 ['sort_order', 'asc'],
                 ['id', 'asc'],
             ])
             ->values();
+        $mainImage = $images->firstWhere('is_main', true)?->image_url ?? $images->first()?->image_url;
 
         $activeAircraftSub = $aircraft->relationLoaded('suscripcionesAeronave')
             ? $aircraft->suscripcionesAeronave->first()
             : null;
+        $documents = $aircraft->relationLoaded('documents') ? $aircraft->documents : collect();
+        $availability = $aircraft->relationLoaded('availability') ? $aircraft->availability : collect();
 
-        return [
-            ...$aircraft->toArray(),
+        $payload = [
+            'id' => $aircraft->id,
+            'provider_id' => $aircraft->provider_id,
+            'model' => $aircraft->model,
+            'manufacturer' => $aircraft->manufacturer,
+            'category' => $aircraft->category,
+            'model_year' => $aircraft->model_year,
+            'registration' => $aircraft->registration,
+            'capacity' => $aircraft->capacity,
+            'range_km' => $aircraft->range_km,
+            'speed_kmh' => $aircraft->speed_kmh,
+            'base_airport' => $aircraft->base_airport,
+            'coverage' => $aircraft->coverage,
+            'airport_expenses_usd' => $aircraft->airport_expenses_usd,
+            'hourly_rate' => $aircraft->hourly_rate,
             'year' => $aircraft->model_year,
             'minimum_hours' => $aircraft->minimum_hours ?: $this->resolveMinimumHoursForCategory($aircraft->category),
             'climb_descent_minutes' => $aircraft->climb_descent_minutes ?: $this->resolveClimbDescentMinutesForCategory($aircraft->category),
             'amenities' => $this->parseAmenities($aircraft->amenities),
-            'documents' => $aircraft->documents
-                ->map(fn (DocumentoAeronave $document) => $this->formatAircraftDocumentPayload($document))
-                ->values(),
-            'main_image' => $images->firstWhere('is_main', true)?->image_url ?? $images->first()?->image_url,
-            'images' => $images->map(fn ($image) => [
+            'fuel_burn_gph' => $aircraft->fuel_burn_gph,
+            'engine_reserve_rate' => $aircraft->engine_reserve_rate,
+            'insurance_rate' => $aircraft->insurance_rate,
+            'maintenance_rate' => $aircraft->maintenance_rate,
+            'crew_rate' => $aircraft->crew_rate,
+            'repositioning_fee' => $aircraft->repositioning_fee,
+            'overnight_fee' => $aircraft->overnight_fee,
+            'operational_cost' => $aircraft->operational_cost,
+            'currency' => $aircraft->currency,
+            'status' => $aircraft->status,
+            'notes' => $aircraft->notes,
+            'created_at' => $aircraft->created_at,
+            'updated_at' => $aircraft->updated_at,
+            'main_image' => $mainImage,
+            'images' => ($includeDetails ? $images : $images->take(1))->map(fn ($image) => [
                 'id' => $image->id,
                 'kind' => $image->kind,
                 'title' => $image->title,
@@ -551,6 +665,19 @@ class OperadorControlador extends ControladorBase
                 'visible_to_client' => $image->visible_to_client,
                 'sort_order' => $image->sort_order,
             ])->values(),
+            'documents_count' => $documents->count(),
+            'documents' => ($includeDetails
+                ? $documents->map(fn (DocumentoAeronave $document) => $this->formatAircraftDocumentPayload($document))
+                : $documents->map(fn (DocumentoAeronave $document) => [
+                    'id' => $document->id,
+                    'type' => $document->type,
+                    'document_type' => $document->document_type,
+                    'document_name' => $document->document_name,
+                    'status' => $document->status,
+                    'expires_at' => $document->expires_at,
+                ]))->values(),
+            'availability_status' => $availability->sortByDesc('end_datetime')->first()?->status,
+            'availability_count' => $availability->count(),
             'aircraft_subscription' => $activeAircraftSub ? [
                 'id' => $activeAircraftSub->id,
                 'plan_id' => $activeAircraftSub->plan_id,
@@ -569,6 +696,19 @@ class OperadorControlador extends ControladorBase
                 'within_plan_limit' => $resolvedPlan->max_aircraft ? $aircraftCount <= $resolvedPlan->max_aircraft : true,
             ] : null,
         ];
+
+        if ($includeDetails) {
+            $payload['availability'] = $availability->map(fn (DisponibilidadAeronave $entry) => [
+                'id' => $entry->id,
+                'aircraft_id' => $entry->aircraft_id,
+                'start_datetime' => $entry->start_datetime,
+                'end_datetime' => $entry->end_datetime,
+                'status' => $entry->status,
+                'notes' => $entry->notes,
+            ])->values();
+        }
+
+        return $payload;
     }
 
     private function normalizeAmenities(mixed $value): ?string
@@ -633,7 +773,16 @@ class OperadorControlador extends ControladorBase
         $resolvedThumbnailUrl = $this->resolveAircraftDocumentThumbnailUrl($document);
 
         return [
-            ...$document->toArray(),
+            'id' => $document->id,
+            'aircraft_id' => $document->aircraft_id,
+            'type' => $document->type,
+            'document_type' => $document->document_type,
+            'document_name' => $document->document_name,
+            'status' => $document->status,
+            'expires_at' => $document->expires_at,
+            'file_type' => $document->file_type,
+            'created_at' => $document->created_at,
+            'updated_at' => $document->updated_at,
             'file_url' => $resolvedUrl,
             'document_url' => $resolvedUrl,
             'url' => $resolvedUrl,
