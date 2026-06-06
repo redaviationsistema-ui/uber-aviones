@@ -16,6 +16,8 @@ services:
         value: false
       - key: APP_URL
         value: https://uber-aviones.onrender.com
+      - key: OCR_TESSERACT_PATH
+        value: /usr/bin/tesseract
       - key: DB_SSLMODE
         value: require
       - key: CLOUDINARY_CLOUD_NAME
