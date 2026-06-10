@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controladores\AeronaveControlador;
+use App\Http\Controladores\CrewOperationIncidentController;
 use App\Http\Controladores\RedAviation\AdminControlador;
 use App\Http\Controladores\RedAviation\ChatControlador;
 use App\Http\Controladores\RedAviation\ClienteControlador;
@@ -15,6 +16,11 @@ Route::get('/plans', [PlanControlador::class, 'index']);
 Route::post('/client/quotes/preview', [ClienteControlador::class, 'previewQuotes']);
 
 Route::middleware(['auth.token'])->group(function () {
+    Route::get('/crew-operation-incidents', [CrewOperationIncidentController::class, 'index']);
+    Route::post('/crew-operation-incidents', [CrewOperationIncidentController::class, 'store']);
+    Route::get('/crew-operation-incidents/{id}', [CrewOperationIncidentController::class, 'show']);
+    Route::put('/crew-operation-incidents/{id}', [CrewOperationIncidentController::class, 'update']);
+
     Route::post('/subscriptions/start-trial', [SuscripcionControlador::class, 'startTrial']);
     Route::post('/subscriptions/checkout', [SuscripcionControlador::class, 'checkout']);
     Route::get('/subscriptions/current', [SuscripcionControlador::class, 'current']);
