@@ -837,8 +837,8 @@ class ProveedorControlador extends ControladorBase
         $providerId = $request->user()->provider_id;
         abort_if(! $providerId, 404, 'Proveedor no encontrado.');
 
-        $incidents = LineaTiempoOperacion::with(['operacion.solicitudVuelo', 'operacion.aeronave'])
-            ->where('status', 'incidencia')
+        $incidents = LineaTiempoOperacion::with(['operacion.solicitudVuelo', 'operacion.aeronave', 'operacion.sobrecargo', 'operacion.proveedor'])
+            ->whereIn('status', ['incidencia', 'cerrada'])
             ->whereHas('operacion', fn ($query) => $query->where('provider_id', $providerId))
             ->latest()
             ->paginate(20)
@@ -895,7 +895,7 @@ class ProveedorControlador extends ControladorBase
         $this->writeAudit($request, 'create', 'provider_incidents', 'Incidencia creada por proveedor.');
 
         return $this->ok([
-            'incident' => $this->formatIncidentPayload($timeline->fresh(['operacion.solicitudVuelo', 'operacion.aeronave'])),
+            'incident' => $this->formatIncidentPayload($timeline->fresh(['operacion.solicitudVuelo', 'operacion.aeronave', 'operacion.sobrecargo', 'operacion.proveedor'])),
         ], 201);
     }
 
@@ -921,7 +921,7 @@ class ProveedorControlador extends ControladorBase
         $this->writeAudit($request, 'update', 'provider_incidents', 'Incidencia actualizada por proveedor.');
 
         return $this->ok([
-            'incident' => $this->formatIncidentPayload($timeline->fresh(['operacion.solicitudVuelo', 'operacion.aeronave'])),
+            'incident' => $this->formatIncidentPayload($timeline->fresh(['operacion.solicitudVuelo', 'operacion.aeronave', 'operacion.sobrecargo', 'operacion.proveedor'])),
         ]);
     }
 
@@ -1100,8 +1100,19 @@ class ProveedorControlador extends ControladorBase
             'priority' => $this->extractTaggedValue((string) $incident->description, 'Prioridad'),
             'evidence' => $this->extractTaggedValue((string) $incident->description, 'Evidencia'),
             'comment' => $incident->description,
-            'created_at' => optional($incident->created_at)?->format('Y-m-d H:i'),
             'operation_id' => $operation?->id,
+            'request_id' => $flightRequest?->id,
+            'route' => trim(($flightRequest?->origin ?? 'N/D').' - '.($flightRequest?->destination ?? 'N/D')),
+            'source' => $this->extractTaggedValue((string) $incident->description, 'Origen') ?: 'Proveedor',
+            'crew_name' => $this->extractTaggedValue((string) $incident->description, 'Sobrecargo') ?: $operation?->sobrecargo?->name,
+            'provider_id' => $operation?->provider_id,
+            'provider_name' => $this->extractTaggedValue((string) $incident->description, 'Empresa')
+                ?: $operation?->proveedor?->commercial_name
+                ?: $operation?->proveedor?->company_name,
+            'responsible' => $this->extractTaggedValue((string) $incident->description, 'Origen') === 'Sobrecargo'
+                ? ($this->extractTaggedValue((string) $incident->description, 'Sobrecargo') ?: 'Sobrecargo')
+                : 'Proveedor',
+            'created_at' => optional($incident->created_at)?->format('Y-m-d H:i'),
         ];
     }
 

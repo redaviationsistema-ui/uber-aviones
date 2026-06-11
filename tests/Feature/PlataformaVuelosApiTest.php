@@ -11,6 +11,7 @@ use App\Modelos\SolicitudVuelo;
 use App\Modelos\Usuario;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
@@ -809,6 +810,119 @@ class PlataformaVuelosApiTest extends TestCase
             'status' => 'incidencia',
             'crew_status' => 'crew_incident_reported',
         ]);
+    }
+
+    public function test_crew_operation_incident_is_reflected_for_assigned_provider_and_syncs_admin_status(): void
+    {
+        $this->seed();
+
+        $providerUser = Usuario::query()->where('email', 'proveedor@privateflights.test')->firstOrFail();
+        $provider = Proveedor::query()->findOrFail($providerUser->provider_id);
+        $aircraft = Aeronave::query()->where('provider_id', $provider->id)->firstOrFail();
+        $client = Usuario::query()->where('email', 'cliente@privateflights.test')->firstOrFail();
+        $crew = Usuario::query()->where('email', 'sobrecargo@redaviation.test')->firstOrFail();
+
+        $flightRequest = SolicitudVuelo::query()->create([
+            'client_id' => $client->id,
+            'assigned_provider_id' => $provider->id,
+            'assigned_aircraft_id' => $aircraft->id,
+            'assigned_aircraft_model' => $aircraft->model,
+            'origin' => 'MMMX',
+            'destination' => 'MMUN',
+            'departure_datetime' => now()->addDays(2),
+            'passengers' => 5,
+            'trip_type' => 'one_way',
+            'status' => 'operador_asignado',
+            'workflow_status' => 'operator_assigned',
+        ]);
+
+        $operation = Operacion::query()->create([
+            'flight_request_id' => $flightRequest->id,
+            'provider_id' => $provider->id,
+            'aircraft_id' => $aircraft->id,
+            'sobrecargo_user_id' => $crew->id,
+            'status' => 'confirmada',
+            'crew_status' => 'crew_confirmed',
+        ]);
+
+        $crewToken = $this->postJson('/api/v1/auth/login', [
+            'email' => 'sobrecargo@redaviation.test',
+            'password' => 'password',
+        ])->assertOk()->json('token');
+
+        $incidentResponse = $this->withToken($crewToken)
+            ->postJson('/api/v1/crew-operation-incidents', [
+                'crew_operation_id' => $operation->id,
+                'crew_id' => $crew->id,
+                'category' => 'cabina',
+                'priority' => 'alta',
+                'phase' => 'En vuelo',
+                'description' => 'La cabina requiere coordinacion inmediata con el proveedor.',
+            ])
+            ->assertCreated()
+            ->assertJsonPath('incident.crew_operation_id', $operation->id)
+            ->assertJsonPath('incident.provider_id', $provider->id)
+            ->assertJsonPath('incident.provider_name', $provider->commercial_name)
+            ->assertJsonPath('incident.phase', 'En vuelo');
+
+        $incidentId = $incidentResponse->json('incident.id');
+        $providerTimelineId = $incidentResponse->json('incident.provider_timeline_id');
+
+        $this->assertNotNull($providerTimelineId);
+
+        $this->assertDatabaseHas('operation_timeline', [
+            'id' => $providerTimelineId,
+            'operation_id' => $operation->id,
+            'status' => 'incidencia',
+            'title' => 'Incidencia de sobrecargo · Cabina',
+        ]);
+
+        $providerToken = $this->postJson('/api/v1/auth/login', [
+            'email' => 'proveedor@privateflights.test',
+            'password' => 'password',
+        ])->assertOk()->json('token');
+
+        $this->withToken($providerToken)
+            ->getJson('/api/v1/proveedor/incidencias')
+            ->assertOk()
+            ->assertJsonPath('incidents.data.0.operation_id', $operation->id)
+            ->assertJsonPath('incidents.data.0.source', 'Sobrecargo')
+            ->assertJsonPath('incidents.data.0.crew_name', $crew->name)
+            ->assertJsonPath('incidents.data.0.provider_id', $provider->id);
+
+        $adminToken = $this->postJson('/api/v1/auth/login', [
+            'email' => 'admin@privateflights.test',
+            'password' => 'password',
+        ])->assertOk()->json('token');
+
+        $this->withToken($adminToken)
+            ->putJson("/api/v1/crew-operation-incidents/{$incidentId}", [
+                'status' => 'resolved',
+                'admin_response' => 'Se notifico al proveedor y ya quedo atendido.',
+            ])
+            ->assertOk()
+            ->assertJsonPath('incident.status', 'resolved')
+            ->assertJsonPath('incident.admin_response', 'Se notifico al proveedor y ya quedo atendido.');
+
+        $this->assertDatabaseHas('crew_operation_incidents', [
+            'id' => $incidentId,
+            'status' => 'resolved',
+            'admin_response' => 'Se notifico al proveedor y ya quedo atendido.',
+        ]);
+
+        $this->assertDatabaseHas('operation_timeline', [
+            'id' => $providerTimelineId,
+            'status' => 'cerrada',
+        ]);
+
+        $timelineDescription = DB::table('operation_timeline')->where('id', $providerTimelineId)->value('description');
+        $this->assertStringContainsString('Estado: Resuelta', (string) $timelineDescription);
+        $this->assertStringContainsString('Respuesta Admin: Se notifico al proveedor y ya quedo atendido.', (string) $timelineDescription);
+
+        $this->withToken($providerToken)
+            ->getJson('/api/v1/proveedor/incidencias')
+            ->assertOk()
+            ->assertJsonPath('incidents.data.0.status', 'Resuelta');
     }
 
     public function test_sobrecargo_availability_is_persisted_in_normalized_tables(): void
