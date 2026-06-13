@@ -7,6 +7,7 @@ use App\Modelos\Operacion;
 use App\Modelos\Usuario;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rule;
 
 class CrewOperationIncidentController extends ControladorBase
@@ -72,9 +73,13 @@ class CrewOperationIncidentController extends ControladorBase
         ]);
 
         foreach ($request->file('files', []) as $file) {
+            $disk = $this->resolveIncidentUploadDisk();
+            $storedPath = $file->store('crew-operation-incidents', $disk);
+
             DB::table('crew_operation_incident_files')->insert([
                 'incident_id' => $incidentId,
-                'file_path' => $file->store('crew-operation-incidents', 'public'),
+                'storage_disk' => $disk,
+                'file_path' => $storedPath,
                 'file_type' => $file->getClientMimeType(),
                 'original_name' => $file->getClientOriginalName(),
                 'created_at' => now(),
@@ -192,8 +197,16 @@ class CrewOperationIncidentController extends ControladorBase
             ->leftJoin('providers', 'providers.id', '=', 'operations.provider_id')
             ->first();
         $crew = DB::table('users')
-            ->where('id', $incident->crew_id)
-            ->select(['id', 'name', 'email'])
+            ->leftJoin('providers as crew_providers', 'crew_providers.id', '=', 'users.provider_id')
+            ->where('users.id', $incident->crew_id)
+            ->select([
+                'users.id',
+                'users.name',
+                'users.email',
+                'users.provider_id',
+                'crew_providers.company_name as crew_provider_company_name',
+                'crew_providers.commercial_name as crew_provider_commercial_name',
+            ])
             ->first();
         $route = trim(implode(' - ', array_filter([
             $operation?->origin,
@@ -205,7 +218,9 @@ class CrewOperationIncidentController extends ControladorBase
             ->get()
             ->map(fn ($file) => [
                 'id' => $file->id,
+                'storage_disk' => $file->storage_disk ?: 'public',
                 'file_path' => $file->file_path,
+                'file_url' => $this->resolveIncidentFileUrl($file),
                 'file_type' => $file->file_type,
                 'original_name' => $file->original_name,
                 'created_at' => $file->created_at,
@@ -221,8 +236,14 @@ class CrewOperationIncidentController extends ControladorBase
             'crew_id' => $incident->crew_id,
             'crew_name' => $crew?->name ?: 'Sobrecargo por definir',
             'crew_email' => $crew?->email,
+            'crew_provider_id' => $crew?->provider_id,
+            'crew_provider_name' => $crew?->crew_provider_company_name ?: $crew?->crew_provider_commercial_name,
+            'crew_provider_company_name' => $crew?->crew_provider_company_name,
+            'crew_provider_commercial_name' => $crew?->crew_provider_commercial_name,
             'provider_id' => $operation?->provider_id,
-            'provider_name' => $operation?->provider_commercial_name ?: $operation?->provider_company_name,
+            'provider_name' => $operation?->provider_company_name ?: $operation?->provider_commercial_name,
+            'provider_company_name' => $operation?->provider_company_name,
+            'provider_commercial_name' => $operation?->provider_commercial_name,
             'provider_timeline_id' => $incident->provider_timeline_id,
             'reported_by' => $incident->reported_by,
             'phase' => $incident->phase,
@@ -238,6 +259,80 @@ class CrewOperationIncidentController extends ControladorBase
             'updated_at' => $incident->updated_at,
             'files' => $files,
         ];
+    }
+
+    private function resolveIncidentUploadDisk(): string
+    {
+        $missingVariables = $this->missingS3UploadConfigurationVariables();
+
+        abort_if(
+            $missingVariables !== [],
+            500,
+            'La evidencia de incidencias de sobrecargo solo puede guardarse en AWS S3. '
+            .'Faltan variables: '.implode(', ', $missingVariables).'.'
+        );
+
+        return 's3';
+    }
+
+    private function resolveIncidentFileUrl(object $file): ?string
+    {
+        $path = trim((string) ($file->file_path ?? ''));
+        if ($path === '') {
+            return null;
+        }
+
+        $disk = trim((string) ($file->storage_disk ?? 'public')) ?: 'public';
+
+        // Solo exponemos evidencias si realmente viven en AWS S3.
+        if ($disk !== 's3') {
+            return null;
+        }
+
+        if ($this->canGenerateTemporaryS3Urls()) {
+            try {
+                return Storage::disk('s3')->temporaryUrl($path, now()->addMinutes(30));
+            } catch (\Throwable) {
+                return null;
+            }
+        }
+
+        return null;
+    }
+
+    private function canGenerateTemporaryS3Urls(): bool
+    {
+        $key = trim((string) config('filesystems.disks.s3.key', ''));
+        $secret = trim((string) config('filesystems.disks.s3.secret', ''));
+        $bucket = trim((string) config('filesystems.disks.s3.bucket', ''));
+        $region = trim((string) config('filesystems.disks.s3.region', ''));
+
+        return $key !== '' && $secret !== '' && $bucket !== '' && $region !== '';
+    }
+
+    private function missingS3UploadConfigurationVariables(): array
+    {
+        $required = [
+            'AWS_ACCESS_KEY_ID' => config('filesystems.disks.s3.key'),
+            'AWS_SECRET_ACCESS_KEY' => config('filesystems.disks.s3.secret'),
+            'AWS_BUCKET' => config('filesystems.disks.s3.bucket'),
+            'AWS_DEFAULT_REGION' => config('filesystems.disks.s3.region'),
+        ];
+
+        return array_keys(array_filter(
+            $required,
+            fn ($value) => $this->isMissingS3ConfigValue($value)
+        ));
+    }
+
+    private function isMissingS3ConfigValue(mixed $value): bool
+    {
+        $normalized = trim((string) $value);
+
+        return $normalized === ''
+            || str_starts_with($normalized, 'TU_NUEVA_')
+            || str_starts_with($normalized, 'your_')
+            || str_starts_with($normalized, 'YOUR_');
     }
 
     private function syncProviderTimeline(object $incident, Operacion $operation): ?LineaTiempoOperacion

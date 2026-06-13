@@ -55,10 +55,19 @@ class AdminControlador extends ControladorBase
                 'name',
                 'email',
                 'phone',
+                'created_at',
                 'role',
                 'operational_role',
                 'provider_id',
                 'status',
+                'access_status',
+                'trial_started_at',
+                'trial_ends_at',
+                'free_quote_limit',
+                'free_quotes_used',
+                'has_paid_access',
+                'paid_access_at',
+                'access_payment_id',
                 'updated_at',
             ])
             ->with([
@@ -67,7 +76,14 @@ class AdminControlador extends ControladorBase
                 'provider:id,user_id,company_name,commercial_name,approval_status',
                 'ownedProvider:id,user_id,company_name,commercial_name,approval_status',
                 'demo:id,user_id,status,started_at,expires_at',
-                'activeSuscripcion:id,user_id,plan_id,status,started_at,expires_at',
+                'activeSuscripcion' => fn ($query) => $query->select([
+                    'subscriptions.id',
+                    'subscriptions.user_id',
+                    'subscriptions.plan_id',
+                    'subscriptions.status',
+                    'subscriptions.started_at',
+                    'subscriptions.expires_at',
+                ]),
                 'activeSuscripcion.plan:id,name,code,billing_cycle',
             ])
             ->latest('id')
@@ -84,7 +100,14 @@ class AdminControlador extends ControladorBase
             'roles:id,code,name',
             'profile:id,user_id,company_name,business_type,country,city,base_airport,base_airport_id,address,avatar,avatar_url,tax_data,birth_date,nationality,document_type,document_number,document_expiration,identity_validation_required,ine_curp,ine_cic,ine_ocr,ine_scan_raw,ine_scan_status,ine_front_path,ine_back_path',
             'demo:id,user_id,status,started_at,expires_at',
-            'activeSuscripcion:id,user_id,plan_id,status,started_at,expires_at',
+            'activeSuscripcion' => fn ($query) => $query->select([
+                'subscriptions.id',
+                'subscriptions.user_id',
+                'subscriptions.plan_id',
+                'subscriptions.status',
+                'subscriptions.started_at',
+                'subscriptions.expires_at',
+            ]),
             'activeSuscripcion.plan:id,name,code,billing_cycle,price_monthly,price_yearly,max_aircraft,max_users,has_priority,has_concierge,has_reports,is_enterprise',
             'identityVerifications' => fn ($query) => $query->latest()->select([
                 'id',
@@ -170,7 +193,14 @@ class AdminControlador extends ControladorBase
                     'provider:id,user_id,company_name,commercial_name,approval_status',
                     'ownedProvider:id,user_id,company_name,commercial_name,approval_status',
                     'demo:id,user_id,status,started_at,expires_at',
-                    'activeSuscripcion:id,user_id,plan_id,status,started_at,expires_at',
+                    'activeSuscripcion' => fn ($query) => $query->select([
+                        'subscriptions.id',
+                        'subscriptions.user_id',
+                        'subscriptions.plan_id',
+                        'subscriptions.status',
+                        'subscriptions.started_at',
+                        'subscriptions.expires_at',
+                    ]),
                     'activeSuscripcion.plan:id,name,code,billing_cycle',
                 ])
             ),
@@ -216,7 +246,14 @@ class AdminControlador extends ControladorBase
                     'provider:id,user_id,company_name,commercial_name,approval_status',
                     'ownedProvider:id,user_id,company_name,commercial_name,approval_status',
                     'demo:id,user_id,status,started_at,expires_at',
-                    'activeSuscripcion:id,user_id,plan_id,status,started_at,expires_at',
+                    'activeSuscripcion' => fn ($query) => $query->select([
+                        'subscriptions.id',
+                        'subscriptions.user_id',
+                        'subscriptions.plan_id',
+                        'subscriptions.status',
+                        'subscriptions.started_at',
+                        'subscriptions.expires_at',
+                    ]),
                     'activeSuscripcion.plan:id,name,code,billing_cycle',
                 ])
             ),
@@ -1468,13 +1505,51 @@ class AdminControlador extends ControladorBase
 
     public function aircraftFleet()
     {
+        $aircraft = Aeronave::with([
+            'provider:id,user_id,company_name,commercial_name',
+            'provider.user:id,name',
+            'provider.user.profile:id,user_id,company_name',
+            'documents',
+            'images',
+            'suscripcionesAeronave' => fn ($q) => $q->where('status', 'active')->with('plan')->latest('id'),
+        ])->latest()->paginate(40);
+
+        $aircraft->setCollection(
+            $aircraft->getCollection()->map(function (Aeronave $item) {
+                $provider = $item->provider;
+                $providerDisplayName =
+                    $provider?->commercial_name ?:
+                    $provider?->user?->profile?->company_name ?:
+                    $provider?->company_name ?:
+                    $provider?->user?->name;
+
+                return [
+                    ...$item->attributesToArray(),
+                    'documents' => $item->documents->map(fn ($document) => $document->attributesToArray())->values(),
+                    'images' => $item->images->map(fn ($image) => $image->attributesToArray())->values(),
+                    'suscripcionesAeronave' => $item->suscripcionesAeronave
+                        ->map(function ($subscription) {
+                            return [
+                                ...$subscription->attributesToArray(),
+                                'plan' => $subscription->plan?->attributesToArray(),
+                            ];
+                        })
+                        ->values(),
+                    'provider_display_name' => $providerDisplayName,
+                    'provider_name' => $providerDisplayName,
+                    'provider' => $provider ? [
+                        'id' => $provider->id,
+                        'user_id' => $provider->user_id,
+                        'company_name' => $provider->company_name,
+                        'commercial_name' => $provider->commercial_name,
+                        'display_name' => $providerDisplayName,
+                    ] : null,
+                ];
+            })
+        );
+
         return $this->ok([
-            'aircraft' => Aeronave::with([
-                'provider',
-                'documents',
-                'images',
-                'suscripcionesAeronave' => fn ($q) => $q->where('status', 'active')->with('plan')->latest('id'),
-            ])->latest()->paginate(40),
+            'aircraft' => $aircraft,
         ]);
     }
 
@@ -1876,18 +1951,31 @@ class AdminControlador extends ControladorBase
 
     private function serializeAdminUserSummary(Usuario $user): array
     {
+        $commercialAccess = $this->serializeAdminCommercialAccess($user);
+
         return [
             'id' => $user->id,
             'name' => $user->name,
             'email' => $user->email,
             'phone' => $user->phone,
+            'created_at' => $user->created_at,
             'role' => $user->role,
             'operational_role' => $user->operational_role,
             'effective_role' => $user->effectiveRole(),
             'provider_id' => $user->provider_id,
             'proveedor_id' => $user->provider_id,
             'status' => $user->status,
+            'access_status' => $user->access_status,
+            'trial_started_at' => $user->trial_started_at,
+            'trial_ends_at' => $user->trial_ends_at,
+            'free_quote_limit' => (int) ($user->free_quote_limit ?? 1),
+            'free_quotes_used' => (int) ($user->free_quotes_used ?? 0),
+            'has_paid_access' => (bool) $user->has_paid_access,
+            'paid_access_at' => $user->paid_access_at,
+            'access_payment_id' => $user->access_payment_id,
             'updated_at' => $user->updated_at,
+            'access' => $user->accessStatus(),
+            'commercial_access' => $commercialAccess,
             'roles' => $user->roles->map(fn ($role) => [
                 'id' => $role->id,
                 'code' => $role->code,
@@ -1948,6 +2036,46 @@ class AdminControlador extends ControladorBase
                     'billing_cycle' => $user->activeSuscripcion->plan->billing_cycle,
                 ] : null,
             ] : null,
+        ];
+    }
+
+    private function serializeAdminCommercialAccess(Usuario $user): array
+    {
+        $status = (string) ($user->access_status ?: 'trial_active');
+        $freeQuoteLimit = (int) ($user->free_quote_limit ?? 1);
+        $freeQuotesUsed = (int) ($user->free_quotes_used ?? 0);
+        $remainingQuotes = max(0, $freeQuoteLimit - $freeQuotesUsed);
+
+        $stage = match (true) {
+            (bool) $user->has_paid_access && $user->paid_access_at !== null => 'paid',
+            $freeQuotesUsed >= $freeQuoteLimit => 'trial_used',
+            $freeQuotesUsed > 0 => 'trial_in_progress',
+            in_array($status, ['registered', 'trial_active', 'payment_failed', 'payment_pending'], true) => 'new',
+            default => 'blocked',
+        };
+
+        $label = match ($stage) {
+            'paid' => 'Pago activo',
+            'trial_used' => 'Prueba consumida',
+            'trial_in_progress' => 'Prueba iniciada',
+            'new' => 'Registro nuevo',
+            default => 'Acceso bloqueado',
+        };
+
+        return [
+            'status' => $status,
+            'stage' => $stage,
+            'label' => $label,
+            'has_paid_access' => (bool) $user->has_paid_access,
+            'paid_access_at' => $user->paid_access_at,
+            'access_payment_id' => $user->access_payment_id,
+            'trial_started_at' => $user->trial_started_at,
+            'trial_ends_at' => $user->trial_ends_at,
+            'free_quote_limit' => $freeQuoteLimit,
+            'free_quotes_used' => $freeQuotesUsed,
+            'remaining_free_quotes' => $remainingQuotes,
+            'trial_consumed' => $freeQuotesUsed >= $freeQuoteLimit,
+            'is_new_registration' => $freeQuotesUsed === 0 && ! $user->has_paid_access,
         ];
     }
 

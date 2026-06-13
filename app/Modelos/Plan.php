@@ -19,6 +19,13 @@ class Plan extends Model
         'price_yearly',
         'billing_cycle',
         'role_target',
+        'user_type',
+        'billing_type',
+        'amount',
+        'currency',
+        'interval_type',
+        'stripe_product_id',
+        'stripe_price_id',
         'max_requests',
         'max_aircraft',
         'max_users',
@@ -37,6 +44,7 @@ class Plan extends Model
             'price' => 'decimal:2',
             'price_monthly' => 'decimal:2',
             'price_yearly' => 'decimal:2',
+            'amount' => 'decimal:2',
             'features' => 'array',
             'has_priority' => 'boolean',
             'has_concierge' => 'boolean',
@@ -54,5 +62,15 @@ class Plan extends Model
     public function aircraftSubscriptions(): HasMany
     {
         return $this->hasMany(SuscripcionAeronave::class, 'plan_id');
+    }
+
+    public function accessPayments(): HasMany
+    {
+        return $this->hasMany(AccessPayment::class, 'billing_plan_id');
+    }
+
+    public function aircraftBillingPayments(): HasMany
+    {
+        return $this->hasMany(AircraftBillingPayment::class, 'billing_plan_id');
     }
 }

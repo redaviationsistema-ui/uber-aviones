@@ -1089,6 +1089,7 @@ class ProveedorControlador extends ControladorBase
     {
         $operation = $incident->operacion;
         $flightRequest = $operation?->solicitudVuelo;
+        $files = $this->resolveCrewIncidentFilesForTimeline($incident);
 
         return [
             'id' => $incident->id,
@@ -1112,8 +1113,75 @@ class ProveedorControlador extends ControladorBase
             'responsible' => $this->extractTaggedValue((string) $incident->description, 'Origen') === 'Sobrecargo'
                 ? ($this->extractTaggedValue((string) $incident->description, 'Sobrecargo') ?: 'Sobrecargo')
                 : 'Proveedor',
+            'files' => $files,
             'created_at' => optional($incident->created_at)?->format('Y-m-d H:i'),
         ];
+    }
+
+    private function resolveCrewIncidentFilesForTimeline(LineaTiempoOperacion $incident): array
+    {
+        $crewIncidentId = DB::table('crew_operation_incidents')
+            ->where('provider_timeline_id', $incident->id)
+            ->value('id');
+
+        if (! $crewIncidentId) {
+            return [];
+        }
+
+        return DB::table('crew_operation_incident_files')
+            ->where('incident_id', $crewIncidentId)
+            ->orderBy('id')
+            ->get()
+            ->map(fn ($file) => [
+                'id' => $file->id,
+                'storage_disk' => $file->storage_disk ?: 'public',
+                'file_path' => $file->file_path,
+                'file_url' => $this->resolveCrewIncidentFileUrl($file),
+                'file_type' => $file->file_type,
+                'original_name' => $file->original_name,
+                'created_at' => $file->created_at,
+                'updated_at' => $file->updated_at,
+            ])
+            ->values()
+            ->all();
+    }
+
+    private function resolveCrewIncidentFileUrl(object $file): ?string
+    {
+        $path = trim((string) ($file->file_path ?? ''));
+        if ($path === '') {
+            return null;
+        }
+
+        $disk = trim((string) ($file->storage_disk ?? 'public')) ?: 'public';
+
+        if ($disk === 's3') {
+            if ($this->canGenerateTemporaryS3Urls()) {
+                try {
+                    return Storage::disk('s3')->temporaryUrl($path, now()->addMinutes(30));
+                } catch (\Throwable) {
+                    return null;
+                }
+            }
+
+            return null;
+        }
+
+        try {
+            return Storage::disk($disk)->url($path);
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    private function canGenerateTemporaryS3Urls(): bool
+    {
+        $key = trim((string) config('filesystems.disks.s3.key', ''));
+        $secret = trim((string) config('filesystems.disks.s3.secret', ''));
+        $bucket = trim((string) config('filesystems.disks.s3.bucket', ''));
+        $region = trim((string) config('filesystems.disks.s3.region', ''));
+
+        return $key !== '' && $secret !== '' && $bucket !== '' && $region !== '';
     }
 
     private function extractTaggedValue(string $description, string $label): ?string

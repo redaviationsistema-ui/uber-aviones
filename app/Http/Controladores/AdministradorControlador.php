@@ -44,10 +44,19 @@ class AdministradorControlador extends ControladorBase
                 'name',
                 'email',
                 'phone',
+                'created_at',
                 'role',
                 'operational_role',
                 'provider_id',
                 'status',
+                'access_status',
+                'trial_started_at',
+                'trial_ends_at',
+                'free_quote_limit',
+                'free_quotes_used',
+                'has_paid_access',
+                'paid_access_at',
+                'access_payment_id',
                 'updated_at',
             ])
             ->with([
@@ -55,7 +64,14 @@ class AdministradorControlador extends ControladorBase
                 'provider:id,user_id,company_name,commercial_name,approval_status',
                 'ownedProvider:id,user_id,company_name,commercial_name,approval_status',
                 'demo:id,user_id,status,started_at,expires_at',
-                'activeSuscripcion:id,user_id,plan_id,status,started_at,expires_at',
+                'activeSuscripcion' => fn ($query) => $query->select([
+                    'subscriptions.id',
+                    'subscriptions.user_id',
+                    'subscriptions.plan_id',
+                    'subscriptions.status',
+                    'subscriptions.started_at',
+                    'subscriptions.expires_at',
+                ]),
                 'activeSuscripcion.plan:id,name,code,billing_cycle',
                 'roles:id,code,name',
             ])
@@ -122,11 +138,47 @@ class AdministradorControlador extends ControladorBase
 
     public function clients()
     {
-        return $this->ok([
-            'clients' => Usuario::whereHas('roles', fn ($query) => $query->where('code', Usuario::ROLE_CLIENT))
+        $clients = Usuario::query()
+                ->select([
+                    'id',
+                    'name',
+                    'email',
+                    'phone',
+                    'created_at',
+                    'role',
+                    'operational_role',
+                    'provider_id',
+                    'status',
+                    'access_status',
+                    'trial_started_at',
+                    'trial_ends_at',
+                    'free_quote_limit',
+                    'free_quotes_used',
+                    'has_paid_access',
+                    'paid_access_at',
+                    'access_payment_id',
+                    'updated_at',
+                ])
+                ->whereHas('roles', fn ($query) => $query->where('code', Usuario::ROLE_CLIENT))
                 ->whereDoesntHave('roles', fn ($query) => $query->where('code', Usuario::ROLE_SOBRECARGO))
-                ->with(['profile', 'demo', 'activeSuscripcion.plan', 'roles'])
-                ->paginate(25),
+                ->with([
+                    'profile',
+                    'demo',
+                    'activeSuscripcion' => fn ($query) => $query->select([
+                        'subscriptions.id',
+                        'subscriptions.user_id',
+                        'subscriptions.plan_id',
+                        'subscriptions.status',
+                        'subscriptions.started_at',
+                        'subscriptions.expires_at',
+                    ]),
+                    'activeSuscripcion.plan',
+                    'roles',
+                ])
+                ->paginate(25);
+
+        return $this->ok([
+            'clients' => $clients->through(fn (Usuario $user) => $this->serializeAdminUserSummary($user)),
         ]);
     }
 
@@ -305,18 +357,31 @@ class AdministradorControlador extends ControladorBase
 
     private function serializeAdminUserSummary(Usuario $user): array
     {
+        $commercialAccess = $this->serializeAdminCommercialAccess($user);
+
         return [
             'id' => $user->id,
             'name' => $user->name,
             'email' => $user->email,
             'phone' => $user->phone,
+            'created_at' => $user->created_at,
             'role' => $user->role,
             'operational_role' => $user->operational_role,
             'effective_role' => $user->effectiveRole(),
             'provider_id' => $user->provider_id,
             'proveedor_id' => $user->provider_id,
             'status' => $user->status,
+            'access_status' => $user->access_status,
+            'trial_started_at' => $user->trial_started_at,
+            'trial_ends_at' => $user->trial_ends_at,
+            'free_quote_limit' => (int) ($user->free_quote_limit ?? 1),
+            'free_quotes_used' => (int) ($user->free_quotes_used ?? 0),
+            'has_paid_access' => (bool) $user->has_paid_access,
+            'paid_access_at' => $user->paid_access_at,
+            'access_payment_id' => $user->access_payment_id,
             'updated_at' => $user->updated_at,
+            'access' => $user->accessStatus(),
+            'commercial_access' => $commercialAccess,
             'roles' => $user->roles,
             'profile' => $user->profile ? [
                 'company_name' => $user->profile->company_name,
@@ -353,5 +418,45 @@ class AdministradorControlador extends ControladorBase
         $summary['identity_verifications'] = $user->identityVerifications;
 
         return $summary;
+    }
+
+    private function serializeAdminCommercialAccess(Usuario $user): array
+    {
+        $status = (string) ($user->access_status ?: 'trial_active');
+        $freeQuoteLimit = (int) ($user->free_quote_limit ?? 1);
+        $freeQuotesUsed = (int) ($user->free_quotes_used ?? 0);
+        $remainingQuotes = max(0, $freeQuoteLimit - $freeQuotesUsed);
+
+        $stage = match (true) {
+            (bool) $user->has_paid_access && $user->paid_access_at !== null => 'paid',
+            $freeQuotesUsed >= $freeQuoteLimit => 'trial_used',
+            $freeQuotesUsed > 0 => 'trial_in_progress',
+            in_array($status, ['registered', 'trial_active', 'payment_failed', 'payment_pending'], true) => 'new',
+            default => 'blocked',
+        };
+
+        $label = match ($stage) {
+            'paid' => 'Pago activo',
+            'trial_used' => 'Prueba consumida',
+            'trial_in_progress' => 'Prueba iniciada',
+            'new' => 'Registro nuevo',
+            default => 'Acceso bloqueado',
+        };
+
+        return [
+            'status' => $status,
+            'stage' => $stage,
+            'label' => $label,
+            'has_paid_access' => (bool) $user->has_paid_access,
+            'paid_access_at' => $user->paid_access_at,
+            'access_payment_id' => $user->access_payment_id,
+            'trial_started_at' => $user->trial_started_at,
+            'trial_ends_at' => $user->trial_ends_at,
+            'free_quote_limit' => $freeQuoteLimit,
+            'free_quotes_used' => $freeQuotesUsed,
+            'remaining_free_quotes' => $remainingQuotes,
+            'trial_consumed' => $freeQuotesUsed >= $freeQuoteLimit,
+            'is_new_registration' => $freeQuotesUsed === 0 && ! $user->has_paid_access,
+        ];
     }
 }

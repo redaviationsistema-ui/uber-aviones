@@ -118,7 +118,14 @@ class Usuario extends Authenticatable
     public function activeSuscripcion(): HasOne
     {
         return $this->hasOne(Suscripcion::class, 'user_id')
-            ->select('subscriptions.*')
+            ->select([
+                'subscriptions.id',
+                'subscriptions.user_id',
+                'subscriptions.plan_id',
+                'subscriptions.status',
+                'subscriptions.started_at',
+                'subscriptions.expires_at',
+            ])
             ->where('subscriptions.status', 'active')
             ->where('subscriptions.expires_at', '>', now())
             ->latestOfMany();
@@ -170,9 +177,11 @@ class Usuario extends Authenticatable
         $subscription = $this->activeSuscripcion;
         $demoActive = $demo?->status === 'active' && $demo->expires_at?->isFuture();
         $subscriptionActive = $subscription !== null;
+        $commercialAccessActive = (bool) $this->has_paid_access && ($this->access_status === 'active' || $this->paid_access_at !== null);
+        $trialEndsAt = $this->trial_ends_at ? \Illuminate\Support\Carbon::parse($this->trial_ends_at) : null;
 
         return [
-            'has_access' => $demoActive || $subscriptionActive || $this->hasRole(self::ROLE_ADMIN),
+            'has_access' => $demoActive || $subscriptionActive || $commercialAccessActive || $this->hasRole(self::ROLE_ADMIN),
             'effective_role' => $this->effectiveRole(),
             'roles' => $this->roleCodes(),
             'demo' => $demo ? [
@@ -187,6 +196,17 @@ class Usuario extends Authenticatable
                 'started_at' => $subscription->started_at,
                 'expires_at' => $subscription->expires_at,
             ] : null,
+            'commercial_access' => [
+                'status' => $this->access_status ?: 'trial_active',
+                'has_paid_access' => $commercialAccessActive,
+                'trial_started_at' => $this->trial_started_at,
+                'trial_ends_at' => $this->trial_ends_at,
+                'trial_days_left' => $trialEndsAt && $trialEndsAt->isFuture() ? now()->diffInDays($trialEndsAt, false) : 0,
+                'free_quote_limit' => (int) ($this->free_quote_limit ?? 1),
+                'free_quotes_used' => (int) ($this->free_quotes_used ?? 0),
+                'paid_access_at' => $this->paid_access_at,
+                'access_payment_id' => $this->access_payment_id,
+            ],
         ];
     }
 

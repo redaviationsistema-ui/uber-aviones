@@ -25,6 +25,7 @@ COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 RUN a2enmod rewrite headers
 
 COPY . .
+COPY docker/php-upload-limits.ini /usr/local/etc/php/conf.d/zz-upload-limits.ini
 
 RUN mkdir -p bootstrap/cache \
     storage/framework/cache/data \

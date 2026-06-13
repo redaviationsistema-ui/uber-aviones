@@ -3,16 +3,21 @@
 use App\Http\Controladores\AeronaveControlador;
 use App\Http\Controladores\CrewOperationIncidentController;
 use App\Http\Controladores\RedAviation\AdminControlador;
+use App\Http\Controladores\RedAviation\BillingPlanControlador;
 use App\Http\Controladores\RedAviation\ChatControlador;
+use App\Http\Controladores\RedAviation\ClientAccessBillingControlador;
 use App\Http\Controladores\RedAviation\ClienteControlador;
 use App\Http\Controladores\RedAviation\OperadorControlador;
-use App\Http\Controladores\RedAviation\PlanControlador;
+use App\Http\Controladores\RedAviation\ProviderAircraftBillingControlador;
 use App\Http\Controladores\RedAviation\SobrecargoControlador;
 use App\Http\Controladores\RedAviation\SuscripcionControlador;
 use App\Http\Controladores\NotificacionControlador;
 use Illuminate\Support\Facades\Route;
 
-Route::get('/plans', [PlanControlador::class, 'index']);
+Route::get('/plans', [BillingPlanControlador::class, 'index']);
+Route::get('/billing/plans', [BillingPlanControlador::class, 'index']);
+Route::get('/billing/plans/client-access', [BillingPlanControlador::class, 'clientAccess']);
+Route::get('/billing/plans/provider-aircraft', [BillingPlanControlador::class, 'providerAircraft']);
 Route::post('/client/quotes/preview', [ClienteControlador::class, 'previewQuotes']);
 
 Route::middleware(['auth.token'])->group(function () {
@@ -27,6 +32,11 @@ Route::middleware(['auth.token'])->group(function () {
     Route::post('/subscriptions/cancel', [SuscripcionControlador::class, 'cancel']);
 
     Route::prefix('client')->middleware(['role:client,admin'])->group(function () {
+        Route::get('/access-status', [ClientAccessBillingControlador::class, 'status']);
+        Route::post('/access-payment/create', [ClientAccessBillingControlador::class, 'create']);
+        Route::get('/access-payment/success', [ClientAccessBillingControlador::class, 'success']);
+        Route::get('/access-payment/cancel', [ClientAccessBillingControlador::class, 'cancel']);
+        Route::post('/flight-requests', [ClienteControlador::class, 'storeFlightRequest']);
         Route::get('/flight-requests', [ClienteControlador::class, 'indexFlightRequests']);
         Route::get('/flight-requests/{flightRequest}', [ClienteControlador::class, 'showFlightRequest']);
     });
@@ -34,7 +44,6 @@ Route::middleware(['auth.token'])->group(function () {
     Route::prefix('client')->middleware(['role:client,admin', 'subscription.active'])->group(function () {
         Route::get('/dashboard', [ClienteControlador::class, 'dashboard']);
         Route::get('/aircraft', [ClienteControlador::class, 'indexAircraft']);
-        Route::post('/flight-requests', [ClienteControlador::class, 'storeFlightRequest'])->middleware('plan.limit');
         Route::get('/operations/{operation}/tracking', [ClienteControlador::class, 'tracking']);
     });
 
@@ -61,6 +70,12 @@ Route::middleware(['auth.token'])->group(function () {
         Route::get('/requests', [OperadorControlador::class, 'requests']);
         Route::post('/requests/{flightRequest}/accept', [OperadorControlador::class, 'accept']);
         Route::post('/requests/{flightRequest}/reject', [OperadorControlador::class, 'reject']);
+    });
+
+    Route::prefix('provider')->middleware(['role:provider,admin'])->group(function () {
+        Route::post('/aircraft/{aircraft}/billing/create', [ProviderAircraftBillingControlador::class, 'create']);
+        Route::get('/aircraft/{aircraft}/billing-status', [ProviderAircraftBillingControlador::class, 'status']);
+        Route::get('/aircraft-billing/payments', [ProviderAircraftBillingControlador::class, 'payments']);
     });
 
     Route::prefix('sobrecargo')->middleware(['role:sobrecargo,admin'])->group(function () {
@@ -92,6 +107,7 @@ Route::middleware(['auth.token'])->group(function () {
     });
 
     Route::prefix('admin')->middleware(['role:admin'])->group(function () {
+        Route::put('/billing/plans/{plan}', [BillingPlanControlador::class, 'update']);
         Route::get('/dashboard', [AdminControlador::class, 'dashboard']);
         Route::get('/users', [AdminControlador::class, 'users']);
         Route::get('/users/{user}', [AdminControlador::class, 'showUser']);

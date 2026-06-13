@@ -9,11 +9,13 @@ use App\Modelos\ImagenAeronave;
 use App\Modelos\Operacion;
 use App\Modelos\ReglaPrecioCategoria;
 use App\Modelos\SolicitudVuelo;
+use App\Servicios\Billing\BillingPlanServicio;
 use App\Servicios\RedAviation\MatchingRedAviationServicio;
 use App\Servicios\RedAviation\VisibilidadServicio;
 use Carbon\Carbon;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
 class ClienteControlador extends ControladorBase
@@ -90,6 +92,7 @@ class ClienteControlador extends ControladorBase
     ];
 
     public function __construct(
+        private readonly BillingPlanServicio $billingPlanServicio,
         private readonly MatchingRedAviationServicio $matchingServicio,
         private readonly VisibilidadServicio $visibilidadServicio,
     ) {
@@ -394,6 +397,17 @@ class ClienteControlador extends ControladorBase
 
     public function storeFlightRequest(Request $request)
     {
+        $user = $request->user()->fresh();
+        $commercialGate = $this->resolveCommercialAccessGate($user);
+        if (! $commercialGate['allowed']) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Necesitas activar tu acceso comercial para crear mas solicitudes.',
+                'access' => $user->accessStatus(),
+                'billing_plan' => $commercialGate['plan'],
+            ], 402);
+        }
+
         $data = $request->validate([
             'origin' => ['required', 'string', 'max:20'],
             'destination' => ['required', 'string', 'max:20'],
@@ -456,39 +470,66 @@ class ClienteControlador extends ControladorBase
             $data['pricing_context']['final_price'] = (float) ($data['pricing_context']['final_price'] ?? $selectedCardPrice);
         }
         $aircraftSnapshot = is_array($data['aircraft_snapshot'] ?? null) ? $data['aircraft_snapshot'] : [];
+        [$user, $solicitud, $chat] = DB::transaction(function () use ($request, $user, $commercialGate, $data, $selectedCardPrice, $aircraftSnapshot) {
+            $freshUser = $user->fresh(['activeSuscripcion', 'demo']);
 
-        $solicitud = SolicitudVuelo::create($data + [
-            'client_id' => $request->user()->id,
-            'status' => 'pending',
-            'workflow_status' => 'en_validacion',
-            'currency' => $data['currency'] ?? 'USD',
-            'package_snapshot' => [
-                'plan_id' => $request->user()->activeSuscripcion?->plan_id,
-                'demo' => $request->user()->demo?->status === 'active',
-            ],
-            'visibility_payload' => array_filter([
-                'selected_card_price' => $selectedCardPrice > 0 ? $selectedCardPrice : null,
-                'aircraft_snapshot' => ! empty($aircraftSnapshot) ? $aircraftSnapshot : null,
-            ], fn ($value) => $value !== null),
-        ]);
-        $this->storeFlightRequestLegs($solicitud, $data);
+            if (($commercialGate['consume_trial_quote'] ?? false) === true) {
+                $nextUsed = (int) ($freshUser->free_quotes_used ?? 0) + 1;
+                $limit = max(1, (int) ($freshUser->free_quote_limit ?? 1));
 
-        $hasExplicitSelection = ! empty($data['provider_id'])
-            || ! empty($data['aircraft_id'])
-            || ! empty($data['match_id'])
-            || ! empty($data['matched_option_id']);
+                DB::table('users')->where('id', $freshUser->id)->update([
+                    'trial_started_at' => $freshUser->trial_started_at ?? now(),
+                    'trial_ends_at' => $freshUser->trial_ends_at ?? now()->addDays(7),
+                    'access_status' => $nextUsed >= $limit ? 'trial_used' : 'trial_active',
+                    'free_quotes_used' => $nextUsed,
+                    'updated_at' => now(),
+                ]);
 
-        if ($hasExplicitSelection) {
-            $this->assignSelectedMatchToFlightRequest($solicitud, $data);
-        } else {
-            $this->matchingServicio->ejecutar($solicitud);
-            $this->assignSelectedMatchToFlightRequest($solicitud, $data);
-        }
+                $freshUser = $freshUser->fresh(['activeSuscripcion', 'demo']);
+            }
 
-        $chat = $solicitud->chatsProtegidos()->create([
-            'client_id' => $request->user()->id,
-            'status' => 'activo',
-        ]);
+            $solicitud = SolicitudVuelo::create($data + [
+                'client_id' => $freshUser->id,
+                'status' => 'pending',
+                'workflow_status' => 'en_validacion',
+                'currency' => $data['currency'] ?? 'USD',
+                'package_snapshot' => [
+                    'plan_id' => $freshUser->activeSuscripcion?->plan_id,
+                    'demo' => $freshUser->demo?->status === 'active',
+                    'commercial_access' => [
+                        'status' => $freshUser->access_status ?: 'trial_active',
+                        'free_quotes_used' => (int) ($freshUser->free_quotes_used ?? 0),
+                        'free_quote_limit' => (int) ($freshUser->free_quote_limit ?? 1),
+                        'has_paid_access' => (bool) $freshUser->has_paid_access,
+                    ],
+                ],
+                'visibility_payload' => array_filter([
+                    'selected_card_price' => $selectedCardPrice > 0 ? $selectedCardPrice : null,
+                    'aircraft_snapshot' => ! empty($aircraftSnapshot) ? $aircraftSnapshot : null,
+                ], fn ($value) => $value !== null),
+            ]);
+
+            $this->storeFlightRequestLegs($solicitud, $data);
+
+            $hasExplicitSelection = ! empty($data['provider_id'])
+                || ! empty($data['aircraft_id'])
+                || ! empty($data['match_id'])
+                || ! empty($data['matched_option_id']);
+
+            if ($hasExplicitSelection) {
+                $this->assignSelectedMatchToFlightRequest($solicitud, $data);
+            } else {
+                $this->matchingServicio->ejecutar($solicitud);
+                $this->assignSelectedMatchToFlightRequest($solicitud, $data);
+            }
+
+            $chat = $solicitud->chatsProtegidos()->create([
+                'client_id' => $freshUser->id,
+                'status' => 'activo',
+            ]);
+
+            return [$freshUser, $solicitud, $chat];
+        });
 
         $this->writeAudit($request, 'create', 'red_aviation.flight_requests', 'Solicitud Red Aviation creada.');
 
@@ -497,7 +538,41 @@ class ClienteControlador extends ControladorBase
                 $solicitud->fresh(['matches.aircraft.images', 'chatsProtegidos', 'operaciones.timeline', 'legs'])
             ),
             'chat_id' => $chat->id,
+            'access' => $user->accessStatus(),
         ], 201);
+    }
+
+    private function resolveCommercialAccessGate($user): array
+    {
+        if ($user->hasRole(\App\Modelos\Usuario::ROLE_ADMIN)) {
+            return ['allowed' => true, 'consume_trial_quote' => false, 'plan' => null];
+        }
+
+        if ((bool) $user->has_paid_access && $user->access_status === 'active') {
+            return ['allowed' => true, 'consume_trial_quote' => false, 'plan' => null];
+        }
+
+        if ($user->activeSuscripcion || ($user->demo?->status === 'active' && $user->demo?->expires_at?->isFuture())) {
+            return ['allowed' => true, 'consume_trial_quote' => false, 'plan' => null];
+        }
+
+        $used = (int) ($user->free_quotes_used ?? 0);
+        $limit = max(1, (int) ($user->free_quote_limit ?? 1));
+        $trialEndsAt = $user->trial_ends_at ? Carbon::parse($user->trial_ends_at) : null;
+        $trialStillActive = $trialEndsAt === null || ! $trialEndsAt->isPast();
+        $status = (string) ($user->access_status ?? 'trial_active');
+
+        if (in_array($status, ['trial_active', 'registered', 'payment_failed', 'trial_used'], true) && $used < $limit && $trialStillActive) {
+            return ['allowed' => true, 'consume_trial_quote' => true, 'plan' => null];
+        }
+
+        $plan = $this->billingPlanServicio->findActiveByCode(BillingPlanServicio::CLIENT_ACCESS_CODE);
+
+        return [
+            'allowed' => false,
+            'consume_trial_quote' => false,
+            'plan' => $plan ? $this->billingPlanServicio->serialize($plan) : null,
+        ];
     }
 
     private function assignSelectedMatchToFlightRequest(SolicitudVuelo $solicitud, array $data): void
