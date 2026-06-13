@@ -6,6 +6,7 @@ use App\Modelos\AccessPayment;
 use App\Modelos\AircraftBillingPayment;
 use App\Modelos\Pago;
 use App\Modelos\SolicitudVuelo;
+use App\Modelos\Suscripcion;
 use App\Modelos\SuscripcionAeronave;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
@@ -75,6 +76,8 @@ class StripeWebhookControlador extends ControladorBase
                 'payment_intent.canceled' => $this->handlePaymentCanceled($event->data->object),
                 'invoice.payment_succeeded', 'invoice.paid' => $this->handleInvoicePaid($event->data->object),
                 'invoice.payment_failed' => $this->handleInvoicePaymentFailed($event->data->object),
+                'customer.subscription.updated' => $this->handleCustomerSubscriptionUpdated($event->data->object),
+                'customer.subscription.deleted' => $this->handleCustomerSubscriptionDeleted($event->data->object),
                 default => null,
             };
 
@@ -115,6 +118,11 @@ class StripeWebhookControlador extends ControladorBase
 
         if ($context === 'provider_aircraft_subscription') {
             $this->handleAircraftBillingCheckoutCompleted($session, $metadata);
+            return;
+        }
+
+        if ($context === 'client_subscription') {
+            $this->handleClientSubscriptionCheckoutCompleted($session, $metadata);
             return;
         }
 
@@ -178,6 +186,18 @@ class StripeWebhookControlador extends ControladorBase
                 ->where('id', (int) ($metadata['aircraft_billing_payment_id'] ?? 0))
                 ->orWhere('provider_checkout_id', (string) ($session->id ?? ''))
                 ->update(['status' => 'cancelled']);
+            return;
+        }
+
+        if ($context === 'client_subscription') {
+            Suscripcion::query()
+                ->where('id', (int) ($metadata['subscription_record_id'] ?? 0))
+                ->orWhere('provider_subscription_id', (string) ($session->subscription ?? ''))
+                ->update([
+                    'status' => 'cancelled',
+                    'payment_status' => 'cancelled',
+                    'cancelled_at' => now(),
+                ]);
             return;
         }
 
@@ -288,6 +308,27 @@ class StripeWebhookControlador extends ControladorBase
     private function handleInvoicePaid(object $invoice): void
     {
         $metadata = $this->extractMetadata($invoice);
+        if (($metadata['billing_context'] ?? null) === 'client_subscription') {
+            $subscriptionId = (string) ($invoice->subscription ?? '');
+            $subscriptionRecordId = (int) ($metadata['subscription_record_id'] ?? 0);
+            $amount = ((int) ($invoice->amount_paid ?? $invoice->amount_due ?? 0)) / 100;
+            $currency = strtoupper((string) ($invoice->currency ?? 'USD'));
+            $periodStart = $this->extractInvoicePeriodDate($invoice, 'start');
+            $periodEnd = $this->extractInvoicePeriodDate($invoice, 'end');
+
+            $this->markClientSubscriptionPaid(
+                subscriptionRecordId: $subscriptionRecordId,
+                providerSubscriptionId: $subscriptionId,
+                providerPaymentId: (string) ($invoice->payment_intent ?? $invoice->id ?? ''),
+                amount: $amount,
+                currency: $currency,
+                gatewayPayload: json_decode(json_encode($invoice), true),
+                periodStart: $periodStart,
+                periodEnd: $periodEnd,
+            );
+            return;
+        }
+
         if (($metadata['billing_context'] ?? null) !== 'provider_aircraft_subscription') {
             return;
         }
@@ -351,6 +392,19 @@ class StripeWebhookControlador extends ControladorBase
     private function handleInvoicePaymentFailed(object $invoice): void
     {
         $metadata = $this->extractMetadata($invoice);
+        if (($metadata['billing_context'] ?? null) === 'client_subscription') {
+            $subscriptionId = (string) ($invoice->subscription ?? '');
+            Suscripcion::query()
+                ->when($subscriptionId !== '', fn ($query) => $query->where('provider_subscription_id', $subscriptionId))
+                ->when((int) ($metadata['subscription_record_id'] ?? 0) > 0, fn ($query) => $query->orWhere('id', (int) ($metadata['subscription_record_id'] ?? 0)))
+                ->latest('id')
+                ->first()?->update([
+                    'status' => 'past_due',
+                    'payment_status' => 'failed',
+                ]);
+            return;
+        }
+
         if (($metadata['billing_context'] ?? null) !== 'provider_aircraft_subscription') {
             return;
         }
@@ -408,6 +462,147 @@ class StripeWebhookControlador extends ControladorBase
         );
     }
 
+    private function handleClientSubscriptionCheckoutCompleted(object $session, array $metadata): void
+    {
+        $subscriptionRecordId = (int) ($metadata['subscription_record_id'] ?? 0);
+        $providerSubscriptionId = (string) ($session->subscription ?? '');
+
+        $subscription = $subscriptionRecordId > 0 ? Suscripcion::find($subscriptionRecordId) : null;
+        if (! $subscription && $providerSubscriptionId !== '') {
+            $subscription = Suscripcion::query()
+                ->where('provider_subscription_id', $providerSubscriptionId)
+                ->latest('id')
+                ->first();
+        }
+
+        if (! $subscription) {
+            return;
+        }
+
+        $startsAt = now()->startOfDay();
+        $endsAt = $subscription->plan?->billing_cycle === 'yearly'
+            ? now()->addYear()->endOfDay()
+            : now()->addMonth()->endOfDay();
+
+        $subscription->update([
+            'status' => 'active',
+            'payment_status' => 'paid',
+            'payment_provider' => 'stripe',
+            'provider_subscription_id' => $providerSubscriptionId !== '' ? $providerSubscriptionId : $subscription->provider_subscription_id,
+            'started_at' => $subscription->started_at ?: $startsAt,
+            'starts_at' => $subscription->starts_at ?: $startsAt,
+            'expires_at' => $subscription->expires_at ?: $endsAt,
+            'ends_at' => $subscription->ends_at ?: $endsAt,
+            'renews_at' => $subscription->renews_at ?: $endsAt,
+            'cancelled_at' => null,
+        ]);
+    }
+
+    private function handleCustomerSubscriptionUpdated(object $subscriptionPayload): void
+    {
+        $metadata = $this->extractMetadata($subscriptionPayload);
+        if (($metadata['billing_context'] ?? null) !== 'client_subscription') {
+            return;
+        }
+
+        $providerSubscriptionId = (string) ($subscriptionPayload->id ?? '');
+        $subscriptionRecordId = (int) ($metadata['subscription_record_id'] ?? 0);
+        $subscription = $subscriptionRecordId > 0 ? Suscripcion::find($subscriptionRecordId) : null;
+
+        if (! $subscription && $providerSubscriptionId !== '') {
+            $subscription = Suscripcion::query()
+                ->where('provider_subscription_id', $providerSubscriptionId)
+                ->latest('id')
+                ->first();
+        }
+
+        if (! $subscription) {
+            return;
+        }
+
+        $status = (string) ($subscriptionPayload->status ?? 'active');
+        $currentPeriodStart = ! empty($subscriptionPayload->current_period_start)
+            ? Carbon::createFromTimestamp((int) $subscriptionPayload->current_period_start)->startOfDay()
+            : $subscription->starts_at;
+        $currentPeriodEnd = ! empty($subscriptionPayload->current_period_end)
+            ? Carbon::createFromTimestamp((int) $subscriptionPayload->current_period_end)->endOfDay()
+            : $subscription->ends_at;
+        $cancelAt = ! empty($subscriptionPayload->cancel_at)
+            ? Carbon::createFromTimestamp((int) $subscriptionPayload->cancel_at)->endOfDay()
+            : null;
+
+        $subscription->update([
+            'status' => $status === 'canceled' ? 'cancelled' : ($status === 'active' ? 'active' : $status),
+            'payment_status' => in_array($status, ['active', 'trialing'], true) ? 'paid' : ($status === 'past_due' ? 'failed' : $subscription->payment_status),
+            'payment_provider' => 'stripe',
+            'provider_subscription_id' => $providerSubscriptionId ?: $subscription->provider_subscription_id,
+            'started_at' => $subscription->started_at ?: $currentPeriodStart,
+            'starts_at' => $currentPeriodStart ?: $subscription->starts_at,
+            'expires_at' => $currentPeriodEnd ?: $subscription->expires_at,
+            'ends_at' => $currentPeriodEnd ?: $subscription->ends_at,
+            'renews_at' => ($subscriptionPayload->cancel_at_period_end ?? false) ? $cancelAt : ($currentPeriodEnd ?: $subscription->renews_at),
+            'cancelled_at' => $status === 'canceled'
+                ? (! empty($subscriptionPayload->canceled_at)
+                    ? Carbon::createFromTimestamp((int) $subscriptionPayload->canceled_at)
+                    : now())
+                : null,
+        ]);
+    }
+
+    private function handleCustomerSubscriptionDeleted(object $subscriptionPayload): void
+    {
+        $metadata = $this->extractMetadata($subscriptionPayload);
+        if (($metadata['billing_context'] ?? null) !== 'client_subscription') {
+            return;
+        }
+
+        $providerSubscriptionId = (string) ($subscriptionPayload->id ?? '');
+        $subscriptionRecordId = (int) ($metadata['subscription_record_id'] ?? 0);
+        $subscription = $subscriptionRecordId > 0 ? Suscripcion::find($subscriptionRecordId) : null;
+
+        if (! $subscription && $providerSubscriptionId !== '') {
+            $subscription = Suscripcion::query()
+                ->where('provider_subscription_id', $providerSubscriptionId)
+                ->latest('id')
+                ->first();
+        }
+
+        if (! $subscription) {
+            return;
+        }
+
+        $endedAt = ! empty($subscriptionPayload->ended_at)
+            ? Carbon::createFromTimestamp((int) $subscriptionPayload->ended_at)->endOfDay()
+            : now();
+
+        $subscription->update([
+            'status' => 'cancelled',
+            'payment_status' => 'cancelled',
+            'ends_at' => $endedAt,
+            'expires_at' => $endedAt,
+            'renews_at' => null,
+            'cancelled_at' => ! empty($subscriptionPayload->canceled_at)
+                ? Carbon::createFromTimestamp((int) $subscriptionPayload->canceled_at)
+                : now(),
+        ]);
+
+        Pago::create([
+            'user_id' => $subscription->user_id,
+            'subscription_id' => $subscription->id,
+            'payment_type' => 'subscription',
+            'amount' => 0,
+            'currency' => 'USD',
+            'provider' => 'stripe',
+            'transaction_reference' => $providerSubscriptionId ?: $subscription->provider_subscription_id,
+            'status' => 'cancelled',
+            'failure_reason' => 'Stripe notifico la cancelacion de la suscripcion.',
+            'gateway_response' => [
+                'source' => 'customer_subscription_deleted',
+                'stripe_payload' => json_decode(json_encode($subscriptionPayload), true),
+            ],
+        ]);
+    }
+
     private function markAccessPaymentPaid(int $accessPaymentId, string $providerPaymentId, array $gatewayPayload, string $checkoutSessionId = ''): void
     {
         if ($accessPaymentId <= 0) {
@@ -420,10 +615,27 @@ class StripeWebhookControlador extends ControladorBase
         }
 
         DB::transaction(function () use ($payment, $providerPaymentId, $gatewayPayload, $checkoutSessionId) {
+            $periodStart = $payment->billing_period_start ?: now()->toDateString();
+            $periodEnd = $payment->billing_period_end ?: now()->addMonthNoOverflow()->toDateString();
+            $cardBrand = (string) (
+                data_get($gatewayPayload, 'payment_method_details.card.brand')
+                ?? data_get($gatewayPayload, 'charges.data.0.payment_method_details.card.brand')
+                ?? ''
+            );
+            $cardLast4 = (string) (
+                data_get($gatewayPayload, 'payment_method_details.card.last4')
+                ?? data_get($gatewayPayload, 'charges.data.0.payment_method_details.card.last4')
+                ?? ''
+            );
+
             $payment->update([
                 'status' => 'paid',
                 'provider_payment_id' => $providerPaymentId ?: $payment->provider_payment_id,
                 'provider_checkout_id' => $checkoutSessionId ?: $payment->provider_checkout_id,
+                'billing_period_start' => $periodStart,
+                'billing_period_end' => $periodEnd,
+                'card_brand' => $cardBrand !== '' ? $cardBrand : $payment->card_brand,
+                'card_last4' => $cardLast4 !== '' ? $cardLast4 : $payment->card_last4,
                 'paid_at' => now(),
                 'gateway_response' => $gatewayPayload,
             ]);
@@ -432,9 +644,88 @@ class StripeWebhookControlador extends ControladorBase
                 'access_status' => 'active',
                 'has_paid_access' => true,
                 'paid_access_at' => now(),
+                'access_expires_at' => Carbon::parse($periodEnd)->endOfDay(),
                 'access_payment_id' => $payment->id,
                 'updated_at' => now(),
             ]);
+        });
+    }
+
+    private function markClientSubscriptionPaid(
+        int $subscriptionRecordId,
+        string $providerSubscriptionId,
+        string $providerPaymentId,
+        float $amount,
+        string $currency,
+        array $gatewayPayload,
+        ?string $periodStart,
+        ?string $periodEnd,
+    ): void {
+        $subscription = $subscriptionRecordId > 0 ? Suscripcion::find($subscriptionRecordId) : null;
+        if (! $subscription && $providerSubscriptionId !== '') {
+            $subscription = Suscripcion::query()
+                ->where('provider_subscription_id', $providerSubscriptionId)
+                ->latest('id')
+                ->first();
+        }
+
+        if (! $subscription) {
+            return;
+        }
+
+        DB::transaction(function () use ($subscription, $providerSubscriptionId, $providerPaymentId, $amount, $currency, $gatewayPayload, $periodStart, $periodEnd) {
+            $startsAt = $periodStart ? Carbon::parse($periodStart)->startOfDay() : now()->startOfDay();
+            $endsAt = $periodEnd
+                ? Carbon::parse($periodEnd)->endOfDay()
+                : (($subscription->plan?->billing_cycle === 'yearly') ? now()->addYear()->endOfDay() : now()->addMonth()->endOfDay());
+
+            $subscription->update([
+                'status' => 'active',
+                'payment_status' => 'paid',
+                'payment_provider' => 'stripe',
+                'provider_subscription_id' => $providerSubscriptionId ?: $subscription->provider_subscription_id,
+                'started_at' => $subscription->started_at ?: $startsAt,
+                'starts_at' => $startsAt,
+                'expires_at' => $endsAt,
+                'ends_at' => $endsAt,
+                'renews_at' => $endsAt,
+                'cancelled_at' => null,
+            ]);
+
+            $pendingPayment = Pago::query()
+                ->where('subscription_id', $subscription->id)
+                ->where('provider', 'stripe')
+                ->where('payment_type', 'subscription')
+                ->where('status', 'pending')
+                ->latest('id')
+                ->first();
+
+            if ($pendingPayment) {
+                $pendingPayment->update([
+                    'amount' => $amount > 0 ? $amount : $pendingPayment->amount,
+                    'currency' => $currency ?: $pendingPayment->currency,
+                    'transaction_reference' => $providerSubscriptionId ?: $providerPaymentId ?: $pendingPayment->transaction_reference,
+                    'stripe_payment_intent_id' => $providerPaymentId ?: $pendingPayment->stripe_payment_intent_id,
+                    'status' => 'paid',
+                    'paid_at' => now(),
+                    'failure_reason' => null,
+                    'gateway_response' => $gatewayPayload,
+                ]);
+            } else {
+                Pago::create([
+                    'user_id' => $subscription->user_id,
+                    'subscription_id' => $subscription->id,
+                    'payment_type' => 'subscription',
+                    'amount' => $amount > 0 ? $amount : (float) ($subscription->plan?->amount ?: $subscription->plan?->price_monthly ?: $subscription->plan?->price ?: 0),
+                    'currency' => $currency ?: strtoupper((string) ($subscription->plan?->currency ?: 'USD')),
+                    'provider' => 'stripe',
+                    'transaction_reference' => $providerSubscriptionId ?: $providerPaymentId,
+                    'stripe_payment_intent_id' => $providerPaymentId ?: null,
+                    'status' => 'paid',
+                    'paid_at' => now(),
+                    'gateway_response' => $gatewayPayload,
+                ]);
+            }
         });
     }
 
@@ -455,7 +746,7 @@ class StripeWebhookControlador extends ControladorBase
         ]);
 
         DB::table('users')->where('id', $payment->user_id)->update([
-            'access_status' => 'payment_pending',
+            'access_status' => 'payment_failed',
             'updated_at' => now(),
         ]);
     }

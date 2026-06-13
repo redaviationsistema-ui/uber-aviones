@@ -73,6 +73,7 @@ class Usuario extends Authenticatable
             'email_verified_at' => 'datetime',
             'password' => 'hashed',
             'contact_blocked_until' => 'datetime',
+            'access_expires_at' => 'datetime',
             'identity_verified' => 'boolean',
             'face_detected' => 'boolean',
             'face_match_score' => 'decimal:2',
@@ -177,7 +178,10 @@ class Usuario extends Authenticatable
         $subscription = $this->activeSuscripcion;
         $demoActive = $demo?->status === 'active' && $demo->expires_at?->isFuture();
         $subscriptionActive = $subscription !== null;
-        $commercialAccessActive = (bool) $this->has_paid_access && ($this->access_status === 'active' || $this->paid_access_at !== null);
+        $accessExpiresAt = $this->access_expires_at ? \Illuminate\Support\Carbon::parse($this->access_expires_at) : null;
+        $commercialAccessActive = (bool) $this->has_paid_access
+            && ($this->access_status === 'active' || $this->paid_access_at !== null)
+            && (! $accessExpiresAt || $accessExpiresAt->isFuture());
         $trialEndsAt = $this->trial_ends_at ? \Illuminate\Support\Carbon::parse($this->trial_ends_at) : null;
 
         return [
@@ -205,6 +209,7 @@ class Usuario extends Authenticatable
                 'free_quote_limit' => (int) ($this->free_quote_limit ?? 1),
                 'free_quotes_used' => (int) ($this->free_quotes_used ?? 0),
                 'paid_access_at' => $this->paid_access_at,
+                'access_expires_at' => $this->access_expires_at,
                 'access_payment_id' => $this->access_payment_id,
             ],
         ];

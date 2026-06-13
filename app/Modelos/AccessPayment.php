@@ -14,10 +14,14 @@ class AccessPayment extends Model
         'billing_plan_id',
         'amount',
         'currency',
+        'billing_period_start',
+        'billing_period_end',
         'status',
         'provider',
         'provider_payment_id',
         'provider_checkout_id',
+        'card_brand',
+        'card_last4',
         'paid_at',
         'gateway_response',
     ];
@@ -26,6 +30,8 @@ class AccessPayment extends Model
     {
         return [
             'amount' => 'decimal:2',
+            'billing_period_start' => 'date',
+            'billing_period_end' => 'date',
             'paid_at' => 'datetime',
             'gateway_response' => 'array',
         ];

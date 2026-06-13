@@ -9,6 +9,7 @@ Artisan::command('inspire', function () {
 })->purpose('Display an inspiring quote');
 
 Schedule::command('skygroup:expire-demos')->hourly();
+Schedule::command('skygroup:expire-client-access')->hourly();
 Schedule::command('skygroup:expire-subscriptions')->hourly();
 Schedule::command('skygroup:expire-quotes')->everyFifteenMinutes();
 Schedule::command('skygroup:release-provider-payments')->dailyAt('02:00');

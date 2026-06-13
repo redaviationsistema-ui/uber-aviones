@@ -34,6 +34,8 @@ Route::middleware(['auth.token'])->group(function () {
     Route::prefix('client')->middleware(['role:client,admin'])->group(function () {
         Route::get('/access-status', [ClientAccessBillingControlador::class, 'status']);
         Route::post('/access-payment/create', [ClientAccessBillingControlador::class, 'create']);
+        Route::post('/access-payment/payment-intent', [ClientAccessBillingControlador::class, 'createPaymentIntent']);
+        Route::post('/access-payment/confirm', [ClientAccessBillingControlador::class, 'confirmPaymentIntent']);
         Route::get('/access-payment/success', [ClientAccessBillingControlador::class, 'success']);
         Route::get('/access-payment/cancel', [ClientAccessBillingControlador::class, 'cancel']);
         Route::post('/flight-requests', [ClienteControlador::class, 'storeFlightRequest']);
@@ -115,6 +117,7 @@ Route::middleware(['auth.token'])->group(function () {
         Route::get('/roles', [AdminControlador::class, 'roles']);
         Route::put('/users/{user}', [AdminControlador::class, 'updateUser']);
         Route::delete('/users/{user}', [AdminControlador::class, 'destroyUser']);
+        Route::post('/users/{user}/anonymize', [AdminControlador::class, 'anonymizeUser']);
         Route::post('/users/{user}/block', [AdminControlador::class, 'blockUser']);
         Route::post('/users/{user}/activate', [AdminControlador::class, 'activateUser']);
         Route::post('/users/{user}/grant-trial', [AdminControlador::class, 'grantUserTrial']);
@@ -136,6 +139,8 @@ Route::middleware(['auth.token'])->group(function () {
         Route::post('/requests/{flightRequest}/assign', [AdminControlador::class, 'assign']);
         Route::put('/requests/{flightRequest}/workflow', [AdminControlador::class, 'updateRequestWorkflow']);
         Route::get('/subscriptions', [AdminControlador::class, 'subscriptions']);
+        Route::get('/client-access-payments', [AdminControlador::class, 'clientAccessPayments']);
+        Route::get('/subscription-payments', [AdminControlador::class, 'subscriptionPayments']);
         Route::get('/fleet/aircraft', [AdminControlador::class, 'aircraftFleet']);
         Route::get('/fleet/aircraft-subscriptions', [AdminControlador::class, 'aircraftSubscriptionsPerFleet']);
         Route::get('/kpis', [AdminControlador::class, 'kpis']);

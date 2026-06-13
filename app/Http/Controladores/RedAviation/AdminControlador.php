@@ -3,6 +3,7 @@
 namespace App\Http\Controladores\RedAviation;
 
 use App\Http\Controladores\ControladorBase;
+use App\Modelos\AccessPayment;
 use App\Modelos\BanderaAntiBroker;
 use App\Modelos\ContratoReserva;
 use App\Modelos\Demo;
@@ -10,6 +11,7 @@ use App\Modelos\Operacion;
 use App\Modelos\Proveedor;
 use App\Modelos\Rol;
 use App\Modelos\Aeronave;
+use App\Modelos\Pago;
 use App\Modelos\CatalogoDisponibilidadEstatus;
 use App\Modelos\SolicitudVuelo;
 use App\Modelos\SobrecargoDisponibilidad;
@@ -68,6 +70,7 @@ class AdminControlador extends ControladorBase
                 'has_paid_access',
                 'paid_access_at',
                 'access_payment_id',
+                'access_expires_at',
                 'updated_at',
             ])
             ->with([
@@ -279,6 +282,144 @@ class AdminControlador extends ControladorBase
 
         return $this->ok([
             'message' => 'Usuario eliminado correctamente.',
+        ]);
+    }
+
+    public function anonymizeUser(Request $request, Usuario $user)
+    {
+        if ($request->user()?->is($user)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No puedes anonimizar tu propio usuario administrador.',
+            ], 422);
+        }
+
+        if (! $user->hasRole(Usuario::ROLE_CLIENT)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Por ahora solo los usuarios cliente pueden anonimizarse desde este modulo.',
+            ], 422);
+        }
+
+        $anonymizedEmail = sprintf('anon+client-%d-%s@redaviation.invalid', $user->id, now()->format('YmdHis'));
+        $anonymizedName = sprintf('Cliente anonimizado #%d', $user->id);
+
+        DB::transaction(function () use ($user, $anonymizedEmail, $anonymizedName) {
+            $user->demo()->update([
+                'status' => 'inactive',
+                'expires_at' => now(),
+            ]);
+
+            $user->subscriptions()->whereIn('status', ['active', 'pending', 'past_due'])->update([
+                'status' => 'cancelled',
+                'payment_status' => DB::raw("CASE WHEN payment_status = 'paid' THEN payment_status ELSE 'cancelled' END"),
+                'cancelled_at' => now(),
+                'renews_at' => null,
+            ]);
+
+            $user->paymentMethods()->delete();
+            $user->apiTokens()->delete();
+
+            $user->identityVerifications()->update([
+                'status' => 'anonymized',
+                'identity_verified' => false,
+                'face_confidence' => null,
+                'face_match_score' => null,
+                'liveness_score' => null,
+                'brightness' => null,
+                'sharpness' => null,
+                'yaw' => null,
+                'pitch' => null,
+                'roll' => null,
+                'face_occluded' => null,
+                'image_path' => null,
+                'aws_request_id' => null,
+            ]);
+
+            $user->profile()?->update([
+                'company_name' => 'Cliente anonimizado',
+                'business_type' => null,
+                'birth_date' => null,
+                'nationality' => null,
+                'document_type' => null,
+                'document_number' => null,
+                'document_expiration' => null,
+                'identity_validation_required' => false,
+                'ine_curp' => null,
+                'ine_cic' => null,
+                'ine_ocr' => null,
+                'ine_scan_raw' => null,
+                'ine_scan_status' => 'anonymized',
+                'ine_front_path' => null,
+                'ine_back_path' => null,
+                'tax_data' => null,
+                'country' => null,
+                'city' => null,
+                'base_airport' => null,
+                'base_airport_id' => null,
+                'address' => null,
+                'avatar' => null,
+                'avatar_url' => null,
+            ]);
+
+            $user->forceFill([
+                'name' => $anonymizedName,
+                'email' => $anonymizedEmail,
+                'password' => Hash::make(Str::password(32)),
+                'phone' => null,
+                'status' => 'inactive',
+                'remember_token' => null,
+                'contact_strikes' => 0,
+                'contact_blocked_until' => null,
+                'identity_verification_status' => 'anonymized',
+                'identity_verification_message' => 'Datos personales anonimizados por administracion.',
+                'identity_verified' => false,
+                'face_detected' => false,
+                'face_match_score' => null,
+                'liveness_score' => null,
+                'image_storage_score' => null,
+                'biometric_image_saved' => false,
+                'biometric_captured_at' => null,
+                'biometric_provider' => null,
+                'biometric_template_type' => null,
+                'biometric_selfie_path' => null,
+                'access_status' => 'anonymized',
+                'trial_started_at' => null,
+                'trial_ends_at' => null,
+                'free_quote_limit' => 0,
+                'free_quotes_used' => 0,
+                'has_paid_access' => false,
+                'paid_access_at' => null,
+                'access_payment_id' => null,
+                'access_expires_at' => null,
+            ])->save();
+        });
+
+        $this->writeAudit($request, 'admin_user_anonymized', 'admin_users', sprintf(
+            'Admin anonimizo al usuario cliente %s.',
+            $user->id
+        ));
+
+        return $this->ok([
+            'message' => 'Cliente anonimizado correctamente. Se conservaron historiales operativos y de pago sin datos personales.',
+            'user' => $this->serializeAdminUserSummary(
+                $user->fresh([
+                    'roles:id,code,name',
+                    'profile:id,user_id,company_name,city,base_airport,tax_data',
+                    'provider:id,user_id,company_name,commercial_name,approval_status',
+                    'ownedProvider:id,user_id,company_name,commercial_name,approval_status',
+                    'demo:id,user_id,status,started_at,expires_at',
+                    'activeSuscripcion' => fn ($query) => $query->select([
+                        'subscriptions.id',
+                        'subscriptions.user_id',
+                        'subscriptions.plan_id',
+                        'subscriptions.status',
+                        'subscriptions.started_at',
+                        'subscriptions.expires_at',
+                    ]),
+                    'activeSuscripcion.plan:id,name,code,billing_cycle',
+                ])
+            ),
         ]);
     }
 
@@ -1503,6 +1644,111 @@ class AdminControlador extends ControladorBase
         return $this->ok(['subscriptions' => Suscripcion::with(['user', 'plan'])->latest()->paginate(20)]);
     }
 
+    public function clientAccessPayments()
+    {
+        $payments = AccessPayment::query()
+            ->with([
+                'user:id,name,email,phone,access_status,has_paid_access,paid_access_at,access_expires_at,access_payment_id',
+                'user.profile:id,user_id,company_name',
+                'billingPlan:id,name,code,billing_cycle',
+            ])
+            ->latest('id')
+            ->paginate(50);
+
+        return $this->ok([
+            'access_payments' => $payments->through(function (AccessPayment $payment) {
+                $user = $payment->user;
+
+                return [
+                    'id' => $payment->id,
+                    'user_id' => $payment->user_id,
+                    'amount' => $payment->amount,
+                    'currency' => $payment->currency,
+                    'status' => $payment->status,
+                    'provider' => $payment->provider,
+                    'provider_payment_id' => $payment->provider_payment_id,
+                    'provider_checkout_id' => $payment->provider_checkout_id,
+                    'billing_period_start' => $payment->billing_period_start,
+                    'billing_period_end' => $payment->billing_period_end,
+                    'paid_at' => $payment->paid_at,
+                    'card_brand' => $payment->card_brand,
+                    'card_last4' => $payment->card_last4,
+                    'is_current' => (int) ($user?->access_payment_id ?? 0) === (int) $payment->id,
+                    'user' => $user ? [
+                        'id' => $user->id,
+                        'name' => $user->name,
+                        'email' => $user->email,
+                        'phone' => $user->phone,
+                        'access_status' => $user->access_status,
+                        'has_paid_access' => (bool) $user->has_paid_access,
+                        'paid_access_at' => $user->paid_access_at,
+                        'access_expires_at' => $user->access_expires_at,
+                        'company_name' => $user->profile?->company_name,
+                    ] : null,
+                    'plan' => $payment->billingPlan ? [
+                        'id' => $payment->billingPlan->id,
+                        'name' => $payment->billingPlan->name,
+                        'code' => $payment->billingPlan->code,
+                        'billing_cycle' => $payment->billingPlan->billing_cycle,
+                    ] : null,
+                ];
+            }),
+        ]);
+    }
+
+    public function subscriptionPayments()
+    {
+        $payments = Pago::query()
+            ->with([
+                'user:id,name,email,phone',
+                'subscription:id,user_id,plan_id,status,payment_status,started_at,expires_at,provider_subscription_id',
+                'subscription.plan:id,name,code,billing_cycle',
+            ])
+            ->where('payment_type', 'subscription')
+            ->latest('id')
+            ->paginate(50);
+
+        return $this->ok([
+            'subscription_payments' => $payments->through(function (Pago $payment) {
+                return [
+                    'id' => $payment->id,
+                    'user_id' => $payment->user_id,
+                    'subscription_id' => $payment->subscription_id,
+                    'amount' => $payment->amount,
+                    'currency' => $payment->currency,
+                    'provider' => $payment->provider,
+                    'transaction_reference' => $payment->transaction_reference,
+                    'stripe_checkout_session_id' => $payment->stripe_checkout_session_id,
+                    'stripe_payment_intent_id' => $payment->stripe_payment_intent_id,
+                    'status' => $payment->status,
+                    'paid_at' => $payment->paid_at,
+                    'failure_reason' => $payment->failure_reason,
+                    'gateway_response' => $payment->gateway_response,
+                    'user' => $payment->user ? [
+                        'id' => $payment->user->id,
+                        'name' => $payment->user->name,
+                        'email' => $payment->user->email,
+                        'phone' => $payment->user->phone,
+                    ] : null,
+                    'subscription' => $payment->subscription ? [
+                        'id' => $payment->subscription->id,
+                        'status' => $payment->subscription->status,
+                        'payment_status' => $payment->subscription->payment_status,
+                        'started_at' => $payment->subscription->started_at,
+                        'expires_at' => $payment->subscription->expires_at,
+                        'provider_subscription_id' => $payment->subscription->provider_subscription_id,
+                        'plan' => $payment->subscription->plan ? [
+                            'id' => $payment->subscription->plan->id,
+                            'name' => $payment->subscription->plan->name,
+                            'code' => $payment->subscription->plan->code,
+                            'billing_cycle' => $payment->subscription->plan->billing_cycle,
+                        ] : null,
+                    ] : null,
+                ];
+            }),
+        ]);
+    }
+
     public function aircraftFleet()
     {
         $aircraft = Aeronave::with([
@@ -1973,6 +2219,7 @@ class AdminControlador extends ControladorBase
             'has_paid_access' => (bool) $user->has_paid_access,
             'paid_access_at' => $user->paid_access_at,
             'access_payment_id' => $user->access_payment_id,
+            'access_expires_at' => $user->access_expires_at,
             'updated_at' => $user->updated_at,
             'access' => $user->accessStatus(),
             'commercial_access' => $commercialAccess,
@@ -2069,6 +2316,7 @@ class AdminControlador extends ControladorBase
             'has_paid_access' => (bool) $user->has_paid_access,
             'paid_access_at' => $user->paid_access_at,
             'access_payment_id' => $user->access_payment_id,
+            'access_expires_at' => $user->access_expires_at,
             'trial_started_at' => $user->trial_started_at,
             'trial_ends_at' => $user->trial_ends_at,
             'free_quote_limit' => $freeQuoteLimit,
