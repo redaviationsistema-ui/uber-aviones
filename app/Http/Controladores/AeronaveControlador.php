@@ -69,6 +69,12 @@ class AeronaveControlador extends ControladorBase
                 'overnight_fee',
                 'currency',
                 'status',
+                'billing_status',
+                'billing_plan_id',
+                'subscription_status',
+                'subscription_started_at',
+                'subscription_ends_at',
+                'last_payment_at',
                 'security_filter',
                 'security_score',
                 'airworthiness_status',
@@ -872,6 +878,12 @@ class AeronaveControlador extends ControladorBase
                 'monthly_cost_per_aircraft' => $monthlyPerAircraft,
                 'within_plan_limit' => $plan->max_aircraft ? $providerAircraftCount <= $plan->max_aircraft : true,
             ] : null,
+            'billing_status' => $aircraft->billing_status,
+            'billing_plan_id' => $aircraft->billing_plan_id,
+            'subscription_status' => $aircraft->subscription_status,
+            'subscription_started_at' => $aircraft->subscription_started_at,
+            'subscription_ends_at' => $aircraft->subscription_ends_at,
+            'last_payment_at' => $aircraft->last_payment_at,
         ];
     }
 

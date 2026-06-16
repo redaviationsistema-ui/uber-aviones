@@ -9,6 +9,8 @@ use App\Modelos\ImagenAeronave;
 use App\Modelos\Operacion;
 use App\Modelos\ReglaPrecioCategoria;
 use App\Modelos\SolicitudVuelo;
+use App\Modelos\TokenApi;
+use App\Modelos\Usuario;
 use App\Servicios\Billing\BillingPlanServicio;
 use App\Servicios\RedAviation\MatchingRedAviationServicio;
 use App\Servicios\RedAviation\VisibilidadServicio;
@@ -175,6 +177,22 @@ class ClienteControlador extends ControladorBase
 
     public function previewQuotes(Request $request)
     {
+        $user = $this->resolveOptionalApiUser($request);
+        $commercialGate = null;
+
+        if ($user && ($user->hasRole(Usuario::ROLE_CLIENT) || $user->hasRole(Usuario::ROLE_ADMIN))) {
+            $commercialGate = $this->resolveCommercialAccessGate($user);
+
+            if (! $commercialGate['allowed']) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Necesitas activar tu acceso comercial para cotizar de nuevo.',
+                    'access' => $user->accessStatus(),
+                    'billing_plan' => $commercialGate['plan'],
+                ], 402);
+            }
+        }
+
         $data = $request->validate([
             'origin' => ['required', 'string', 'max:20'],
             'destination' => ['required', 'string', 'max:20'],
@@ -220,6 +238,21 @@ class ClienteControlador extends ControladorBase
         $passengers = (int) $data['passengers'];
         $tripType = $this->resolveQuoteTripType($data);
         $quotesLimit = (int) ($data['limit'] ?? self::DEFAULT_CLIENT_QUOTES_LIMIT);
+
+        if ($user && (($commercialGate['consume_trial_quote'] ?? false) === true)) {
+            $nextUsed = (int) ($user->free_quotes_used ?? 0) + 1;
+            $limit = max(1, (int) ($user->free_quote_limit ?? 1));
+
+            DB::table('users')->where('id', $user->id)->update([
+                'trial_started_at' => $user->trial_started_at ?? now(),
+                'trial_ends_at' => $user->trial_ends_at ?? now()->addDays(7),
+                'access_status' => $nextUsed >= $limit ? 'trial_used' : 'trial_active',
+                'free_quotes_used' => $nextUsed,
+                'updated_at' => now(),
+            ]);
+
+            $user = $user->fresh(['activeSuscripcion', 'demo', 'roles']);
+        }
 
         if ($tripType === 'multi_leg') {
             logger()->info('DEBUG MULTI LEG INPUT', [
@@ -392,6 +425,7 @@ class ClienteControlador extends ControladorBase
             'legs' => $legs,
             'matches' => $quotes,
             'options' => $quotes,
+            'access' => $user?->accessStatus(),
         ]);
     }
 
@@ -473,21 +507,6 @@ class ClienteControlador extends ControladorBase
         [$user, $solicitud, $chat] = DB::transaction(function () use ($request, $user, $commercialGate, $data, $selectedCardPrice, $aircraftSnapshot) {
             $freshUser = $user->fresh(['activeSuscripcion', 'demo']);
 
-            if (($commercialGate['consume_trial_quote'] ?? false) === true) {
-                $nextUsed = (int) ($freshUser->free_quotes_used ?? 0) + 1;
-                $limit = max(1, (int) ($freshUser->free_quote_limit ?? 1));
-
-                DB::table('users')->where('id', $freshUser->id)->update([
-                    'trial_started_at' => $freshUser->trial_started_at ?? now(),
-                    'trial_ends_at' => $freshUser->trial_ends_at ?? now()->addDays(7),
-                    'access_status' => $nextUsed >= $limit ? 'trial_used' : 'trial_active',
-                    'free_quotes_used' => $nextUsed,
-                    'updated_at' => now(),
-                ]);
-
-                $freshUser = $freshUser->fresh(['activeSuscripcion', 'demo']);
-            }
-
             $solicitud = SolicitudVuelo::create($data + [
                 'client_id' => $freshUser->id,
                 'status' => 'pending',
@@ -562,7 +581,11 @@ class ClienteControlador extends ControladorBase
         $trialStillActive = $trialEndsAt === null || ! $trialEndsAt->isPast();
         $status = (string) ($user->access_status ?? 'trial_active');
 
-        if (in_array($status, ['trial_active', 'registered', 'payment_failed', 'trial_used'], true) && $used < $limit && $trialStillActive) {
+        if (
+            in_array($status, ['trial_active', 'registered', 'payment_failed', 'trial_used', 'payment_pending'], true)
+            && $used < $limit
+            && $trialStillActive
+        ) {
             return ['allowed' => true, 'consume_trial_quote' => true, 'plan' => null];
         }
 
@@ -573,6 +596,36 @@ class ClienteControlador extends ControladorBase
             'consume_trial_quote' => false,
             'plan' => $plan ? $this->billingPlanServicio->serialize($plan) : null,
         ];
+    }
+
+    private function resolveOptionalApiUser(Request $request): ?Usuario
+    {
+        if ($request->user()) {
+            return $request->user()->fresh(['activeSuscripcion', 'demo', 'roles']);
+        }
+
+        $plainToken = $request->bearerToken() ?: $request->cookie((string) env('AUTH_TOKEN_COOKIE', 'red_aviation_session'));
+
+        if (! $plainToken) {
+            return null;
+        }
+
+        $token = TokenApi::with([
+            'user.roles',
+            'user.activeSuscripcion',
+            'user.demo',
+        ])
+            ->where('token', hash('sha256', $plainToken))
+            ->where(function ($query) {
+                $query->whereNull('expires_at')->orWhere('expires_at', '>', now());
+            })
+            ->first();
+
+        if (! $token?->user || $token->user->status !== 'active') {
+            return null;
+        }
+
+        return $token->user;
     }
 
     private function assignSelectedMatchToFlightRequest(SolicitudVuelo $solicitud, array $data): void

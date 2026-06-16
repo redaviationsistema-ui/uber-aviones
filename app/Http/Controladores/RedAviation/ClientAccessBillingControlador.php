@@ -61,6 +61,7 @@ class ClientAccessBillingControlador extends ControladorBase
         $data = $request->validate([
             'success_url' => ['nullable', 'url'],
             'cancel_url' => ['nullable', 'url'],
+            'contact_email' => ['nullable', 'email:rfc,dns'],
         ]);
 
         $plan = $this->billingPlanServicio->findActiveByCode(BillingPlanServicio::CLIENT_ACCESS_CODE);
@@ -81,8 +82,7 @@ class ClientAccessBillingControlador extends ControladorBase
 
         $session = Session::create([
             'mode' => 'payment',
-            'payment_method_types' => ['card'],
-            'customer_email' => $user->email,
+            'customer_email' => $data['contact_email'] ?? $user->email,
             'success_url' => $successUrl,
             'cancel_url' => $cancelUrl,
             'client_reference_id' => (string) $payment->id,
@@ -220,7 +220,6 @@ class ClientAccessBillingControlador extends ControladorBase
         $paymentIntent = PaymentIntent::retrieve($data['payment_intent_id']);
 
         abort_if(! $paymentIntent, 404, 'Stripe no devolvio informacion del PaymentIntent.');
-        abort_if(($paymentIntent->status ?? '') !== 'succeeded', 409, 'Stripe aun no confirma este pago como exitoso.');
 
         $metadata = (array) ($paymentIntent->metadata ?? []);
         abort_if(($metadata['billing_context'] ?? '') !== 'client_access', 409, 'El PaymentIntent no corresponde al acceso comercial.');
@@ -230,6 +229,30 @@ class ClientAccessBillingControlador extends ControladorBase
             ->where('id', $accessPaymentId)
             ->where('user_id', $user->id)
             ->firstOrFail();
+
+        $freshUser = $user->fresh();
+        $paymentAlreadyApplied = $payment->status === 'paid'
+            && $payment->provider_payment_id === $paymentIntent->id
+            && (bool) $freshUser?->has_paid_access
+            && $freshUser?->access_status === 'active';
+
+        if (($paymentIntent->status ?? '') !== 'succeeded') {
+            if ($paymentAlreadyApplied) {
+                return $this->ok([
+                    'payment' => $payment->fresh('billingPlan'),
+                    'access' => $this->buildAccessPayload($freshUser),
+                ]);
+            }
+
+            abort(409, 'Stripe aun no confirma este pago como exitoso.');
+        }
+
+        if ($paymentAlreadyApplied) {
+            return $this->ok([
+                'payment' => $payment->fresh('billingPlan'),
+                'access' => $this->buildAccessPayload($freshUser),
+            ]);
+        }
 
         [$periodStart, $periodEnd] = $this->resolvePaymentPeriodFromMetadata($metadata);
         $brand = (string) (
@@ -269,12 +292,7 @@ class ClientAccessBillingControlador extends ControladorBase
 
         return $this->ok([
             'payment' => $payment->fresh('billingPlan'),
-            'access' => [
-                'status' => $freshUser->access_status,
-                'has_paid_access' => (bool) $freshUser->has_paid_access,
-                'paid_access_at' => $freshUser->paid_access_at,
-                'access_expires_at' => $freshUser->access_expires_at,
-            ],
+            'access' => $this->buildAccessPayload($freshUser),
         ]);
     }
 
@@ -295,14 +313,18 @@ class ClientAccessBillingControlador extends ControladorBase
 
         abort_if(! $payment, 404, 'No encontramos el pago de acceso solicitado.');
 
+        if (! $this->ensureStripeIsConfigured() && ($sessionId || $payment->provider_checkout_id)) {
+            $payment = $this->syncCheckoutPaymentStatus(
+                $payment,
+                $sessionId ?: (string) $payment->provider_checkout_id,
+            );
+        }
+
+        $freshUser = $request->user()->fresh();
+
         return $this->ok([
-            'payment' => $payment,
-            'access' => [
-                'status' => $request->user()->fresh()->access_status,
-                'has_paid_access' => (bool) $request->user()->fresh()->has_paid_access,
-                'paid_access_at' => $request->user()->fresh()->paid_access_at,
-                'access_expires_at' => $request->user()->fresh()->access_expires_at,
-            ],
+            'payment' => $payment->fresh('billingPlan'),
+            'access' => $this->buildAccessPayload($freshUser),
         ]);
     }
 
@@ -384,5 +406,94 @@ class ClientAccessBillingControlador extends ControladorBase
             : $start->copy()->addMonthNoOverflow();
 
         return [$start, $end];
+    }
+
+    private function buildAccessPayload($user): array
+    {
+        return [
+            'status' => $user->access_status,
+            'has_paid_access' => (bool) $user->has_paid_access,
+            'paid_access_at' => $user->paid_access_at,
+            'access_expires_at' => $user->access_expires_at,
+        ];
+    }
+
+    private function syncCheckoutPaymentStatus(AccessPayment $payment, string $sessionId = ''): AccessPayment
+    {
+        $targetSessionId = trim($sessionId) !== '' ? trim($sessionId) : (string) $payment->provider_checkout_id;
+        if ($targetSessionId === '') {
+            return $payment->fresh('billingPlan');
+        }
+
+        Stripe::setApiKey((string) config('services.stripe.secret'));
+        $session = Session::retrieve($targetSessionId);
+
+        abort_if(! $session, 404, 'Stripe no devolvio informacion de la sesion de Checkout.');
+
+        $sessionMetadata = (array) ($session->metadata ?? []);
+        $billingContext = (string) ($sessionMetadata['billing_context'] ?? '');
+        if ($billingContext !== '' && $billingContext !== 'client_access') {
+            abort(409, 'La sesion de Checkout no corresponde al acceso comercial.');
+        }
+
+        $paymentStatus = strtolower((string) ($session->payment_status ?? ''));
+        if ($paymentStatus !== 'paid') {
+            return $payment->fresh('billingPlan');
+        }
+
+        $paymentIntentId = (string) ($session->payment_intent ?? $payment->provider_payment_id ?? '');
+        $paymentIntent = $paymentIntentId !== '' ? PaymentIntent::retrieve($paymentIntentId) : null;
+        $intentMetadata = (array) ($paymentIntent->metadata ?? []);
+        $metadata = ! empty($intentMetadata) ? $intentMetadata : $sessionMetadata;
+        [$periodStart, $periodEnd] = $this->resolvePaymentPeriodFromMetadata($metadata);
+
+        $brand = (string) (
+            data_get($paymentIntent, 'payment_method_details.card.brand')
+            ?? data_get($paymentIntent, 'charges.data.0.payment_method_details.card.brand')
+            ?? ''
+        );
+        $last4 = (string) (
+            data_get($paymentIntent, 'payment_method_details.card.last4')
+            ?? data_get($paymentIntent, 'charges.data.0.payment_method_details.card.last4')
+            ?? ''
+        );
+
+        DB::transaction(function () use (
+            $payment,
+            $paymentIntentId,
+            $targetSessionId,
+            $paymentIntent,
+            $session,
+            $brand,
+            $last4,
+            $periodStart,
+            $periodEnd
+        ) {
+            $payment->update([
+                'status' => 'paid',
+                'provider_payment_id' => $paymentIntentId !== '' ? $paymentIntentId : $payment->provider_payment_id,
+                'provider_checkout_id' => $targetSessionId,
+                'card_brand' => $brand !== '' ? $brand : $payment->card_brand,
+                'card_last4' => $last4 !== '' ? $last4 : $payment->card_last4,
+                'paid_at' => $payment->paid_at ?: now(),
+                'billing_period_start' => $periodStart->toDateString(),
+                'billing_period_end' => $periodEnd->toDateString(),
+                'gateway_response' => [
+                    'checkout_session' => json_decode(json_encode($session), true),
+                    'payment_intent' => $paymentIntent ? json_decode(json_encode($paymentIntent), true) : null,
+                ],
+            ]);
+
+            DB::table('users')->where('id', $payment->user_id)->update([
+                'access_status' => 'active',
+                'has_paid_access' => true,
+                'paid_access_at' => DB::raw('coalesce(paid_access_at, now())'),
+                'access_expires_at' => $periodEnd->copy()->endOfDay(),
+                'access_payment_id' => $payment->id,
+                'updated_at' => now(),
+            ]);
+        });
+
+        return $payment->fresh('billingPlan');
     }
 }

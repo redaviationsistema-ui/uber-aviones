@@ -123,6 +123,7 @@ Route::middleware(['auth.token'])->group(function () {
         Route::post('/users/{user}/grant-trial', [AdminControlador::class, 'grantUserTrial']);
         Route::post('/users/{user}/revoke-commercial-access', [AdminControlador::class, 'revokeCommercialAccess']);
         Route::post('/users/{user}/reset-password', [AdminControlador::class, 'resetUserPassword']);
+        Route::post('/client-access-payments/reconcile-pending', [AdminControlador::class, 'reconcilePendingClientAccessPayments']);
         Route::get('/operators', [AdminControlador::class, 'operators']);
         Route::get('/sobrecargos', [AdminControlador::class, 'sobrecargos']);
         Route::get('/crew', [AdminControlador::class, 'sobrecargos']);

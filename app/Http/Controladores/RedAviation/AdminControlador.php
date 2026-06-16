@@ -30,6 +30,9 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
+use Stripe\Checkout\Session;
+use Stripe\PaymentIntent;
+use Stripe\Stripe;
 use Shuchkin\SimpleXLS;
 use Shuchkin\SimpleXLSX;
 use Shuchkin\SimpleXLSXGen;
@@ -1696,6 +1699,70 @@ class AdminControlador extends ControladorBase
         ]);
     }
 
+    public function reconcilePendingClientAccessPayments(): JsonResponse
+    {
+        if ($response = $this->ensureStripeConfigured()) {
+            return $response;
+        }
+
+        Stripe::setApiKey((string) config('services.stripe.secret'));
+
+        $payments = AccessPayment::query()
+            ->with('user:id,access_status,has_paid_access,access_payment_id,access_expires_at')
+            ->whereIn('status', ['pending', 'processing', 'requires_payment_method', 'requires_confirmation', 'requires_action', 'payment_pending'])
+            ->latest('id')
+            ->limit(100)
+            ->get();
+
+        $reconciled = 0;
+        $checked = 0;
+        $failures = [];
+
+        foreach ($payments as $payment) {
+            $checked++;
+
+            try {
+                $sessionId = trim((string) $payment->provider_checkout_id);
+                $paymentIntentId = trim((string) $payment->provider_payment_id);
+
+                if ($sessionId !== '') {
+                    $session = Session::retrieve($sessionId);
+                    $sessionPaymentStatus = strtolower((string) ($session->payment_status ?? ''));
+                    $sessionStatus = strtolower((string) ($session->status ?? ''));
+
+                    if ($sessionPaymentStatus === 'paid' || $sessionStatus === 'complete') {
+                        $resolvedPaymentIntentId = is_string($session->payment_intent ?? null) ? (string) $session->payment_intent : $paymentIntentId;
+                        $paymentIntent = $resolvedPaymentIntentId !== '' ? PaymentIntent::retrieve($resolvedPaymentIntentId) : null;
+                        $this->markAdminAccessPaymentPaid($payment, $resolvedPaymentIntentId, $sessionId, $paymentIntent, $session);
+                        $reconciled++;
+                    }
+
+                    continue;
+                }
+
+                if ($paymentIntentId !== '') {
+                    $paymentIntent = PaymentIntent::retrieve($paymentIntentId);
+                    if (strtolower((string) ($paymentIntent->status ?? '')) === 'succeeded') {
+                        $this->markAdminAccessPaymentPaid($payment, $paymentIntentId, '', $paymentIntent, null);
+                        $reconciled++;
+                    }
+                }
+            } catch (\Throwable $error) {
+                $failures[] = [
+                    'payment_id' => $payment->id,
+                    'user_id' => $payment->user_id,
+                    'message' => $error->getMessage(),
+                ];
+            }
+        }
+
+        return $this->ok([
+            'checked' => $checked,
+            'reconciled' => $reconciled,
+            'failures' => $failures,
+        ]);
+    }
+
     public function subscriptionPayments()
     {
         $payments = Pago::query()
@@ -1747,6 +1814,67 @@ class AdminControlador extends ControladorBase
                 ];
             }),
         ]);
+    }
+
+    private function ensureStripeConfigured(): ?JsonResponse
+    {
+        if (! config('services.stripe.secret') || ! config('services.stripe.publishable')) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Stripe no esta configurado en el servidor.',
+            ], 503);
+        }
+
+        return null;
+    }
+
+    private function markAdminAccessPaymentPaid(
+        AccessPayment $payment,
+        string $providerPaymentId = '',
+        string $checkoutSessionId = '',
+        mixed $paymentIntent = null,
+        mixed $checkoutSession = null,
+    ): void {
+        DB::transaction(function () use ($payment, $providerPaymentId, $checkoutSessionId, $paymentIntent, $checkoutSession) {
+            $gatewayPayload = [
+                'payment_intent' => $paymentIntent ? json_decode(json_encode($paymentIntent), true) : null,
+                'checkout_session' => $checkoutSession ? json_decode(json_encode($checkoutSession), true) : null,
+            ];
+            $cardBrand = (string) (
+                data_get($gatewayPayload, 'payment_intent.payment_method_details.card.brand')
+                ?? data_get($gatewayPayload, 'payment_intent.charges.data.0.payment_method_details.card.brand')
+                ?? ''
+            );
+            $cardLast4 = (string) (
+                data_get($gatewayPayload, 'payment_intent.payment_method_details.card.last4')
+                ?? data_get($gatewayPayload, 'payment_intent.charges.data.0.payment_method_details.card.last4')
+                ?? ''
+            );
+
+            $periodStart = $payment->billing_period_start ?: now()->toDateString();
+            $periodEnd = $payment->billing_period_end ?: now()->addMonthNoOverflow()->toDateString();
+
+            $payment->update([
+                'status' => 'paid',
+                'provider_payment_id' => $providerPaymentId !== '' ? $providerPaymentId : $payment->provider_payment_id,
+                'provider_checkout_id' => $checkoutSessionId !== '' ? $checkoutSessionId : $payment->provider_checkout_id,
+                'billing_period_start' => $periodStart,
+                'billing_period_end' => $periodEnd,
+                'card_brand' => $cardBrand !== '' ? $cardBrand : $payment->card_brand,
+                'card_last4' => $cardLast4 !== '' ? $cardLast4 : $payment->card_last4,
+                'paid_at' => $payment->paid_at ?: now(),
+                'gateway_response' => $gatewayPayload,
+            ]);
+
+            DB::table('users')->where('id', $payment->user_id)->update([
+                'access_status' => 'active',
+                'has_paid_access' => true,
+                'paid_access_at' => DB::raw('coalesce(paid_access_at, now())'),
+                'access_expires_at' => Carbon::parse($periodEnd)->endOfDay(),
+                'access_payment_id' => $payment->id,
+                'updated_at' => now(),
+            ]);
+        });
     }
 
     public function aircraftFleet()

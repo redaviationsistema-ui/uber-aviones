@@ -9,7 +9,7 @@ return [
         static fn ($item) => trim($item),
         explode(',', (string) env(
             'CORS_ALLOWED_ORIGINS',
-            'http://localhost:5173,http://127.0.0.1:5173,https://redskyg.com,https://www.redskyg.com'
+            'http://localhost:5173,http://127.0.0.1:5173,https://localhost:5173,https://127.0.0.1:5173,https://redskyg.com,https://www.redskyg.com'
         ))
     ))),
 

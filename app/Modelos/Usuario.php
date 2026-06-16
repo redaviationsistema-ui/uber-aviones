@@ -183,9 +183,16 @@ class Usuario extends Authenticatable
             && ($this->access_status === 'active' || $this->paid_access_at !== null)
             && (! $accessExpiresAt || $accessExpiresAt->isFuture());
         $trialEndsAt = $this->trial_ends_at ? \Illuminate\Support\Carbon::parse($this->trial_ends_at) : null;
+        $freeQuoteLimit = max(1, (int) ($this->free_quote_limit ?? 1));
+        $freeQuotesUsed = max(0, (int) ($this->free_quotes_used ?? 0));
+        $trialStillActive = $trialEndsAt === null || ! $trialEndsAt->isPast();
+        $commercialTrialAvailable = ! $commercialAccessActive
+            && $freeQuotesUsed < $freeQuoteLimit
+            && $trialStillActive
+            && in_array((string) ($this->access_status ?: 'trial_active'), ['trial_active', 'registered', 'payment_failed', 'payment_pending', 'trial_used'], true);
 
         return [
-            'has_access' => $demoActive || $subscriptionActive || $commercialAccessActive || $this->hasRole(self::ROLE_ADMIN),
+            'has_access' => $demoActive || $subscriptionActive || $commercialAccessActive || $commercialTrialAvailable || $this->hasRole(self::ROLE_ADMIN),
             'effective_role' => $this->effectiveRole(),
             'roles' => $this->roleCodes(),
             'demo' => $demo ? [
@@ -206,8 +213,9 @@ class Usuario extends Authenticatable
                 'trial_started_at' => $this->trial_started_at,
                 'trial_ends_at' => $this->trial_ends_at,
                 'trial_days_left' => $trialEndsAt && $trialEndsAt->isFuture() ? now()->diffInDays($trialEndsAt, false) : 0,
-                'free_quote_limit' => (int) ($this->free_quote_limit ?? 1),
-                'free_quotes_used' => (int) ($this->free_quotes_used ?? 0),
+                'free_quote_limit' => $freeQuoteLimit,
+                'free_quotes_used' => $freeQuotesUsed,
+                'has_trial_quote_available' => $commercialTrialAvailable,
                 'paid_access_at' => $this->paid_access_at,
                 'access_expires_at' => $this->access_expires_at,
                 'access_payment_id' => $this->access_payment_id,

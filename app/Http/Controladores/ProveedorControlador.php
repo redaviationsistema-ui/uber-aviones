@@ -3,6 +3,7 @@
 namespace App\Http\Controladores;
 
 use App\Modelos\Aeronave;
+use App\Modelos\AircraftBillingPayment;
 use App\Modelos\LineaTiempoOperacion;
 use App\Modelos\Operacion;
 use App\Modelos\SolicitudVuelo;
@@ -391,6 +392,40 @@ class ProveedorControlador extends ControladorBase
         $providerId = $request->user()->provider_id;
         abort_if(! $providerId, 404);
 
+        $aircraftPayments = AircraftBillingPayment::query()
+            ->with(['aircraft:id,registration,model,base_airport', 'billingPlan:id,code,name,amount,currency'])
+            ->where('provider_id', $providerId)
+            ->latest('id')
+            ->limit(50)
+            ->get()
+            ->map(fn (AircraftBillingPayment $payment) => [
+                'id' => 'aircraft-'.$payment->id,
+                'aircraft_payment_id' => $payment->id,
+                'aircraft_id' => $payment->aircraft_id,
+                'aircraft_name' => $payment->aircraft?->model,
+                'aircraft_model' => $payment->aircraft?->model,
+                'aircraft' => $payment->aircraft?->model,
+                'aircraft_registration' => $payment->aircraft?->registration,
+                'base_airport' => $payment->aircraft?->base_airport,
+                'completed_at' => optional($payment->paid_at ?? $payment->updated_at ?? $payment->created_at)?->toDateTimeString(),
+                'amount' => (float) $payment->amount,
+                'currency' => $payment->currency ?: 'USD',
+                'status' => $payment->status,
+                'receipt' => $payment->provider_payment_id ?: $payment->provider_subscription_id ?: $payment->provider_checkout_id,
+                'reference' => $payment->provider_subscription_id ?: $payment->provider_payment_id ?: $payment->provider_checkout_id,
+                'description' => 'Suscripcion mensual aeronave '.trim(($payment->aircraft?->model ?: 'Aeronave').' '.($payment->aircraft?->registration ?: '')),
+                'payment_method' => 'Stripe',
+                'payment_provider' => $payment->provider,
+                'payment_type' => 'aircraft_subscription',
+                'billing_plan_name' => $payment->billingPlan?->name,
+                'billing_period_start' => optional($payment->billing_period_start)?->toDateString(),
+                'billing_period_end' => optional($payment->billing_period_end)?->toDateString(),
+                'provider_checkout_id' => $payment->provider_checkout_id,
+                'provider_subscription_id' => $payment->provider_subscription_id,
+                'provider_payment_id' => $payment->provider_payment_id,
+            ])
+            ->values();
+
         return $this->ok([
             'payments' => PagoProveedor::where('provider_id', $providerId)
                 ->latest()
@@ -404,6 +439,7 @@ class ProveedorControlador extends ControladorBase
                     'receipt' => $payment->transaction_reference,
                     'notes' => $payment->notes,
                 ]),
+            'aircraft_payments' => $aircraftPayments,
         ]);
     }
 
