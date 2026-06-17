@@ -83,6 +83,20 @@ class ProveedorControlador extends ControladorBase
         ]);
     }
 
+    public function profileStatus(Request $request)
+    {
+        $company = $this->formatCompanyPayload($request);
+        $approvalStatus = (string) ($company['status'] ?? 'pending');
+        $providerStatus = $this->normalizeProviderWorkflowStatus($approvalStatus);
+
+        return $this->ok([
+            'provider_status' => $providerStatus,
+            'approval_status' => $approvalStatus,
+            'can_register_aircraft' => $approvalStatus === 'approved',
+            'company' => $company,
+        ]);
+    }
+
     public function updateCompany(Request $request)
     {
         $user = $request->user()->loadMissing('provider', 'profile');
@@ -1088,6 +1102,11 @@ class ProveedorControlador extends ControladorBase
             'admin_notes' => $provider?->notes,
             'documents' => $documents,
         ];
+    }
+
+    private function normalizeProviderWorkflowStatus(string $approvalStatus): string
+    {
+        return $approvalStatus === 'pending' ? 'pending_validation' : $approvalStatus;
     }
 
     private function formatOperationPayload(Operacion $operation): array

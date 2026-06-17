@@ -121,20 +121,22 @@ class AeronaveControlador extends ControladorBase
     {
         $provider = $request->user()->provider;
         abort_if(! $provider, 422, 'El usuario proveedor no tiene provider_id asignado.');
+        abort_if($provider->approval_status !== 'approved', 403, 'Proveedor pendiente de validacion por Admin.');
 
         $data = $this->normalizeAircraftInput($request->validate($this->rules()));
-        $isApproved = $provider->approval_status === 'approved';
         $aircraft = $provider->aircraft()->create($data + [
-            'status' => $isApproved ? 'active' : 'blocked',
+            'status' => 'inactive',
+            'billing_status' => 'pending_payment',
+            'subscription_status' => 'inactive',
+            'currency' => $data['currency'] ?? 'USD',
         ]);
 
         return $this->ok([
             'aircraft' => $this->formatAircraftPayload(
                 $aircraft->fresh(['provider.user.activeSuscripcion.plan', 'availability', 'documents', 'images'])
             ),
-            'message' => $isApproved
-                ? 'La aeronave fue registrada y quedó activa.'
-                : 'La aeronave fue registrada y quedó bloqueada hasta activación admin.',
+            'message' => 'Aeronave registrada correctamente. Pendiente de activacion.',
+            'redirect_to' => '/provider/aircraft/'.$aircraft->id.'/billing',
         ], 201);
     }
 

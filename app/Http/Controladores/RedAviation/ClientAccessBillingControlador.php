@@ -4,14 +4,17 @@ namespace App\Http\Controladores\RedAviation;
 
 use App\Http\Controladores\ControladorBase;
 use App\Modelos\AccessPayment;
+use App\Modelos\Usuario;
 use App\Servicios\Billing\BillingPlanServicio;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Stripe\BillingPortal\Session as BillingPortalSession;
 use Stripe\Checkout\Session;
-use Stripe\PaymentIntent;
+use Stripe\Invoice;
 use Stripe\Stripe;
+use Stripe\Subscription as StripeSubscription;
 
 class ClientAccessBillingControlador extends ControladorBase
 {
@@ -21,26 +24,11 @@ class ClientAccessBillingControlador extends ControladorBase
 
     public function status(Request $request)
     {
-        $user = $request->user();
-        $latestPayment = AccessPayment::query()
-            ->with('billingPlan:id,code,name,amount,currency')
-            ->where('user_id', $user->id)
-            ->latest('id')
-            ->first();
+        $user = $request->user()->fresh();
 
         return $this->ok([
-            'access' => [
-                'status' => $user->access_status ?: 'trial_active',
-                'trial_started_at' => $user->trial_started_at,
-                'trial_ends_at' => $user->trial_ends_at,
-                'free_quote_limit' => (int) ($user->free_quote_limit ?? 1),
-                'free_quotes_used' => (int) ($user->free_quotes_used ?? 0),
-                'has_paid_access' => (bool) $user->has_paid_access,
-                'paid_access_at' => $user->paid_access_at,
-                'access_expires_at' => $user->access_expires_at,
-                'access_payment_id' => $user->access_payment_id,
-            ],
-            'latest_payment' => $latestPayment,
+            'access' => $this->buildAccessPayload($user),
+            'latest_payment' => $this->latestPaymentForUser($user),
         ]);
     }
 
@@ -50,19 +38,24 @@ class ClientAccessBillingControlador extends ControladorBase
             return $response;
         }
 
-        $user = $request->user();
-        if ($user->has_paid_access && $user->access_status === 'active') {
-            return response()->json([
-                'success' => false,
-                'message' => 'El cliente ya cuenta con acceso pagado activo.',
-            ], 409);
-        }
-
+        $user = $request->user()->fresh();
         $data = $request->validate([
             'success_url' => ['nullable', 'url'],
             'cancel_url' => ['nullable', 'url'],
+            'return_url' => ['nullable', 'url'],
             'contact_email' => ['nullable', 'email:rfc,dns'],
         ]);
+
+        if ($portal = $this->createBillingPortalIfAvailable($user, $data)) {
+            return $this->ok($portal);
+        }
+
+        if ($this->hasBlockingActiveAccess($user)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'El cliente ya cuenta con una suscripcion comercial activa fuera de la ventana de renovacion.',
+            ], 409);
+        }
 
         $plan = $this->billingPlanServicio->findActiveByCode(BillingPlanServicio::CLIENT_ACCESS_CODE);
         abort_if(! $plan, 404, 'No encontramos el plan de acceso cliente.');
@@ -70,55 +63,57 @@ class ClientAccessBillingControlador extends ControladorBase
         $amount = (float) ($plan->amount ?: $plan->price ?: 0);
         abort_if($amount <= 0, 422, 'El plan de acceso cliente no tiene un monto valido.');
 
-        [$periodStart, $periodEnd] = $this->resolveMonthlyAccessPeriod();
-        $payment = $this->createPendingPayment($user->id, $plan->id, $amount, strtoupper((string) ($plan->currency ?: 'USD')), $periodStart, $periodEnd);
-
         Stripe::setApiKey((string) config('services.stripe.secret'));
+
+        [$periodStart, $periodEnd] = $this->resolveMonthlyAccessPeriod();
+        $payment = $this->createPendingPayment(
+            userId: $user->id,
+            planId: $plan->id,
+            amount: $amount,
+            currency: strtoupper((string) ($plan->currency ?: 'USD')),
+            periodStart: $periodStart,
+            periodEnd: $periodEnd,
+        );
 
         $successUrl = $data['success_url']
             ?? rtrim((string) config('services.stripe.frontend_url'), '/').'/cliente/pago?accessPayment=1&checkout=success&session_id={CHECKOUT_SESSION_ID}';
         $cancelUrl = $data['cancel_url']
             ?? rtrim((string) config('services.stripe.frontend_url'), '/').'/cliente/pago?accessPayment=1&checkout=cancelled&session_id={CHECKOUT_SESSION_ID}';
 
-        $session = Session::create([
-            'mode' => 'payment',
-            'customer_email' => $data['contact_email'] ?? $user->email,
+        $metadata = [
+            'billing_context' => 'client_access_subscription',
+            'user_id' => (string) $user->id,
+            'access_payment_id' => (string) $payment->id,
+            'billing_plan_id' => (string) $plan->id,
+            'plan_code' => (string) $plan->code,
+        ];
+
+        $sessionPayload = [
+            'mode' => 'subscription',
             'success_url' => $successUrl,
             'cancel_url' => $cancelUrl,
             'client_reference_id' => (string) $payment->id,
-            'line_items' => [[
-                'price_data' => [
-                    'currency' => strtolower((string) ($plan->currency ?: 'USD')),
-                    'product_data' => [
-                        'name' => $plan->name,
-                        'description' => $plan->description,
-                    ],
-                    'unit_amount' => (int) round($amount * 100),
-                ],
-                'quantity' => 1,
-            ]],
-            'metadata' => [
-                'billing_context' => 'client_access',
-                'user_id' => (string) $user->id,
-                'access_payment_id' => (string) $payment->id,
-                'billing_plan_id' => (string) $plan->id,
-                'plan_code' => (string) $plan->code,
+            'metadata' => $metadata,
+            'line_items' => [$this->buildCheckoutLineItem($plan, $amount)],
+            'subscription_data' => [
+                'metadata' => $metadata,
             ],
-            'payment_intent_data' => [
-                'metadata' => [
-                    'billing_context' => 'client_access',
-                    'user_id' => (string) $user->id,
-                    'access_payment_id' => (string) $payment->id,
-                    'billing_plan_id' => (string) $plan->id,
-                    'plan_code' => (string) $plan->code,
-                ],
-            ],
-        ]);
+        ];
+
+        if ($user->provider_customer_id) {
+            $sessionPayload['customer'] = (string) $user->provider_customer_id;
+        } else {
+            $sessionPayload['customer_email'] = $data['contact_email'] ?? $user->email;
+        }
+
+        $session = Session::create($sessionPayload);
 
         $payment->update([
             'provider_checkout_id' => $session->id,
             'gateway_response' => [
+                'source' => 'client_access_subscription_checkout_created',
                 'checkout_url' => $session->url,
+                'stripe_payload' => json_decode(json_encode($session), true),
             ],
         ]);
 
@@ -137,163 +132,18 @@ class ClientAccessBillingControlador extends ControladorBase
 
     public function createPaymentIntent(Request $request)
     {
-        if ($response = $this->ensureStripeIsConfigured()) {
-            return $response;
-        }
-
-        $user = $request->user();
-        if ($user->has_paid_access && $user->access_status === 'active' && (! $user->access_expires_at || Carbon::parse($user->access_expires_at)->isFuture())) {
-            return response()->json([
-                'success' => false,
-                'message' => 'El cliente ya cuenta con acceso pagado activo.',
-            ], 409);
-        }
-
-        $data = $request->validate([
-            'contact_email' => ['nullable', 'email:rfc,dns'],
-        ]);
-
-        $plan = $this->billingPlanServicio->findActiveByCode(BillingPlanServicio::CLIENT_ACCESS_CODE);
-        abort_if(! $plan, 404, 'No encontramos el plan de acceso cliente.');
-
-        $amount = (float) ($plan->amount ?: $plan->price ?: 0);
-        abort_if($amount <= 0, 422, 'El plan de acceso cliente no tiene un monto valido.');
-
-        [$periodStart, $periodEnd] = $this->resolveMonthlyAccessPeriod();
-        $payment = $this->createPendingPayment($user->id, $plan->id, $amount, strtoupper((string) ($plan->currency ?: 'USD')), $periodStart, $periodEnd);
-
-        Stripe::setApiKey((string) config('services.stripe.secret'));
-
-        $paymentIntent = PaymentIntent::create([
-            'amount' => (int) round($amount * 100),
-            'currency' => strtolower((string) ($plan->currency ?: 'USD')),
-            'receipt_email' => $data['contact_email'] ?? $user->email,
-            'automatic_payment_methods' => [
-                'enabled' => true,
-                'allow_redirects' => 'never',
-            ],
-            'metadata' => [
-                'billing_context' => 'client_access',
-                'user_id' => (string) $user->id,
-                'access_payment_id' => (string) $payment->id,
-                'billing_plan_id' => (string) $plan->id,
-                'plan_code' => (string) $plan->code,
-                'billing_period_start' => $periodStart->toDateString(),
-                'billing_period_end' => $periodEnd->toDateString(),
-            ],
-        ]);
-
-        $payment->update([
-            'provider_payment_id' => $paymentIntent->id,
-            'gateway_response' => [
-                'payment_intent_id' => $paymentIntent->id,
-                'client_secret' => $paymentIntent->client_secret,
-            ],
-        ]);
-
-        DB::table('users')->where('id', $user->id)->update([
-            'access_status' => 'payment_pending',
-            'access_payment_id' => $payment->id,
-            'updated_at' => now(),
-        ]);
-
-        return $this->ok([
-            'payment' => $payment->fresh('billingPlan'),
-            'payment_intent_id' => $paymentIntent->id,
-            'client_secret' => $paymentIntent->client_secret,
-            'publishable_key' => config('services.stripe.publishable'),
-        ], 201);
+        return response()->json([
+            'success' => false,
+            'message' => 'El acceso comercial ahora usa Checkout de suscripcion. Utiliza /client/access-payment/create.',
+        ], 409);
     }
 
     public function confirmPaymentIntent(Request $request)
     {
-        if ($response = $this->ensureStripeIsConfigured()) {
-            return $response;
-        }
-
-        $user = $request->user();
-        $data = $request->validate([
-            'payment_intent_id' => ['required', 'string', 'max:255'],
-        ]);
-
-        Stripe::setApiKey((string) config('services.stripe.secret'));
-        $paymentIntent = PaymentIntent::retrieve($data['payment_intent_id']);
-
-        abort_if(! $paymentIntent, 404, 'Stripe no devolvio informacion del PaymentIntent.');
-
-        $metadata = (array) ($paymentIntent->metadata ?? []);
-        abort_if(($metadata['billing_context'] ?? '') !== 'client_access', 409, 'El PaymentIntent no corresponde al acceso comercial.');
-
-        $accessPaymentId = (int) ($metadata['access_payment_id'] ?? 0);
-        $payment = AccessPayment::query()
-            ->where('id', $accessPaymentId)
-            ->where('user_id', $user->id)
-            ->firstOrFail();
-
-        $freshUser = $user->fresh();
-        $paymentAlreadyApplied = $payment->status === 'paid'
-            && $payment->provider_payment_id === $paymentIntent->id
-            && (bool) $freshUser?->has_paid_access
-            && $freshUser?->access_status === 'active';
-
-        if (($paymentIntent->status ?? '') !== 'succeeded') {
-            if ($paymentAlreadyApplied) {
-                return $this->ok([
-                    'payment' => $payment->fresh('billingPlan'),
-                    'access' => $this->buildAccessPayload($freshUser),
-                ]);
-            }
-
-            abort(409, 'Stripe aun no confirma este pago como exitoso.');
-        }
-
-        if ($paymentAlreadyApplied) {
-            return $this->ok([
-                'payment' => $payment->fresh('billingPlan'),
-                'access' => $this->buildAccessPayload($freshUser),
-            ]);
-        }
-
-        [$periodStart, $periodEnd] = $this->resolvePaymentPeriodFromMetadata($metadata);
-        $brand = (string) (
-            data_get($paymentIntent, 'payment_method_details.card.brand')
-            ?? data_get($paymentIntent, 'charges.data.0.payment_method_details.card.brand')
-            ?? ''
-        );
-        $last4 = (string) (
-            data_get($paymentIntent, 'payment_method_details.card.last4')
-            ?? data_get($paymentIntent, 'charges.data.0.payment_method_details.card.last4')
-            ?? ''
-        );
-
-        DB::transaction(function () use ($payment, $paymentIntent, $brand, $last4, $periodStart, $periodEnd) {
-            $payment->update([
-                'status' => 'paid',
-                'provider_payment_id' => $paymentIntent->id,
-                'card_brand' => $brand !== '' ? $brand : $payment->card_brand,
-                'card_last4' => $last4 !== '' ? $last4 : $payment->card_last4,
-                'paid_at' => now(),
-                'billing_period_start' => $periodStart->toDateString(),
-                'billing_period_end' => $periodEnd->toDateString(),
-                'gateway_response' => json_decode(json_encode($paymentIntent), true),
-            ]);
-
-            DB::table('users')->where('id', $payment->user_id)->update([
-                'access_status' => 'active',
-                'has_paid_access' => true,
-                'paid_access_at' => now(),
-                'access_expires_at' => $periodEnd->copy()->endOfDay(),
-                'access_payment_id' => $payment->id,
-                'updated_at' => now(),
-            ]);
-        });
-
-        $freshUser = $user->fresh();
-
-        return $this->ok([
-            'payment' => $payment->fresh('billingPlan'),
-            'access' => $this->buildAccessPayload($freshUser),
-        ]);
+        return response()->json([
+            'success' => false,
+            'message' => 'La confirmacion manual por PaymentIntent ya no aplica al acceso comercial recurrente.',
+        ], 409);
     }
 
     public function success(Request $request)
@@ -304,19 +154,24 @@ class ClientAccessBillingControlador extends ControladorBase
         ]);
 
         $sessionId = $data['session_id'] ?? $data['checkout_session_id'] ?? null;
+        $user = $request->user()->fresh();
         $payment = AccessPayment::query()
             ->with('billingPlan:id,code,name,amount,currency')
-            ->where('user_id', $request->user()->id)
+            ->where('user_id', $user->id)
             ->when($sessionId, fn ($query) => $query->where('provider_checkout_id', $sessionId))
             ->latest('id')
             ->first();
 
         abort_if(! $payment, 404, 'No encontramos el pago de acceso solicitado.');
 
-        if (! $this->ensureStripeIsConfigured() && ($sessionId || $payment->provider_checkout_id)) {
-            $payment = $this->syncCheckoutPaymentStatus(
+        if ($sessionId || $payment->provider_checkout_id) {
+            if ($response = $this->ensureStripeIsConfigured()) {
+                return $response;
+            }
+
+            $payment = $this->syncCheckoutSubscriptionStatus(
                 $payment,
-                $sessionId ?: (string) $payment->provider_checkout_id,
+                (string) ($sessionId ?: $payment->provider_checkout_id),
             );
         }
 
@@ -336,8 +191,9 @@ class ClientAccessBillingControlador extends ControladorBase
         ]);
 
         $sessionId = $data['session_id'] ?? $data['checkout_session_id'] ?? null;
+        $user = $request->user()->fresh();
         $payment = AccessPayment::query()
-            ->where('user_id', $request->user()->id)
+            ->where('user_id', $user->id)
             ->when($sessionId, fn ($query) => $query->where('provider_checkout_id', $sessionId))
             ->latest('id')
             ->first();
@@ -346,19 +202,14 @@ class ClientAccessBillingControlador extends ControladorBase
             $payment->update(['status' => 'cancelled']);
         }
 
-        DB::table('users')->where('id', $request->user()->id)->update([
-            'access_status' => DB::raw("
-                case
-                    when has_paid_access = true then 'active'
-                    when coalesce(free_quotes_used, 0) >= greatest(coalesce(free_quote_limit, 1), 1) then 'trial_used'
-                    else 'trial_active'
-                end
-            "),
+        DB::table('users')->where('id', $user->id)->update([
+            'access_status' => $this->resolveCancelledStatus($user),
             'updated_at' => now(),
         ]);
 
         return $this->ok([
-            'message' => 'Pago de acceso cancelado.',
+            'message' => 'Flujo de pago de acceso cancelado.',
+            'access' => $this->buildAccessPayload($request->user()->fresh()),
         ]);
     }
 
@@ -372,6 +223,55 @@ class ClientAccessBillingControlador extends ControladorBase
         }
 
         return null;
+    }
+
+    private function createBillingPortalIfAvailable(Usuario $user, array $data): ?array
+    {
+        $manageableStatuses = ['active', 'past_due', 'suspended', 'unpaid'];
+        if (! $user->provider_customer_id || ! in_array((string) $user->access_status, $manageableStatuses, true)) {
+            return null;
+        }
+
+        Stripe::setApiKey((string) config('services.stripe.secret'));
+        $returnUrl = $data['return_url']
+            ?? $data['success_url']
+            ?? rtrim((string) config('services.stripe.frontend_url'), '/').'/cliente/perfil';
+
+        $session = BillingPortalSession::create([
+            'customer' => (string) $user->provider_customer_id,
+            'return_url' => $returnUrl,
+        ]);
+
+        return [
+            'management_url' => $session->url,
+            'portal_session_id' => $session->id,
+            'message' => 'El cliente ya tiene una suscripcion creada. Se genero una sesion del portal de facturacion para administrar su metodo de pago.',
+        ];
+    }
+
+    private function buildCheckoutLineItem($plan, float $amount): array
+    {
+        if ($plan->stripe_price_id) {
+            return [
+                'price' => $plan->stripe_price_id,
+                'quantity' => 1,
+            ];
+        }
+
+        return [
+            'price_data' => [
+                'currency' => strtolower((string) ($plan->currency ?: 'USD')),
+                'product_data' => [
+                    'name' => $plan->name,
+                    'description' => $plan->description,
+                ],
+                'unit_amount' => (int) round($amount * 100),
+                'recurring' => [
+                    'interval' => $plan->billing_cycle === 'yearly' ? 'year' : 'month',
+                ],
+            ],
+            'quantity' => 1,
+        ];
     }
 
     private function createPendingPayment(int $userId, int $planId, float $amount, string $currency, Carbon $periodStart, Carbon $periodEnd): AccessPayment
@@ -396,104 +296,124 @@ class ClientAccessBillingControlador extends ControladorBase
         return [$start, $end];
     }
 
-    private function resolvePaymentPeriodFromMetadata(array $metadata): array
+    private function buildAccessPayload(Usuario $user): array
     {
-        $start = ! empty($metadata['billing_period_start'])
-            ? Carbon::parse((string) $metadata['billing_period_start'])
-            : now();
-        $end = ! empty($metadata['billing_period_end'])
-            ? Carbon::parse((string) $metadata['billing_period_end'])
-            : $start->copy()->addMonthNoOverflow();
+        $access = $user->accessStatus()['commercial_access'];
 
-        return [$start, $end];
+        return array_merge($access, [
+            'latest_payment' => $this->latestPaymentForUser($user),
+        ]);
     }
 
-    private function buildAccessPayload($user): array
+    private function latestPaymentForUser(Usuario $user): ?AccessPayment
     {
-        return [
-            'status' => $user->access_status,
-            'has_paid_access' => (bool) $user->has_paid_access,
-            'paid_access_at' => $user->paid_access_at,
-            'access_expires_at' => $user->access_expires_at,
-        ];
+        return AccessPayment::query()
+            ->with('billingPlan:id,code,name,amount,currency')
+            ->where('user_id', $user->id)
+            ->latest('id')
+            ->first();
     }
 
-    private function syncCheckoutPaymentStatus(AccessPayment $payment, string $sessionId = ''): AccessPayment
+    private function syncCheckoutSubscriptionStatus(AccessPayment $payment, string $sessionId): AccessPayment
     {
-        $targetSessionId = trim($sessionId) !== '' ? trim($sessionId) : (string) $payment->provider_checkout_id;
+        $targetSessionId = trim($sessionId);
         if ($targetSessionId === '') {
             return $payment->fresh('billingPlan');
         }
 
         Stripe::setApiKey((string) config('services.stripe.secret'));
         $session = Session::retrieve($targetSessionId);
-
         abort_if(! $session, 404, 'Stripe no devolvio informacion de la sesion de Checkout.');
 
         $sessionMetadata = (array) ($session->metadata ?? []);
         $billingContext = (string) ($sessionMetadata['billing_context'] ?? '');
-        if ($billingContext !== '' && $billingContext !== 'client_access') {
-            abort(409, 'La sesion de Checkout no corresponde al acceso comercial.');
+        if ($billingContext !== '' && $billingContext !== 'client_access_subscription') {
+            abort(409, 'La sesion de Checkout no corresponde al acceso comercial recurrente.');
         }
 
-        $paymentStatus = strtolower((string) ($session->payment_status ?? ''));
-        if ($paymentStatus !== 'paid') {
-            return $payment->fresh('billingPlan');
+        $subscriptionId = (string) ($session->subscription ?? '');
+        $subscription = $subscriptionId !== '' ? StripeSubscription::retrieve($subscriptionId) : null;
+        $invoicePayload = null;
+        $invoiceId = (string) ($session->invoice ?? '');
+        if ($invoiceId !== '') {
+            $invoicePayload = Invoice::retrieve($invoiceId);
         }
 
-        $paymentIntentId = (string) ($session->payment_intent ?? $payment->provider_payment_id ?? '');
-        $paymentIntent = $paymentIntentId !== '' ? PaymentIntent::retrieve($paymentIntentId) : null;
-        $intentMetadata = (array) ($paymentIntent->metadata ?? []);
-        $metadata = ! empty($intentMetadata) ? $intentMetadata : $sessionMetadata;
-        [$periodStart, $periodEnd] = $this->resolvePaymentPeriodFromMetadata($metadata);
+        $status = (string) ($subscription->status ?? $session->status ?? 'pending');
+        $periodStart = ! empty($subscription?->current_period_start)
+            ? Carbon::createFromTimestamp((int) $subscription->current_period_start)->startOfDay()
+            : ($payment->billing_period_start ? Carbon::parse($payment->billing_period_start)->startOfDay() : now()->startOfDay());
+        $periodEnd = ! empty($subscription?->current_period_end)
+            ? Carbon::createFromTimestamp((int) $subscription->current_period_end)->endOfDay()
+            : ($payment->billing_period_end ? Carbon::parse($payment->billing_period_end)->endOfDay() : now()->addMonthNoOverflow()->endOfDay());
 
-        $brand = (string) (
-            data_get($paymentIntent, 'payment_method_details.card.brand')
-            ?? data_get($paymentIntent, 'charges.data.0.payment_method_details.card.brand')
-            ?? ''
-        );
-        $last4 = (string) (
-            data_get($paymentIntent, 'payment_method_details.card.last4')
-            ?? data_get($paymentIntent, 'charges.data.0.payment_method_details.card.last4')
-            ?? ''
-        );
+        $payload = [
+            'checkout_session' => json_decode(json_encode($session), true),
+            'subscription' => $subscription ? json_decode(json_encode($subscription), true) : null,
+            'invoice' => $invoicePayload ? json_decode(json_encode($invoicePayload), true) : null,
+        ];
 
-        DB::transaction(function () use (
-            $payment,
-            $paymentIntentId,
-            $targetSessionId,
-            $paymentIntent,
-            $session,
-            $brand,
-            $last4,
-            $periodStart,
-            $periodEnd
-        ) {
+        DB::transaction(function () use ($payment, $session, $subscription, $invoicePayload, $status, $periodStart, $periodEnd, $payload) {
+            $customerId = (string) ($session->customer ?? $subscription?->customer ?? $payment->provider_customer_id ?? '');
+            $subscriptionId = (string) ($subscription?->id ?? $session->subscription ?? $payment->provider_subscription_id ?? '');
+            $invoiceId = (string) ($invoicePayload?->id ?? $session->invoice ?? $payment->provider_invoice_id ?? '');
+            $paymentIntentId = (string) ($invoicePayload?->payment_intent ?? $session->payment_intent ?? $payment->provider_payment_id ?? '');
+
             $payment->update([
-                'status' => 'paid',
+                'status' => in_array($status, ['active', 'trialing'], true) ? 'paid' : $payment->status,
+                'provider_checkout_id' => (string) $session->id,
+                'provider_customer_id' => $customerId !== '' ? $customerId : $payment->provider_customer_id,
+                'provider_subscription_id' => $subscriptionId !== '' ? $subscriptionId : $payment->provider_subscription_id,
+                'provider_invoice_id' => $invoiceId !== '' ? $invoiceId : $payment->provider_invoice_id,
                 'provider_payment_id' => $paymentIntentId !== '' ? $paymentIntentId : $payment->provider_payment_id,
-                'provider_checkout_id' => $targetSessionId,
-                'card_brand' => $brand !== '' ? $brand : $payment->card_brand,
-                'card_last4' => $last4 !== '' ? $last4 : $payment->card_last4,
-                'paid_at' => $payment->paid_at ?: now(),
                 'billing_period_start' => $periodStart->toDateString(),
                 'billing_period_end' => $periodEnd->toDateString(),
-                'gateway_response' => [
-                    'checkout_session' => json_decode(json_encode($session), true),
-                    'payment_intent' => $paymentIntent ? json_decode(json_encode($paymentIntent), true) : null,
-                ],
+                'paid_at' => in_array($status, ['active', 'trialing'], true) ? ($payment->paid_at ?: now()) : $payment->paid_at,
+                'gateway_response' => $payload,
             ]);
 
-            DB::table('users')->where('id', $payment->user_id)->update([
-                'access_status' => 'active',
-                'has_paid_access' => true,
-                'paid_access_at' => DB::raw('coalesce(paid_access_at, now())'),
-                'access_expires_at' => $periodEnd->copy()->endOfDay(),
-                'access_payment_id' => $payment->id,
-                'updated_at' => now(),
-            ]);
+            if (in_array($status, ['active', 'trialing'], true)) {
+                DB::table('users')->where('id', $payment->user_id)->update([
+                    'access_status' => 'active',
+                    'has_paid_access' => true,
+                    'paid_access_at' => now(),
+                    'access_expires_at' => $periodEnd,
+                    'grace_period_ends_at' => null,
+                    'next_retry_at' => null,
+                    'provider_subscription_id' => $subscriptionId !== '' ? $subscriptionId : DB::raw('provider_subscription_id'),
+                    'provider_customer_id' => $customerId !== '' ? $customerId : DB::raw('provider_customer_id'),
+                    'access_payment_id' => $payment->id,
+                    'updated_at' => now(),
+                ]);
+            }
         });
 
         return $payment->fresh('billingPlan');
+    }
+
+    private function resolveCancelledStatus(Usuario $user): string
+    {
+        if ($user->has_paid_access && in_array((string) $user->access_status, ['active', 'past_due', 'suspended', 'unpaid'], true)) {
+            return (string) $user->access_status;
+        }
+
+        $trialEndsAt = $user->trial_ends_at ? Carbon::parse($user->trial_ends_at) : null;
+        $trialStillActive = ! $trialEndsAt || $trialEndsAt->isFuture();
+        $freeQuoteLimit = max(1, (int) ($user->free_quote_limit ?? 1));
+        $freeQuotesUsed = max(0, (int) ($user->free_quotes_used ?? 0));
+
+        return $trialStillActive && $freeQuotesUsed < $freeQuoteLimit ? 'trial_active' : 'trial_used';
+    }
+
+    private function hasBlockingActiveAccess(Usuario $user): bool
+    {
+        if (! $user->has_paid_access || $user->access_status !== 'active' || ! $user->access_expires_at) {
+            return false;
+        }
+
+        $expiresAt = Carbon::parse($user->access_expires_at);
+        $renewalWindowStart = now()->copy()->addDays(7)->startOfDay();
+
+        return $expiresAt->greaterThan($renewalWindowStart);
     }
 }

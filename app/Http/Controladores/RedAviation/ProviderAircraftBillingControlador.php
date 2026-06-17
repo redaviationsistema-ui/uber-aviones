@@ -28,6 +28,7 @@ class ProviderAircraftBillingControlador extends ControladorBase
 
         $providerId = $request->user()->resolvedProviderId();
         abort_if(! $providerId || (int) $aircraft->provider_id !== (int) $providerId, 403, 'No puedes cobrar esta aeronave.');
+        abort_if($request->user()->provider?->approval_status !== 'approved', 403, 'Proveedor no aprobado.');
 
         $data = $request->validate([
             'success_url' => ['nullable', 'url'],

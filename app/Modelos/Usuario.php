@@ -74,6 +74,8 @@ class Usuario extends Authenticatable
             'password' => 'hashed',
             'contact_blocked_until' => 'datetime',
             'access_expires_at' => 'datetime',
+            'grace_period_ends_at' => 'datetime',
+            'next_retry_at' => 'datetime',
             'identity_verified' => 'boolean',
             'face_detected' => 'boolean',
             'face_match_score' => 'decimal:2',
@@ -179,20 +181,30 @@ class Usuario extends Authenticatable
         $demoActive = $demo?->status === 'active' && $demo->expires_at?->isFuture();
         $subscriptionActive = $subscription !== null;
         $accessExpiresAt = $this->access_expires_at ? \Illuminate\Support\Carbon::parse($this->access_expires_at) : null;
+        $gracePeriodEndsAt = $this->grace_period_ends_at ? \Illuminate\Support\Carbon::parse($this->grace_period_ends_at) : null;
+        $nextRetryAt = $this->next_retry_at ? \Illuminate\Support\Carbon::parse($this->next_retry_at) : null;
+        $commercialStatus = (string) ($this->access_status ?: 'trial_active');
         $commercialAccessActive = (bool) $this->has_paid_access
-            && ($this->access_status === 'active' || $this->paid_access_at !== null)
+            && $commercialStatus === 'active'
             && (! $accessExpiresAt || $accessExpiresAt->isFuture());
+        $commercialGraceActive = in_array($commercialStatus, ['past_due', 'payment_failed'], true)
+            && (bool) $this->has_paid_access
+            && $gracePeriodEndsAt?->isFuture();
+        $commercialAccessBlocked = in_array($commercialStatus, ['suspended', 'unpaid', 'cancelled'], true)
+            || (in_array($commercialStatus, ['past_due', 'payment_failed'], true) && ! $commercialGraceActive);
         $trialEndsAt = $this->trial_ends_at ? \Illuminate\Support\Carbon::parse($this->trial_ends_at) : null;
         $freeQuoteLimit = max(1, (int) ($this->free_quote_limit ?? 1));
         $freeQuotesUsed = max(0, (int) ($this->free_quotes_used ?? 0));
         $trialStillActive = $trialEndsAt === null || ! $trialEndsAt->isPast();
         $commercialTrialAvailable = ! $commercialAccessActive
+            && ! $commercialGraceActive
+            && ! $commercialAccessBlocked
             && $freeQuotesUsed < $freeQuoteLimit
             && $trialStillActive
-            && in_array((string) ($this->access_status ?: 'trial_active'), ['trial_active', 'registered', 'payment_failed', 'payment_pending', 'trial_used'], true);
+            && in_array($commercialStatus, ['trial_active', 'registered', 'payment_pending', 'trial_used', 'expired'], true);
 
         return [
-            'has_access' => $demoActive || $subscriptionActive || $commercialAccessActive || $commercialTrialAvailable || $this->hasRole(self::ROLE_ADMIN),
+            'has_access' => $demoActive || $subscriptionActive || $commercialAccessActive || $commercialGraceActive || $commercialTrialAvailable || $this->hasRole(self::ROLE_ADMIN),
             'effective_role' => $this->effectiveRole(),
             'roles' => $this->roleCodes(),
             'demo' => $demo ? [
@@ -208,8 +220,10 @@ class Usuario extends Authenticatable
                 'expires_at' => $subscription->expires_at,
             ] : null,
             'commercial_access' => [
-                'status' => $this->access_status ?: 'trial_active',
-                'has_paid_access' => $commercialAccessActive,
+                'status' => $commercialStatus,
+                'has_paid_access' => (bool) $this->has_paid_access,
+                'has_access' => $commercialAccessActive || $commercialGraceActive || $commercialTrialAvailable,
+                'is_in_grace_period' => $commercialGraceActive,
                 'trial_started_at' => $this->trial_started_at,
                 'trial_ends_at' => $this->trial_ends_at,
                 'trial_days_left' => $trialEndsAt && $trialEndsAt->isFuture() ? now()->diffInDays($trialEndsAt, false) : 0,
@@ -218,6 +232,10 @@ class Usuario extends Authenticatable
                 'has_trial_quote_available' => $commercialTrialAvailable,
                 'paid_access_at' => $this->paid_access_at,
                 'access_expires_at' => $this->access_expires_at,
+                'grace_period_ends_at' => $gracePeriodEndsAt,
+                'next_retry_at' => $nextRetryAt,
+                'provider_subscription_id' => $this->provider_subscription_id,
+                'provider_customer_id' => $this->provider_customer_id,
                 'access_payment_id' => $this->access_payment_id,
             ],
         ];

@@ -162,6 +162,8 @@ class AutenticacionControlador extends ControladorBase
             ]);
         }
 
+        $responseExtras = [];
+
         if ($user->role === Usuario::ROLE_PROVIDER) {
             $provider = Proveedor::create([
                 'user_id' => $user->id,
@@ -171,9 +173,15 @@ class AutenticacionControlador extends ControladorBase
             ]);
 
             $user->forceFill(['provider_id' => $provider->id])->save();
+
+            $responseExtras = [
+                'message' => 'Proveedor registrado. Pendiente de validacion por Admin.',
+                'provider_status' => 'pending_validation',
+                'approval_status' => 'pending',
+            ];
         }
 
-        return $this->authenticatedResponse($request, $user->fresh(), 201);
+        return $this->authenticatedResponse($request, $user->fresh(), 201, $responseExtras);
     }
 
     public function login(Request $request)
@@ -331,7 +339,7 @@ class AutenticacionControlador extends ControladorBase
         return $this->ok(['message' => 'Endpoint preparado para integrar broker de password reset.']);
     }
 
-    private function authenticatedResponse(Request $request, Usuario $user, int $status = 200)
+    private function authenticatedResponse(Request $request, Usuario $user, int $status = 200, array $extra = [])
     {
         $user = $this->loadAuthUser($user);
         $plainToken = TokenApi::issue($user, 'browser-session');
@@ -342,6 +350,7 @@ class AutenticacionControlador extends ControladorBase
             'login_context' => $user->loginContext(),
             'token' => $plainToken,
             'token_type' => 'Bearer',
+            ...$extra,
         ], $status)->cookie(
             $this->authCookieName(),
             $plainToken,

@@ -10,6 +10,7 @@ use App\Modelos\Operacion;
 use App\Modelos\Plan;
 use App\Modelos\SolicitudVuelo;
 use App\Modelos\SuscripcionAeronave;
+use App\Servicios\Billing\BillingPlanServicio;
 use App\Servicios\ReintentoCoincidenciaSolicitudServicio;
 use App\Servicios\RedAviation\VisibilidadServicio;
 use Illuminate\Http\Request;
@@ -93,15 +94,17 @@ class OperadorControlador extends ControladorBase
     public function storeAircraft(Request $request)
     {
         abort_if(! $request->user()->provider_id, 422, 'El usuario proveedor no tiene provider_id asignado.');
+        abort_if($request->user()->provider?->approval_status !== 'approved', 403, 'Proveedor pendiente de validacion por Admin.');
 
         $data = $this->normalizeAircraftInput($request->validate($this->aircraftRules()));
-        $isApproved = $request->user()->provider?->approval_status === 'approved';
         $user = $request->user()->loadMissing('activeSuscripcion.plan');
 
         $aeronave = Aeronave::create($data + [
             'provider_id' => $request->user()->provider_id,
-            'status' => $isApproved ? 'active' : 'blocked',
-            'currency' => 'USD',
+            'status' => 'inactive',
+            'billing_status' => 'pending_payment',
+            'subscription_status' => 'inactive',
+            'currency' => $data['currency'] ?? 'USD',
         ]);
 
         return $this->ok([
@@ -111,9 +114,8 @@ class OperadorControlador extends ControladorBase
                 Aeronave::where('provider_id', $request->user()->provider_id)->count(),
                 true
             ),
-            'message' => $isApproved
-                ? 'La aeronave fue registrada y quedó activa.'
-                : 'La aeronave fue registrada y quedó bloqueada hasta activación admin.',
+            'message' => 'Aeronave registrada correctamente. Pendiente de activacion.',
+            'redirect_to' => '/provider/aircraft/'.$aeronave->id.'/billing',
         ], 201);
     }
 
@@ -154,6 +156,12 @@ class OperadorControlador extends ControladorBase
                 'operational_cost',
                 'currency',
                 'status',
+                'billing_status',
+                'billing_plan_id',
+                'subscription_status',
+                'subscription_started_at',
+                'subscription_ends_at',
+                'last_payment_at',
                 'notes',
                 'created_at',
                 'updated_at',
@@ -435,39 +443,36 @@ class OperadorControlador extends ControladorBase
     public function subscribeAircraft(Request $request, Aeronave $aircraft)
     {
         abort_if($aircraft->provider_id !== $request->user()->provider_id, 403, 'No puedes suscribir aeronaves de otro proveedor.');
+        abort_if($request->user()->provider?->approval_status !== 'approved', 403, 'Proveedor pendiente de validacion por Admin.');
 
         $data = $request->validate([
-            'plan_id' => ['required', 'exists:plans,id'],
+            'plan_id' => ['nullable', 'exists:plans,id'],
             'payment_provider' => ['nullable', 'string', 'max:100'],
         ]);
 
-        $plan = Plan::findOrFail($data['plan_id']);
+        $plan = isset($data['plan_id'])
+            ? Plan::findOrFail($data['plan_id'])
+            : Plan::query()
+                ->where('code', BillingPlanServicio::PROVIDER_AIRCRAFT_MONTHLY_CODE)
+                ->where(function ($query) {
+                    $query->where('status', 'active')->orWhere('is_active', true);
+                })
+                ->first();
 
-        SuscripcionAeronave::query()
-            ->where('aircraft_id', $aircraft->id)
-            ->where('status', 'active')
-            ->update(['status' => 'cancelled', 'ends_at' => now()]);
-
-        $subscription = SuscripcionAeronave::create([
-            'aircraft_id' => $aircraft->id,
-            'plan_id' => $plan->id,
-            'user_id' => $request->user()->id,
-            'status' => 'active',
-            'payment_provider' => $data['payment_provider'] ?? 'manual',
-            'payment_reference' => 'AC-'.strtoupper(Str::random(10)),
-            'starts_at' => now(),
-            'ends_at' => now()->addMonth(),
+        $aircraft->update([
+            'status' => 'inactive',
+            'billing_status' => 'pending_payment',
+            'billing_plan_id' => $plan?->id,
+            'subscription_status' => 'inactive',
+            'subscription_started_at' => null,
+            'subscription_ends_at' => null,
+            'last_payment_at' => null,
         ]);
-
-        if (! in_array($aircraft->status, ['blocked', 'maintenance'], true)) {
-            $aircraft->update(['status' => 'active']);
-        }
 
         $user = $request->user()->loadMissing('activeSuscripcion.plan');
         $count = Aeronave::where('provider_id', $request->user()->provider_id)->count();
 
         return $this->ok([
-            'subscription' => $subscription->load('plan'),
             'aircraft' => $this->formatAircraftPayload(
                 $aircraft->fresh([
                     'provider.user.activeSuscripcion.plan',
@@ -479,6 +484,11 @@ class OperadorControlador extends ControladorBase
                 $user->activeSuscripcion?->plan,
                 $count
             ),
+            'subscription' => null,
+            'billing_status' => 'pending_payment',
+            'subscription_status' => 'inactive',
+            'redirect_to' => '/provider/aircraft/'.$aircraft->id.'/billing',
+            'message' => 'La aeronave quedó pendiente de pago. Continúa con la activación mensual en Stripe.',
         ], 201);
     }
 
@@ -652,6 +662,12 @@ class OperadorControlador extends ControladorBase
             'operational_cost' => $aircraft->operational_cost,
             'currency' => $aircraft->currency,
             'status' => $aircraft->status,
+            'billing_status' => $aircraft->billing_status,
+            'billing_plan_id' => $aircraft->billing_plan_id,
+            'subscription_status' => $aircraft->subscription_status,
+            'subscription_started_at' => $aircraft->subscription_started_at,
+            'subscription_ends_at' => $aircraft->subscription_ends_at,
+            'last_payment_at' => $aircraft->last_payment_at,
             'notes' => $aircraft->notes,
             'created_at' => $aircraft->created_at,
             'updated_at' => $aircraft->updated_at,

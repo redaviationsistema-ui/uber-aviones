@@ -6,11 +6,13 @@ use App\Http\Controladores\NotificacionControlador;
 use App\Http\Controladores\ProveedorControlador;
 use App\Http\Controladores\CotizacionControlador;
 use App\Http\Controladores\ReservaControlador;
+use App\Http\Controladores\RedAviation\ProviderAircraftBillingControlador;
 use Illuminate\Support\Facades\Route;
 
 Route::prefix('proveedor')->middleware(['auth.token', 'role:provider,admin'])->group(function () {
     Route::get('/dashboard', [ProveedorControlador::class, 'dashboard']);
     Route::get('/mi-dashboard', [ProveedorControlador::class, 'dashboard']);
+    Route::get('/profile-status', [ProveedorControlador::class, 'profileStatus']);
     Route::get('/empresa', [ProveedorControlador::class, 'company']);
     Route::put('/empresa', [ProveedorControlador::class, 'updateCompany']);
     Route::post('/empresa/documentos', [ProveedorControlador::class, 'storeCompanyDocument']);
@@ -21,6 +23,9 @@ Route::prefix('proveedor')->middleware(['auth.token', 'role:provider,admin'])->g
     Route::get('/mis-aeronaves', [AeronaveControlador::class, 'index']);
     Route::apiResource('aeronaves', AeronaveControlador::class)
         ->parameters(['aeronaves' => 'aircraft']);
+    Route::post('/aeronaves/{aircraft}/billing', [ProviderAircraftBillingControlador::class, 'create']);
+    Route::get('/aeronaves/{aircraft}/billing', [ProviderAircraftBillingControlador::class, 'status']);
+    Route::get('/aircraft-billing/payments', [ProviderAircraftBillingControlador::class, 'payments']);
     Route::get('/aeronaves/{aircraft}/imagenes', [AeronaveControlador::class, 'images']);
     Route::post('/aeronaves/{aircraft}/imagenes', [AeronaveControlador::class, 'storeImage']);
     Route::post('/aeronaves/{aircraft}/imagenes/reasociar', [AeronaveControlador::class, 'attachExistingImage']);
@@ -62,6 +67,10 @@ Route::prefix('proveedor')->middleware(['auth.token', 'role:provider,admin'])->g
 });
 
 Route::prefix('provider')->middleware(['auth.token', 'role:provider,admin'])->group(function () {
+    Route::get('/profile-status', [ProveedorControlador::class, 'profileStatus']);
+    Route::post('/aircraft/{aircraft}/billing', [ProviderAircraftBillingControlador::class, 'create']);
+    Route::get('/aircraft/{aircraft}/billing', [ProviderAircraftBillingControlador::class, 'status']);
+    Route::get('/aircraft-billing/payments', [ProviderAircraftBillingControlador::class, 'payments']);
     Route::post('/aircraft/{aircraft}/documents', [AeronaveControlador::class, 'storeDocument']);
     Route::get('/aircraft/{aircraft}/documents/{document}/download', [AeronaveControlador::class, 'downloadDocument']);
     Route::delete('/aircraft/{aircraft}/documents/{document}', [AeronaveControlador::class, 'destroyDocument']);
