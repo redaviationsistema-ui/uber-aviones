@@ -200,11 +200,24 @@ class ReservaControlador extends ControladorBase
         ]);
     }
 
-    public function showContractStatusById(Request $request, ContratoReserva $contract)
+    public function showContractStatusById(
+        Request $request,
+        ContratoReserva $contract,
+        DocuSignServicio $docuSignServicio,
+        ContratoPdfServicio $contratoPdfServicio,
+        ContratoReservaServicio $contratoReservaServicio,
+    )
     {
         $contract->loadMissing(['reservation.client', 'reservation.aircraft', 'reservation.provider', 'reservation.payments']);
         abort_if(! $contract->reservation, 404, 'Contrato sin reserva asociada.');
         $this->authorizeReservationClient($request, $contract->reservation);
+
+        $this->syncContractWithDocuSign(
+            $contract,
+            $docuSignServicio,
+            $contratoPdfServicio,
+            $contratoReservaServicio,
+        );
 
         $contract = $contract->fresh();
         $latestPayment = $contract->reservation->payments->sortByDesc('id')->first();
@@ -244,6 +257,72 @@ class ReservaControlador extends ControladorBase
                 'payment_status' => $latestPayment?->status,
             ],
         ]);
+    }
+
+    private function syncContractWithDocuSign(
+        ContratoReserva $contract,
+        DocuSignServicio $docuSignServicio,
+        ContratoPdfServicio $contratoPdfServicio,
+        ContratoReservaServicio $contratoReservaServicio,
+    ): void {
+        $contract->loadMissing(['reservation.client', 'reservation.flightRequest', 'reservation.payments']);
+
+        if (! $contract->reservation || blank($contract->docusign_envelope_id) || ! $docuSignServicio->estaConfigurado()) {
+            return;
+        }
+
+        $currentDocuSignStatus = strtolower(trim((string) ($contract->docusign_status ?? '')));
+        $currentContractStatus = strtolower(trim((string) ($contract->status ?? '')));
+
+        if (in_array($currentDocuSignStatus, ['completed', 'declined', 'voided', 'error'], true) &&
+            in_array($currentContractStatus, ['completed', 'signed'], true)) {
+            return;
+        }
+
+        try {
+            $remoteStatus = $docuSignServicio->obtenerEstadoEnvelope((string) $contract->docusign_envelope_id);
+
+            if ($remoteStatus !== '' && $remoteStatus !== $currentDocuSignStatus) {
+                $contract->update(['docusign_status' => $remoteStatus]);
+            }
+
+            if ($remoteStatus !== 'completed') {
+                return;
+            }
+
+            if (filled($contract->signed_pdf_path) && $currentContractStatus === 'completed') {
+                return;
+            }
+
+            $signedPdf = $docuSignServicio->descargarPdfCombinado((string) $contract->docusign_envelope_id);
+            $signedPdfPath = $contratoPdfServicio->guardarPdfFirmado(
+                (int) $contract->reservation_id,
+                (string) $contract->docusign_envelope_id,
+                $signedPdf
+            );
+
+            $termsSnapshot = is_array($contract->terms_snapshot) ? $contract->terms_snapshot : [];
+            $termsSnapshot['docusign'] = [
+                'completed_via' => 'status_poll',
+                'status' => $remoteStatus,
+                'completed_at' => now()->toIso8601String(),
+            ];
+
+            $contratoReservaServicio->registrarFirma(
+                $contract->reservation,
+                $contract,
+                $contract->reservation->client,
+                $termsSnapshot,
+                $signedPdfPath,
+                $remoteStatus
+            );
+        } catch (Throwable $exception) {
+            Log::warning('No fue posible reconciliar el contrato con DocuSign al consultar estado.', [
+                'contract_id' => $contract->id,
+                'envelope_id' => $contract->docusign_envelope_id,
+                'message' => $exception->getMessage(),
+            ]);
+        }
     }
 
     public function downloadSignedContractPdf(Request $request, ContratoReserva $contract)
