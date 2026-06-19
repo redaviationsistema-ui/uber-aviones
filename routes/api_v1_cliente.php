@@ -52,6 +52,7 @@ Route::prefix('cliente')->middleware(['auth.token', 'role:client,admin'])->group
     Route::post('/reservas/{reservation}/calificar', [ReservaControlador::class, 'rateService']);
     Route::post('/reservas/{reservation}/pagar', [PagoControlador::class, 'storeReservaPago']);
     Route::post('/reservas/{reservation}/pago/confirmar', [StripePagoControlador::class, 'confirmReservationPayment']);
+    Route::post('/stripe/payment-intent/confirm', [StripePagoControlador::class, 'confirmFlightRequestPayment']);
     Route::post('/reservas/{reservation}/reintentar-pago', [PagoControlador::class, 'retryReservaPago']);
     Route::post('/stripe/checkout/create', [StripePagoControlador::class, 'createCheckout']);
     Route::post('/stripe/payment-intent', [StripePagoControlador::class, 'createPaymentIntent']);
@@ -68,6 +69,7 @@ Route::prefix('cliente')->middleware(['auth.token', 'role:client,admin'])->group
 });
 
 Route::prefix('stripe')->middleware(['auth.token', 'role:client,admin'])->group(function () {
+    Route::post('/payment-intent/confirm', [StripePagoControlador::class, 'confirmFlightRequestPayment']);
     Route::post('/checkout/create', [StripePagoControlador::class, 'createCheckout']);
     Route::post('/payment-intent', [StripePagoControlador::class, 'createPaymentIntent']);
     Route::post('/wire-intent', [StripePagoControlador::class, 'createWireIntent']);

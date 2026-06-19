@@ -15,6 +15,37 @@ use Stripe\Stripe;
 
 class StripePagoControlador extends ControladorBase
 {
+    public function confirmFlightRequestPayment(Request $request)
+    {
+        if ($response = $this->ensureStripeIsConfigured()) {
+            return $response;
+        }
+
+        $data = $request->validate([
+            'flight_request_id' => ['required', 'integer', 'exists:flight_requests,id'],
+            'payment_intent_id' => ['nullable', 'string', 'max:255'],
+            'brand' => ['nullable', 'string', 'max:120'],
+        ]);
+
+        $flightRequest = SolicitudVuelo::query()
+            ->with([
+                'reservation.payments' => fn ($query) => $query->latest('id'),
+                'quotes',
+            ])
+            ->findOrFail($data['flight_request_id']);
+
+        abort_if($flightRequest->client_id !== $request->user()->id, 403, 'No puedes confirmar el pago de esta solicitud.');
+
+        $reservation = $this->ensureReservationForFlightRequest($flightRequest, $request->user()->id);
+
+        return $this->finalizeSuccessfulPayment(
+            flightRequest: $flightRequest,
+            reservation: $reservation,
+            paymentIntentId: $data['payment_intent_id'] ?? null,
+            brandOverride: $data['brand'] ?? null,
+        );
+    }
+
     public function confirmReservationPayment(Request $request, mixed $reservation)
     {
         if ($response = $this->ensureStripeIsConfigured()) {
@@ -37,8 +68,321 @@ class StripePagoControlador extends ControladorBase
         $flightRequest = $reservation->flightRequest;
         abort_if(! $flightRequest, 404, 'La reserva no tiene una solicitud de vuelo asociada.');
 
+        return $this->finalizeSuccessfulPayment(
+            flightRequest: $flightRequest,
+            reservation: $reservation,
+            paymentIntentId: $data['payment_intent_id'] ?? null,
+            brandOverride: $data['brand'] ?? null,
+        );
+    }
+
+    public function createCheckout(Request $request)
+    {
+        if ($response = $this->ensureStripeIsConfigured()) {
+            return $response;
+        }
+
+        $data = $request->validate([
+            'flight_request_id' => ['required', 'exists:flight_requests,id'],
+            'contact_email' => ['nullable', 'email'],
+            'success_url' => ['nullable', 'url'],
+            'cancel_url' => ['nullable', 'url'],
+        ]);
+
+        $flightRequest = SolicitudVuelo::with(['quotes', 'reservation'])->findOrFail($data['flight_request_id']);
+        abort_if($flightRequest->client_id !== $request->user()->id, 403, 'No puedes pagar esta solicitud.');
+
+        $amount = $this->resolveFlightRequestAmount($flightRequest);
+        abort_if($amount <= 0, 422, 'La solicitud no tiene un monto valido para cobrar.');
+
+        if (in_array($flightRequest->payment_status, ['paid', 'bank_confirmed'], true)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Esta solicitud ya aparece como pagada.',
+            ], 409);
+        }
+
+        $reservation = $this->ensureReservationForFlightRequest($flightRequest, $request->user()->id);
+
+        Stripe::setApiKey((string) config('services.stripe.secret'));
+
+        $successUrl = $data['success_url'] ?? rtrim((string) config('services.stripe.frontend_url'), '/')."/cliente/reserva-confirmada/{$flightRequest->id}?checkout=success";
+        $cancelUrl = $data['cancel_url'] ?? rtrim((string) config('services.stripe.frontend_url'), '/')."/cliente/pago/{$flightRequest->id}?checkout=cancelled";
+
+        $session = Session::create([
+            'mode' => 'payment',
+            'customer_email' => $data['contact_email'] ?? $request->user()->email,
+            'success_url' => $successUrl,
+            'cancel_url' => $cancelUrl,
+            'line_items' => [[
+                'price_data' => [
+                    'currency' => strtolower((string) ($flightRequest->currency ?: 'USD')),
+                    'product_data' => [
+                        'name' => 'Reserva de vuelo privado #'.$flightRequest->id,
+                    ],
+                    'unit_amount' => (int) round($amount * 100),
+                ],
+                'quantity' => 1,
+            ]],
+            'metadata' => [
+                'flight_request_id' => (string) $flightRequest->id,
+                'client_id' => (string) $request->user()->id,
+            ],
+            'payment_intent_data' => [
+                'metadata' => [
+                    'flight_request_id' => (string) $flightRequest->id,
+                    'client_id' => (string) $request->user()->id,
+                ],
+            ],
+        ]);
+
+        DB::transaction(function () use ($request, $flightRequest, $reservation, $session, $amount) {
+            $flightRequest->update([
+                'payment_method' => 'card',
+                'payment_status' => 'pending',
+                'stripe_checkout_session_id' => $session->id,
+                'workflow_status' => 'pago pendiente',
+                'status' => 'reserved',
+            ]);
+
+            $reservation->update([
+                'status' => 'pending_payment',
+                'total_amount' => $reservation->total_amount ?: $amount,
+                'currency' => $reservation->currency ?: ($flightRequest->currency ?: 'USD'),
+            ]);
+
+            Pago::updateOrCreate(
+                [
+                    'reservation_id' => $reservation->id,
+                    'flight_request_id' => $flightRequest->id,
+                    'payment_type' => 'reservation',
+                    'provider' => 'stripe',
+                    'status' => 'pending',
+                ],
+                [
+                    'user_id' => $request->user()->id,
+                    'amount' => $amount,
+                    'currency' => $flightRequest->currency ?: 'USD',
+                    'transaction_reference' => $session->id,
+                    'stripe_checkout_session_id' => $session->id,
+                    'gateway_response' => [
+                        'checkout_url' => $session->url,
+                    ],
+                ],
+            );
+        });
+
+        return $this->ok([
+            'checkout_url' => $session->url,
+            'checkout_session_id' => $session->id,
+            'reservation_id' => $reservation->id,
+            'payment_status' => 'pending',
+        ]);
+    }
+
+    public function createPaymentIntent(Request $request)
+    {
+        if ($response = $this->ensureStripeIsConfigured()) {
+            return $response;
+        }
+
+        $data = $request->validate([
+            'flight_request_id' => ['required', 'exists:flight_requests,id'],
+            'contact_email' => ['nullable', 'email'],
+        ]);
+
+        $flightRequest = SolicitudVuelo::with(['quotes', 'reservation'])->findOrFail($data['flight_request_id']);
+        abort_if($flightRequest->client_id !== $request->user()->id, 403, 'No puedes pagar esta solicitud.');
+
+        $amount = $this->resolveFlightRequestAmount($flightRequest);
+        abort_if($amount <= 0, 422, 'La solicitud no tiene un monto valido para cobrar.');
+
+        if (in_array($flightRequest->payment_status, ['paid', 'bank_confirmed'], true)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Esta solicitud ya aparece como pagada.',
+            ], 409);
+        }
+
+        $reservation = $this->ensureReservationForFlightRequest($flightRequest, $request->user()->id);
+
+        Stripe::setApiKey((string) config('services.stripe.secret'));
+
+        $paymentIntent = PaymentIntent::create([
+            'amount' => (int) round($amount * 100),
+            'currency' => strtolower((string) ($flightRequest->currency ?: 'USD')),
+            'automatic_payment_methods' => ['enabled' => true],
+            'receipt_email' => $data['contact_email'] ?? $request->user()->email,
+            'metadata' => [
+                'flight_request_id' => (string) $flightRequest->id,
+                'client_id' => (string) $request->user()->id,
+            ],
+        ]);
+
+        DB::transaction(function () use ($request, $flightRequest, $reservation, $paymentIntent, $amount) {
+            $flightRequest->update([
+                'payment_method' => 'card',
+                'payment_status' => 'pending',
+                'stripe_payment_intent_id' => $paymentIntent->id,
+                'workflow_status' => 'pago pendiente',
+                'status' => 'reserved',
+            ]);
+
+            $reservation->update([
+                'status' => 'pending_payment',
+                'total_amount' => $reservation->total_amount ?: $amount,
+                'currency' => $reservation->currency ?: ($flightRequest->currency ?: 'USD'),
+            ]);
+
+            Pago::updateOrCreate(
+                [
+                    'reservation_id' => $reservation->id,
+                    'flight_request_id' => $flightRequest->id,
+                    'payment_type' => 'reservation',
+                    'provider' => 'stripe',
+                    'status' => 'pending',
+                ],
+                [
+                    'user_id' => $request->user()->id,
+                    'amount' => $amount,
+                    'currency' => $flightRequest->currency ?: 'USD',
+                    'transaction_reference' => $paymentIntent->id,
+                    'stripe_payment_intent_id' => $paymentIntent->id,
+                    'gateway_response' => [
+                        'client_secret_available' => true,
+                    ],
+                ],
+            );
+        });
+
+        return $this->ok([
+            'client_secret' => $paymentIntent->client_secret,
+            'payment_intent_id' => $paymentIntent->id,
+            'publishable_key' => config('services.stripe.publishable'),
+            'reservation_id' => $reservation->id,
+            'payment_status' => 'pending',
+        ]);
+    }
+
+    public function createWireIntent(Request $request)
+    {
+        $data = $request->validate([
+            'flight_request_id' => ['required', 'exists:flight_requests,id'],
+            'contact_email' => ['nullable', 'email'],
+        ]);
+
+        $flightRequest = SolicitudVuelo::with(['quotes', 'reservation'])->findOrFail($data['flight_request_id']);
+        abort_if($flightRequest->client_id !== $request->user()->id, 403, 'No puedes pagar esta solicitud.');
+
+        $amount = $this->resolveFlightRequestAmount($flightRequest);
+        abort_if($amount <= 0, 422, 'La solicitud no tiene un monto valido para transferencia.');
+
+        $reservation = $this->ensureReservationForFlightRequest($flightRequest, $request->user()->id);
+
+        $reference = 'WIRE-'.Str::upper(Str::random(10));
+
+        DB::transaction(function () use ($request, $flightRequest, $reservation, $amount, $reference, $data) {
+            $flightRequest->update([
+                'payment_method' => 'wire',
+                'payment_status' => 'pending_bank_confirmation',
+                'workflow_status' => 'pago pendiente',
+                'status' => 'reserved',
+            ]);
+
+            $reservation->update([
+                'status' => 'pending_payment',
+                'total_amount' => $reservation->total_amount ?: $amount,
+                'currency' => $reservation->currency ?: ($flightRequest->currency ?: 'USD'),
+            ]);
+
+            Pago::updateOrCreate(
+                [
+                    'reservation_id' => $reservation->id,
+                    'flight_request_id' => $flightRequest->id,
+                    'payment_type' => 'reservation',
+                    'provider' => 'bank_transfer',
+                    'status' => 'pending',
+                ],
+                [
+                    'user_id' => $request->user()->id,
+                    'amount' => $amount,
+                    'currency' => $flightRequest->currency ?: 'USD',
+                    'transaction_reference' => $reference,
+                    'gateway_response' => [
+                        'contact_email' => $data['contact_email'] ?? $request->user()->email,
+                        'reference' => $reference,
+                    ],
+                ],
+            );
+        });
+
+        return $this->ok([
+            'reservation_id' => $reservation->id,
+            'payment_status' => 'pending_bank_confirmation',
+            'reference' => $reference,
+            'wire_instructions' => [
+                'bank_name' => config('services.stripe.bank_name', 'Banco por configurar'),
+                'beneficiary' => config('services.stripe.bank_beneficiary', 'Red Aviation'),
+                'account_number' => config('services.stripe.bank_account', 'Por configurar'),
+                'clabe' => config('services.stripe.bank_clabe', 'Por configurar'),
+                'swift' => config('services.stripe.bank_swift', ''),
+                'reference' => $reference,
+                'amount' => number_format($amount, 2).' '.strtoupper((string) ($flightRequest->currency ?: 'USD')),
+            ],
+        ]);
+    }
+
+    private function resolveFlightRequestAmount(SolicitudVuelo $flightRequest): float
+    {
+        $pricingContext = is_array($flightRequest->pricing_context) ? $flightRequest->pricing_context : [];
+
+        return (float) (
+            $flightRequest->final_price
+            ?: ($pricingContext['selected_card_price'] ?? 0)
+            ?: ($pricingContext['final_price'] ?? 0)
+        );
+    }
+
+    private function ensureReservationForFlightRequest(SolicitudVuelo $flightRequest, int $userId): Reserva
+    {
+        $existing = $flightRequest->reservation()->latest('id')->first();
+        if ($existing) {
+            return $existing;
+        }
+
+        $acceptedQuote = $flightRequest->quotes()
+            ->where('status', 'accepted')
+            ->latest('id')
+            ->first();
+
+        $providerId = $acceptedQuote?->provider_id ?? $flightRequest->assigned_provider_id;
+        $aircraftId = $acceptedQuote?->aircraft_id ?? $flightRequest->assigned_aircraft_id;
+        $amount = $this->resolveFlightRequestAmount($flightRequest);
+
+        abort_if(! $providerId || ! $aircraftId, 409, 'La solicitud aun no tiene proveedor y aeronave confirmados.');
+        abort_if($amount <= 0, 422, 'La solicitud no tiene un monto valido para crear la reserva.');
+
+        return Reserva::create([
+            'client_id' => $userId,
+            'provider_id' => $providerId,
+            'aircraft_id' => $aircraftId,
+            'flight_request_id' => $flightRequest->id,
+            'quote_id' => $acceptedQuote?->id,
+            'reservation_code' => 'PV-'.now()->format('ymd').'-'.Str::upper(Str::random(6)),
+            'status' => 'pending_payment',
+            'total_amount' => $amount,
+            'currency' => $acceptedQuote?->currency ?? $flightRequest->currency ?? 'USD',
+        ]);
+    }
+
+    private function finalizeSuccessfulPayment(
+        SolicitudVuelo $flightRequest,
+        Reserva $reservation,
+        ?string $paymentIntentId = null,
+        ?string $brandOverride = null,
+    ): JsonResponse {
         $paymentIntentId = trim((string) (
-            $data['payment_intent_id']
+            $paymentIntentId
             ?? $flightRequest->stripe_payment_intent_id
             ?? $reservation->payments->first()?->stripe_payment_intent_id
             ?? ''
@@ -58,7 +402,7 @@ class StripePagoControlador extends ControladorBase
         }
 
         $brand = trim((string) (
-            $data['brand']
+            $brandOverride
             ?? data_get($paymentIntent, 'payment_method_details.card.brand')
             ?? data_get($paymentIntent, 'charges.data.0.payment_method_details.card.brand')
             ?? ''
@@ -76,6 +420,8 @@ class StripePagoControlador extends ControladorBase
             $reservation->update([
                 'status' => 'paid',
                 'confirmed_at' => $reservation->confirmed_at ?: now(),
+                'total_amount' => $reservation->total_amount ?: (((int) ($paymentIntent->amount ?? 0)) / 100),
+                'currency' => $reservation->currency ?: strtoupper((string) ($paymentIntent->currency ?? $flightRequest->currency ?? 'USD')),
             ]);
 
             $payment = Pago::updateOrCreate(
@@ -113,6 +459,8 @@ class StripePagoControlador extends ControladorBase
 
         return $this->ok([
             'reservation' => $reservation,
+            'reservation_id' => $reservation->id,
+            'flight_request_id' => $flightRequest->id,
             'payment_order' => [
                 'status' => 'paid',
                 'brand' => $brand ?: data_get($paymentOrder, 'gateway_response.brand'),
@@ -121,244 +469,6 @@ class StripePagoControlador extends ControladorBase
             'payment_status' => 'paid',
             'workflow_status' => 'pago confirmado',
         ]);
-    }
-
-    public function createCheckout(Request $request)
-    {
-        if ($response = $this->ensureStripeIsConfigured()) {
-            return $response;
-        }
-
-        $data = $request->validate([
-            'flight_request_id' => ['required', 'exists:flight_requests,id'],
-            'contact_email' => ['nullable', 'email'],
-            'success_url' => ['nullable', 'url'],
-            'cancel_url' => ['nullable', 'url'],
-        ]);
-
-        $flightRequest = SolicitudVuelo::findOrFail($data['flight_request_id']);
-        abort_if($flightRequest->client_id !== $request->user()->id, 403, 'No puedes pagar esta solicitud.');
-
-        $amount = $this->resolveFlightRequestAmount($flightRequest);
-        abort_if($amount <= 0, 422, 'La solicitud no tiene un monto valido para cobrar.');
-
-        if (in_array($flightRequest->payment_status, ['paid', 'bank_confirmed'], true)) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Esta solicitud ya aparece como pagada.',
-            ], 409);
-        }
-
-        Stripe::setApiKey((string) config('services.stripe.secret'));
-
-        $successUrl = $data['success_url'] ?? rtrim((string) config('services.stripe.frontend_url'), '/')."/cliente/reserva-confirmada/{$flightRequest->id}?checkout=success";
-        $cancelUrl = $data['cancel_url'] ?? rtrim((string) config('services.stripe.frontend_url'), '/')."/cliente/pago/{$flightRequest->id}?checkout=cancelled";
-
-        $session = Session::create([
-            'mode' => 'payment',
-            'payment_method_types' => ['card'],
-            'customer_email' => $data['contact_email'] ?? $request->user()->email,
-            'success_url' => $successUrl,
-            'cancel_url' => $cancelUrl,
-            'line_items' => [[
-                'price_data' => [
-                    'currency' => strtolower((string) ($flightRequest->currency ?: 'USD')),
-                    'product_data' => [
-                        'name' => 'Reserva de vuelo privado #'.$flightRequest->id,
-                    ],
-                    'unit_amount' => (int) round($amount * 100),
-                ],
-                'quantity' => 1,
-            ]],
-            'metadata' => [
-                'flight_request_id' => (string) $flightRequest->id,
-                'client_id' => (string) $request->user()->id,
-            ],
-            'payment_intent_data' => [
-                'metadata' => [
-                    'flight_request_id' => (string) $flightRequest->id,
-                    'client_id' => (string) $request->user()->id,
-                ],
-            ],
-        ]);
-
-        DB::transaction(function () use ($request, $flightRequest, $session, $amount) {
-            $flightRequest->update([
-                'payment_method' => 'card',
-                'payment_status' => 'pending',
-                'stripe_checkout_session_id' => $session->id,
-                'workflow_status' => 'pago pendiente',
-                'status' => 'reserved',
-            ]);
-
-            Pago::updateOrCreate(
-                [
-                    'flight_request_id' => $flightRequest->id,
-                    'payment_type' => 'reservation',
-                    'provider' => 'stripe',
-                    'status' => 'pending',
-                ],
-                [
-                    'user_id' => $request->user()->id,
-                    'amount' => $amount,
-                    'currency' => $flightRequest->currency ?: 'USD',
-                    'transaction_reference' => $session->id,
-                    'stripe_checkout_session_id' => $session->id,
-                    'gateway_response' => [
-                        'checkout_url' => $session->url,
-                    ],
-                ],
-            );
-        });
-
-        return $this->ok([
-            'checkout_url' => $session->url,
-            'checkout_session_id' => $session->id,
-            'payment_status' => 'pending',
-        ]);
-    }
-
-    public function createPaymentIntent(Request $request)
-    {
-        if ($response = $this->ensureStripeIsConfigured()) {
-            return $response;
-        }
-
-        $data = $request->validate([
-            'flight_request_id' => ['required', 'exists:flight_requests,id'],
-            'contact_email' => ['nullable', 'email'],
-        ]);
-
-        $flightRequest = SolicitudVuelo::findOrFail($data['flight_request_id']);
-        abort_if($flightRequest->client_id !== $request->user()->id, 403, 'No puedes pagar esta solicitud.');
-
-        $amount = $this->resolveFlightRequestAmount($flightRequest);
-        abort_if($amount <= 0, 422, 'La solicitud no tiene un monto valido para cobrar.');
-
-        if (in_array($flightRequest->payment_status, ['paid', 'bank_confirmed'], true)) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Esta solicitud ya aparece como pagada.',
-            ], 409);
-        }
-
-        Stripe::setApiKey((string) config('services.stripe.secret'));
-
-        $paymentIntent = PaymentIntent::create([
-            'amount' => (int) round($amount * 100),
-            'currency' => strtolower((string) ($flightRequest->currency ?: 'USD')),
-            'payment_method_types' => ['card'],
-            'receipt_email' => $data['contact_email'] ?? $request->user()->email,
-            'metadata' => [
-                'flight_request_id' => (string) $flightRequest->id,
-                'client_id' => (string) $request->user()->id,
-            ],
-        ]);
-
-        DB::transaction(function () use ($request, $flightRequest, $paymentIntent, $amount) {
-            $flightRequest->update([
-                'payment_method' => 'card',
-                'payment_status' => 'pending',
-                'stripe_payment_intent_id' => $paymentIntent->id,
-                'workflow_status' => 'pago pendiente',
-                'status' => 'reserved',
-            ]);
-
-            Pago::updateOrCreate(
-                [
-                    'flight_request_id' => $flightRequest->id,
-                    'payment_type' => 'reservation',
-                    'provider' => 'stripe',
-                    'status' => 'pending',
-                ],
-                [
-                    'user_id' => $request->user()->id,
-                    'amount' => $amount,
-                    'currency' => $flightRequest->currency ?: 'USD',
-                    'transaction_reference' => $paymentIntent->id,
-                    'stripe_payment_intent_id' => $paymentIntent->id,
-                    'gateway_response' => [
-                        'client_secret_available' => true,
-                    ],
-                ],
-            );
-        });
-
-        return $this->ok([
-            'client_secret' => $paymentIntent->client_secret,
-            'payment_intent_id' => $paymentIntent->id,
-            'publishable_key' => config('services.stripe.publishable'),
-            'payment_status' => 'pending',
-        ]);
-    }
-
-    public function createWireIntent(Request $request)
-    {
-        $data = $request->validate([
-            'flight_request_id' => ['required', 'exists:flight_requests,id'],
-            'contact_email' => ['nullable', 'email'],
-        ]);
-
-        $flightRequest = SolicitudVuelo::findOrFail($data['flight_request_id']);
-        abort_if($flightRequest->client_id !== $request->user()->id, 403, 'No puedes pagar esta solicitud.');
-
-        $amount = $this->resolveFlightRequestAmount($flightRequest);
-        abort_if($amount <= 0, 422, 'La solicitud no tiene un monto valido para transferencia.');
-
-        $reference = 'WIRE-'.Str::upper(Str::random(10));
-
-        DB::transaction(function () use ($request, $flightRequest, $amount, $reference, $data) {
-            $flightRequest->update([
-                'payment_method' => 'wire',
-                'payment_status' => 'pending_bank_confirmation',
-                'workflow_status' => 'pago pendiente',
-                'status' => 'reserved',
-            ]);
-
-            Pago::updateOrCreate(
-                [
-                    'flight_request_id' => $flightRequest->id,
-                    'payment_type' => 'reservation',
-                    'provider' => 'bank_transfer',
-                    'status' => 'pending',
-                ],
-                [
-                    'user_id' => $request->user()->id,
-                    'amount' => $amount,
-                    'currency' => $flightRequest->currency ?: 'USD',
-                    'transaction_reference' => $reference,
-                    'gateway_response' => [
-                        'contact_email' => $data['contact_email'] ?? $request->user()->email,
-                        'reference' => $reference,
-                    ],
-                ],
-            );
-        });
-
-        return $this->ok([
-            'payment_status' => 'pending_bank_confirmation',
-            'reference' => $reference,
-            'wire_instructions' => [
-                'bank_name' => config('services.stripe.bank_name', 'Banco por configurar'),
-                'beneficiary' => config('services.stripe.bank_beneficiary', 'Red Aviation'),
-                'account_number' => config('services.stripe.bank_account', 'Por configurar'),
-                'clabe' => config('services.stripe.bank_clabe', 'Por configurar'),
-                'swift' => config('services.stripe.bank_swift', ''),
-                'reference' => $reference,
-                'amount' => number_format($amount, 2).' '.strtoupper((string) ($flightRequest->currency ?: 'USD')),
-            ],
-        ]);
-    }
-
-    private function resolveFlightRequestAmount(SolicitudVuelo $flightRequest): float
-    {
-        $pricingContext = is_array($flightRequest->pricing_context) ? $flightRequest->pricing_context : [];
-
-        return (float) (
-            $flightRequest->final_price
-            ?: ($pricingContext['selected_card_price'] ?? 0)
-            ?: ($pricingContext['final_price'] ?? 0)
-        );
     }
 
     private function ensureStripeIsConfigured(): ?JsonResponse
