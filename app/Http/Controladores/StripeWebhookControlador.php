@@ -144,6 +144,8 @@ class StripeWebhookControlador extends ControladorBase
         }
 
         DB::transaction(function () use ($flightRequest, $session) {
+            $reservation = $flightRequest->reservation()->latest('id')->first();
+
             $flightRequest->update([
                 'payment_method' => 'card',
                 'payment_status' => 'paid',
@@ -153,8 +155,16 @@ class StripeWebhookControlador extends ControladorBase
                 'status' => 'reserved',
             ]);
 
+            if ($reservation) {
+                $reservation->update([
+                    'status' => 'paid',
+                    'confirmed_at' => $reservation->confirmed_at ?: now(),
+                ]);
+            }
+
             Pago::updateOrCreate(
                 [
+                    'reservation_id' => $reservation?->id,
                     'flight_request_id' => $flightRequest->id,
                     'provider' => 'stripe',
                     'payment_type' => 'reservation',
@@ -271,6 +281,8 @@ class StripeWebhookControlador extends ControladorBase
         }
 
         DB::transaction(function () use ($flightRequest, $paymentIntent) {
+            $reservation = $flightRequest->reservation()->latest('id')->first();
+
             $flightRequest->update([
                 'payment_method' => 'card',
                 'payment_status' => 'paid',
@@ -279,8 +291,16 @@ class StripeWebhookControlador extends ControladorBase
                 'status' => 'reserved',
             ]);
 
+            if ($reservation) {
+                $reservation->update([
+                    'status' => 'paid',
+                    'confirmed_at' => $reservation->confirmed_at ?: now(),
+                ]);
+            }
+
             Pago::updateOrCreate(
                 [
+                    'reservation_id' => $reservation?->id,
                     'flight_request_id' => $flightRequest->id,
                     'provider' => 'stripe',
                     'payment_type' => 'reservation',
