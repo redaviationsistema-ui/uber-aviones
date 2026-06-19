@@ -53,6 +53,19 @@ class ClienteControlador extends ControladorBase
         'Heavy Jet' => ['minimum_route_price' => 7000.0, 'redsky_markup' => 30.0],
     ];
 
+    private ?bool $categoryPricingRulesTableExists = null;
+
+    private array $categoryPricingRuleCache = [];
+
+    private ?bool $airportExpenseRulesTableExists = null;
+
+    private array $activeAirportCache = [];
+
+    private ?array $activeAirportSearchColumns = null;
+
+    private ?\Illuminate\Support\Collection $airportExpenseRulesCache = null;
+
+
     private const CATEGORY_MACH_BANDS = [
         'Helicoptero' => 0.35,
         'Light Jet' => 0.75,
@@ -912,14 +925,54 @@ class ClienteControlador extends ControladorBase
     private function findActiveAirport(string $code): ?Aeropuerto
     {
         $normalizedCode = strtoupper(trim($code));
+        if ($normalizedCode === '') {
+            return null;
+        }
 
-        return Aeropuerto::query()
+        if (array_key_exists($normalizedCode, $this->activeAirportCache)) {
+            return $this->activeAirportCache[$normalizedCode];
+        }
+
+        $airport = Aeropuerto::query()
             ->where('status', 'active')
             ->where(function ($query) use ($normalizedCode) {
-                $query->whereRaw('UPPER(icao) = ?', [$normalizedCode])
-                    ->orWhereRaw('UPPER(iata) = ?', [$normalizedCode]);
+                foreach ($this->activeAirportSearchColumns() as $index => $column) {
+                    $method = $index === 0 ? 'where' : 'orWhere';
+                    $query->{$method}($column, $normalizedCode);
+                }
             })
             ->first();
+
+        if (! $airport) {
+            $airport = Aeropuerto::query()
+                ->where('status', 'active')
+                ->where(function ($query) use ($normalizedCode) {
+                    foreach ($this->activeAirportSearchColumns() as $index => $column) {
+                        $method = $index === 0 ? 'whereRaw' : 'orWhereRaw';
+                        $query->{$method}("UPPER({$column}) = ?", [$normalizedCode]);
+                    }
+                })
+                ->first();
+        }
+
+        return $this->activeAirportCache[$normalizedCode] = $airport;
+    }
+
+    private function activeAirportSearchColumns(): array
+    {
+        if ($this->activeAirportSearchColumns !== null) {
+            return $this->activeAirportSearchColumns;
+        }
+
+        $columns = ['icao', 'iata'];
+
+        foreach (['icao_code', 'iata_code'] as $column) {
+            if (Schema::hasColumn('airports', $column)) {
+                $columns[] = $column;
+            }
+        }
+
+        return $this->activeAirportSearchColumns = $columns;
     }
 
     private function distanceKm(float $originLat, float $originLng, float $destinationLat, float $destinationLng): float
@@ -2179,7 +2232,7 @@ class ClienteControlador extends ControladorBase
 
     private function resolveAirportExpenseRule(Aeronave $aircraft, array $legs): ?array
     {
-        if (! Schema::hasTable('airport_expense_rules')) {
+        if (! $this->airportExpenseRulesTableExists()) {
             return null;
         }
 
@@ -2189,49 +2242,37 @@ class ClienteControlador extends ControladorBase
         $destinationCode = strtoupper(trim((string) ($firstLeg['destination'] ?? '')));
         $category = $this->normalizeAircraftCategory($aircraft->category);
 
-        try {
-            $rule = ReglaGastoAeropuerto::query()
-                ->where('is_active', true)
-                ->where(function ($query) use ($aircraft) {
-                    $query->whereNull('aircraft_id')
-                        ->orWhere('aircraft_id', $aircraft->id);
-                })
-                ->where(function ($query) use ($category) {
-                    $query->whereNull('category');
+        $rule = $this->activeAirportExpenseRules()
+            ->filter(function (ReglaGastoAeropuerto $rule) use ($aircraft, $category, $routeSignature, $originCode, $destinationCode) {
+                return ($rule->aircraft_id === null || (int) $rule->aircraft_id === (int) $aircraft->id)
+                    && ($rule->category === null || ($category && $rule->category === $category))
+                    && ($rule->route_signature === null || ($routeSignature !== '' && strtoupper((string) $rule->route_signature) === $routeSignature))
+                    && ($rule->origin_airport_code === null || ($originCode !== '' && strtoupper((string) $rule->origin_airport_code) === $originCode))
+                    && ($rule->destination_airport_code === null || ($destinationCode !== '' && strtoupper((string) $rule->destination_airport_code) === $destinationCode));
+            })
+            ->sort(function (ReglaGastoAeropuerto $left, ReglaGastoAeropuerto $right) {
+                $leftScore = [
+                    $left->aircraft_id === null ? 0 : 1,
+                    $left->route_signature === null ? 0 : 1,
+                    $left->origin_airport_code === null ? 0 : 1,
+                    $left->destination_airport_code === null ? 0 : 1,
+                    $left->category === null ? 0 : 1,
+                    (int) $left->priority,
+                ];
+                $rightScore = [
+                    $right->aircraft_id === null ? 0 : 1,
+                    $right->route_signature === null ? 0 : 1,
+                    $right->origin_airport_code === null ? 0 : 1,
+                    $right->destination_airport_code === null ? 0 : 1,
+                    $right->category === null ? 0 : 1,
+                    (int) $right->priority,
+                ];
 
-                    if ($category) {
-                        $query->orWhere('category', $category);
-                    }
-                })
-                ->where(function ($query) use ($routeSignature) {
-                    $query->whereNull('route_signature');
+                return $rightScore <=> $leftScore;
+            })
+            ->first();
 
-                    if ($routeSignature !== '') {
-                        $query->orWhere('route_signature', $routeSignature);
-                    }
-                })
-                ->where(function ($query) use ($originCode) {
-                    $query->whereNull('origin_airport_code');
-
-                    if ($originCode !== '') {
-                        $query->orWhere('origin_airport_code', $originCode);
-                    }
-                })
-                ->where(function ($query) use ($destinationCode) {
-                    $query->whereNull('destination_airport_code');
-
-                    if ($destinationCode !== '') {
-                        $query->orWhere('destination_airport_code', $destinationCode);
-                    }
-                })
-                ->orderByRaw('case when aircraft_id is null then 0 else 1 end desc')
-                ->orderByRaw('case when route_signature is null then 0 else 1 end desc')
-                ->orderByRaw('case when origin_airport_code is null then 0 else 1 end desc')
-                ->orderByRaw('case when destination_airport_code is null then 0 else 1 end desc')
-                ->orderByRaw('case when category is null then 0 else 1 end desc')
-                ->orderByDesc('priority')
-                ->first();
-        } catch (QueryException) {
+        if (! $rule) {
             return null;
         }
 
@@ -2249,6 +2290,42 @@ class ClienteControlador extends ControladorBase
                 $rule->category ?: 'null'
             ),
         ];
+    }
+
+    private function airportExpenseRulesTableExists(): bool
+    {
+        if ($this->airportExpenseRulesTableExists === null) {
+            $this->airportExpenseRulesTableExists = Schema::hasTable('airport_expense_rules');
+        }
+
+        return $this->airportExpenseRulesTableExists;
+    }
+
+    private function activeAirportExpenseRules(): \Illuminate\Support\Collection
+    {
+        if ($this->airportExpenseRulesCache !== null) {
+            return $this->airportExpenseRulesCache;
+        }
+
+        try {
+            $this->airportExpenseRulesCache = ReglaGastoAeropuerto::query()
+                ->select([
+                    'id',
+                    'aircraft_id',
+                    'category',
+                    'origin_airport_code',
+                    'destination_airport_code',
+                    'route_signature',
+                    'expense_fee',
+                    'priority',
+                ])
+                ->where('is_active', true)
+                ->get();
+        } catch (QueryException) {
+            $this->airportExpenseRulesCache = collect();
+        }
+
+        return $this->airportExpenseRulesCache;
     }
 
     private function buildRouteSignature(array $legs): string
@@ -2580,8 +2657,16 @@ class ClienteControlador extends ControladorBase
             return $defaultRule;
         }
 
-        if (! Schema::hasTable('category_pricing_rules')) {
+        if ($this->categoryPricingRulesTableExists === null) {
+            $this->categoryPricingRulesTableExists = Schema::hasTable('category_pricing_rules');
+        }
+
+        if (! $this->categoryPricingRulesTableExists) {
             return $defaultRule;
+        }
+
+        if (array_key_exists($category, $this->categoryPricingRuleCache)) {
+            return $this->categoryPricingRuleCache[$category] ?: $defaultRule;
         }
 
         try {
@@ -2590,14 +2675,18 @@ class ClienteControlador extends ControladorBase
                 ->where('is_active', true)
                 ->first();
         } catch (QueryException) {
+            $this->categoryPricingRuleCache[$category] = null;
+
             return $defaultRule;
         }
 
         if (! $rule) {
+            $this->categoryPricingRuleCache[$category] = null;
+
             return $defaultRule;
         }
 
-        return [
+        return $this->categoryPricingRuleCache[$category] = [
             'minimum_route_price' => (float) $rule->minimum_route_price,
             'redsky_markup' => (float) $rule->redsky_markup,
         ];

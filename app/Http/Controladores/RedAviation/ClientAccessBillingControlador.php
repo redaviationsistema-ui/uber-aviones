@@ -24,11 +24,12 @@ class ClientAccessBillingControlador extends ControladorBase
 
     public function status(Request $request)
     {
-        $user = $request->user()->fresh();
+        $user = $request->user()->fresh(['demo', 'activeSuscripcion.plan']);
+        $latestPayment = $this->latestPaymentForUser($user);
 
         return $this->ok([
-            'access' => $this->buildAccessPayload($user),
-            'latest_payment' => $this->latestPaymentForUser($user),
+            'access' => $this->buildAccessPayload($user, $latestPayment),
+            'latest_payment' => $latestPayment,
         ]);
     }
 
@@ -296,12 +297,12 @@ class ClientAccessBillingControlador extends ControladorBase
         return [$start, $end];
     }
 
-    private function buildAccessPayload(Usuario $user): array
+    private function buildAccessPayload(Usuario $user, ?AccessPayment $latestPayment = null): array
     {
         $access = $user->accessStatus()['commercial_access'];
 
         return array_merge($access, [
-            'latest_payment' => $this->latestPaymentForUser($user),
+            'latest_payment' => $latestPayment ?? $this->latestPaymentForUser($user),
         ]);
     }
 
