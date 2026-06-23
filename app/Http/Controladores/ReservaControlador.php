@@ -421,6 +421,9 @@ class ReservaControlador extends ControladorBase
         }
 
         $fullContractHtml = $this->resolvePreferredContractHtml($data, $termsSnapshot);
+        $htmlContainsSignatureAnchor = $fullContractHtml !== ''
+            ? Str::contains($fullContractHtml, '/sig_cliente/')
+            : null;
         if ($fullContractHtml !== '') {
             $termsSnapshot['full_contract_html_checksum'] = sha1($fullContractHtml);
             $termsSnapshot['full_contract_html_length'] = strlen($fullContractHtml);
@@ -428,10 +431,30 @@ class ReservaControlador extends ControladorBase
 
         Log::info('DOCUSIGN 2 - HTML resuelto', [
             'reservation_id' => $reservation->id,
+            'regenerate_requested' => $shouldRegenerate,
             'html_length' => strlen($fullContractHtml),
+            'html_contains_signature_anchor' => $htmlContainsSignatureAnchor,
             'using_source_contract_path' => false,
             'elapsed_ms' => (int) round((microtime(true) - $requestStartedAt) * 1000),
         ]);
+
+        if ($fullContractHtml !== '' && $htmlContainsSignatureAnchor === false) {
+            Log::warning('DOCUSIGN 2.1 - HTML sin anchor de firma', [
+                'reservation_id' => $reservation->id,
+                'regenerate_requested' => $shouldRegenerate,
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'El HTML final del contrato no contiene el anchor /sig_cliente/ requerido para DocuSign.',
+                'docusign_debug' => [
+                    'reservation_id' => $reservation->id,
+                    'regenerate_requested' => $shouldRegenerate,
+                    'html_contains_signature_anchor' => false,
+                    'reused_existing_pdf' => false,
+                ],
+            ], 422);
+        }
 
         $fullContractText = $this->resolvePreferredContractText($data, $termsSnapshot);
         if ($fullContractText !== '') {
@@ -465,6 +488,26 @@ class ReservaControlador extends ControladorBase
             && $existingPdfPath !== ''
             && Storage::disk('local')->exists($existingPdfPath);
 
+        if ($shouldRegenerate && $canReuseExistingPdf) {
+            Log::warning('DOCUSIGN 2.4 - Regenerate solicito reutilizacion inesperada de PDF', [
+                'reservation_id' => $reservation->id,
+                'regenerate_requested' => true,
+                'reused_existing_pdf' => true,
+                'previous_contract_pdf_path' => $existingPdfPath,
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'DocuSign detecto una reutilizacion inesperada del PDF aun cuando regenerate=true.',
+                'docusign_debug' => [
+                    'reservation_id' => $reservation->id,
+                    'regenerate_requested' => true,
+                    'reused_existing_pdf' => true,
+                    'previous_contract_pdf_path' => $existingPdfPath,
+                ],
+            ], 422);
+        }
+
         $pdfRelativePath = $canReuseExistingPdf
             ? $existingPdfPath
             : (
@@ -481,12 +524,57 @@ class ReservaControlador extends ControladorBase
                     )
             );
 
+        $pdfAbsolutePath = $contratoPdfServicio->rutaAbsoluta($pdfRelativePath);
+        $pdfSizeBytes = is_file($pdfAbsolutePath) ? filesize($pdfAbsolutePath) : null;
+        $pdfContainsSignatureAnchor = is_file($pdfAbsolutePath)
+            ? Str::contains((string) file_get_contents($pdfAbsolutePath), '/sig_cliente/')
+            : null;
+        $docusignDebug = [
+            'reservation_id' => $reservation->id,
+            'regenerate_requested' => $shouldRegenerate,
+            'reused_existing_pdf' => $canReuseExistingPdf,
+            'previous_contract_pdf_path' => $existingPdfPath !== '' ? $existingPdfPath : null,
+            'new_contract_pdf_path' => $pdfRelativePath,
+            'pdf_size_bytes' => $pdfSizeBytes,
+            'html_contains_signature_anchor' => $htmlContainsSignatureAnchor,
+            'pdf_contains_signature_anchor' => $pdfContainsSignatureAnchor,
+        ];
+
         Log::info('DOCUSIGN 2.5 - PDF listo', [
             'reservation_id' => $reservation->id,
-            'pdf_relative_path' => $pdfRelativePath,
+            'regenerate_requested' => $shouldRegenerate,
             'reused_existing_pdf' => $canReuseExistingPdf,
+            'previous_contract_pdf_path' => $existingPdfPath !== '' ? $existingPdfPath : null,
+            'new_contract_pdf_path' => $pdfRelativePath,
+            'pdf_size_bytes' => $pdfSizeBytes,
+            'html_contains_signature_anchor' => $htmlContainsSignatureAnchor,
+            'pdf_contains_signature_anchor' => $pdfContainsSignatureAnchor,
             'elapsed_ms' => (int) round((microtime(true) - $requestStartedAt) * 1000),
         ]);
+
+        if ($canReuseExistingPdf && $pdfContainsSignatureAnchor === false) {
+            Log::warning('DOCUSIGN 2.6 - PDF reutilizado sin anchor visible', [
+                'reservation_id' => $reservation->id,
+                'regenerate_requested' => $shouldRegenerate,
+                'reused_existing_pdf' => true,
+                'previous_contract_pdf_path' => $existingPdfPath,
+                'new_contract_pdf_path' => $pdfRelativePath,
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'El PDF reutilizado no contiene un anchor /sig_cliente/ verificable para DocuSign.',
+                'docusign_debug' => $docusignDebug,
+            ], 422);
+        }
+
+        if (! $canReuseExistingPdf && $fullContractHtml !== '' && $pdfContainsSignatureAnchor === false) {
+            Log::warning('DOCUSIGN 2.7 - PDF regenerado sin anchor visible en binario', [
+                'reservation_id' => $reservation->id,
+                'regenerate_requested' => $shouldRegenerate,
+                'new_contract_pdf_path' => $pdfRelativePath,
+            ]);
+        }
 
         $returnUrl = $this->resolveDocuSignReturnUrl(
             $docuSignServicio,
@@ -516,6 +604,7 @@ class ReservaControlador extends ControladorBase
                 'message' => $exception->getMessage(),
                 'docusign_debug' => array_merge(
                     $docuSignServicio->configurationDiagnostics(),
+                    $docusignDebug,
                     [
                         'runtime_error' => $docuSignServicio->runtimeDiagnosticsFromException(
                             $exception->getPrevious() instanceof Throwable ? $exception->getPrevious() : $exception
@@ -544,6 +633,7 @@ class ReservaControlador extends ControladorBase
             'recipient_view_url' => $signingUrl,
             'embedded_signing_url' => $signingUrl,
             'envelope_id' => $envelopeId,
+            'docusign_debug' => $docusignDebug,
         ]);
     }
 
