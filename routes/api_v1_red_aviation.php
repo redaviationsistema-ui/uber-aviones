@@ -12,6 +12,7 @@ use App\Http\Controladores\RedAviation\ProviderAircraftBillingControlador;
 use App\Http\Controladores\RedAviation\SobrecargoControlador;
 use App\Http\Controladores\RedAviation\SuscripcionControlador;
 use App\Http\Controladores\NotificacionControlador;
+use App\Http\Controladores\ReservaControlador;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/plans', [BillingPlanControlador::class, 'index']);
@@ -41,6 +42,16 @@ Route::middleware(['auth.token'])->group(function () {
         Route::post('/flight-requests', [ClienteControlador::class, 'storeFlightRequest']);
         Route::get('/flight-requests', [ClienteControlador::class, 'indexFlightRequests']);
         Route::get('/flight-requests/{flightRequest}', [ClienteControlador::class, 'showFlightRequest']);
+        Route::get('/flight-requests/{reservation}/contract', [ReservaControlador::class, 'showContract']);
+        Route::get('/flight-requests/{reservation}/contract/pdf', [ReservaControlador::class, 'downloadContractPdf']);
+        Route::post('/flight-requests/{reservation}/contract/generate', [ReservaControlador::class, 'generateContract']);
+        Route::post('/flight-requests/{reservation}/contract/docusign', [ReservaControlador::class, 'startEmbeddedSigning']);
+        Route::post('/flight-requests/{reservation}/contract/sign', [ReservaControlador::class, 'signContract']);
+        Route::get('/reservations/{reservation}/contract', [ReservaControlador::class, 'showContract']);
+        Route::get('/reservations/{reservation}/contract/pdf', [ReservaControlador::class, 'downloadContractPdf']);
+        Route::post('/reservations/{reservation}/contract/generate', [ReservaControlador::class, 'generateContract']);
+        Route::post('/reservations/{reservation}/contract/docusign', [ReservaControlador::class, 'startEmbeddedSigning']);
+        Route::post('/reservations/{reservation}/contract/sign', [ReservaControlador::class, 'signContract']);
     });
 
     Route::prefix('client')->middleware(['role:client,admin', 'subscription.active'])->group(function () {
