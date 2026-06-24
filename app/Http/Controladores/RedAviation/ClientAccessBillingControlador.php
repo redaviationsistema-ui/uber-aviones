@@ -9,6 +9,7 @@ use App\Servicios\Billing\BillingPlanServicio;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Http\RedirectResponse;
 use Illuminate\Support\Facades\DB;
 use Stripe\BillingPortal\Session as BillingPortalSession;
 use Stripe\Checkout\Session;
@@ -41,11 +42,14 @@ class ClientAccessBillingControlador extends ControladorBase
 
         $user = $request->user()->fresh();
         $data = $request->validate([
-            'success_url' => ['nullable', 'url'],
-            'cancel_url' => ['nullable', 'url'],
-            'return_url' => ['nullable', 'url'],
+            'success_url' => ['nullable', 'string', 'max:2048'],
+            'cancel_url' => ['nullable', 'string', 'max:2048'],
+            'return_url' => ['nullable', 'string', 'max:2048'],
             'contact_email' => ['nullable', 'email:rfc,dns'],
         ]);
+        $this->assertAllowedReturnUrl($data['success_url'] ?? null);
+        $this->assertAllowedReturnUrl($data['cancel_url'] ?? null);
+        $this->assertAllowedReturnUrl($data['return_url'] ?? null);
 
         if ($portal = $this->createBillingPortalIfAvailable($user, $data)) {
             return $this->ok($portal);
@@ -214,6 +218,26 @@ class ClientAccessBillingControlador extends ControladorBase
         ]);
     }
 
+    public function mobileReturn(Request $request): RedirectResponse
+    {
+        $data = $request->validate([
+            'checkout' => ['nullable', 'string', 'max:32'],
+            'session_id' => ['nullable', 'string', 'max:255'],
+            'checkout_session_id' => ['nullable', 'string', 'max:255'],
+        ]);
+
+        $checkout = strtolower((string) ($data['checkout'] ?? 'success'));
+        $sessionId = (string) ($data['session_id'] ?? $data['checkout_session_id'] ?? '');
+
+        $query = http_build_query([
+            'checkout' => $checkout === 'cancelled' ? 'cancel' : $checkout,
+            'session_id' => $sessionId,
+            'refresh' => 'commercial_access',
+        ]);
+
+        return redirect()->away('redsky://cliente/pago?'.$query);
+    }
+
     private function ensureStripeIsConfigured(): ?JsonResponse
     {
         if (! config('services.stripe.secret') || ! config('services.stripe.publishable')) {
@@ -224,6 +248,27 @@ class ClientAccessBillingControlador extends ControladorBase
         }
 
         return null;
+    }
+
+    private function assertAllowedReturnUrl(?string $url): void
+    {
+        if (! $url) {
+            return;
+        }
+
+        $scheme = strtolower((string) parse_url($url, PHP_URL_SCHEME));
+        $host = strtolower((string) parse_url($url, PHP_URL_HOST));
+
+        if (in_array($scheme, ['http', 'https'], true)) {
+            abort_unless(filter_var($url, FILTER_VALIDATE_URL), 422, 'La URL de retorno no es valida.');
+            return;
+        }
+
+        abort_unless(
+            $scheme === 'redsky' && $host === 'cliente',
+            422,
+            'La URL de retorno movil no esta permitida.'
+        );
     }
 
     private function createBillingPortalIfAvailable(Usuario $user, array $data): ?array

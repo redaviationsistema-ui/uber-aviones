@@ -20,6 +20,7 @@ Route::get('/billing/plans', [BillingPlanControlador::class, 'index']);
 Route::get('/billing/plans/client-access', [BillingPlanControlador::class, 'clientAccess']);
 Route::get('/billing/plans/provider-aircraft', [BillingPlanControlador::class, 'providerAircraft']);
 Route::post('/client/quotes/preview', [ClienteControlador::class, 'previewQuotes']);
+Route::get('/client/access-payment/mobile-return', [ClientAccessBillingControlador::class, 'mobileReturn']);
 
 Route::middleware(['auth.token'])->group(function () {
     Route::get('/crew-operation-incidents', [CrewOperationIncidentController::class, 'index']);
