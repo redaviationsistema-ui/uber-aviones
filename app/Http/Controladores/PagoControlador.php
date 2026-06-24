@@ -27,7 +27,7 @@ class PagoControlador extends ControladorBase
     {
         $reservation = $this->resolveReservation($reservation);
         abort_if($reservation->client_id !== $request->user()->id, 403, 'No puedes pagar esta reserva.');
-        abort_if(optional($reservation->contract)->status !== 'signed', 409, 'Primero debes firmar el contrato.');
+        abort_if(! $this->reservationContractIsSigned($reservation), 409, 'Primero debes firmar el contrato.');
 
         $data = $request->validate([
             'payment_method_id' => ['nullable', 'exists:payment_methods,id'],
@@ -114,6 +114,27 @@ class PagoControlador extends ControladorBase
             'payment' => $payment->fresh(),
             'reservation' => $reservation->fresh(['payments']),
         ]);
+    }
+
+    private function reservationContractIsSigned(Reserva $reservation): bool
+    {
+        $contract = $reservation->contract;
+        if (! $contract) {
+            return false;
+        }
+
+        $contractStatus = strtolower(trim((string) ($contract->status ?? '')));
+        $docusignStatus = strtolower(trim((string) ($contract->docusign_status ?? '')));
+
+        if (in_array($contractStatus, ['signed', 'completed', 'approved'], true)) {
+            return true;
+        }
+
+        if (in_array($docusignStatus, ['completed', 'signed', 'approved'], true)) {
+            return true;
+        }
+
+        return filled($contract->signed_pdf_path) || filled($contract->document_url);
     }
 
     private function notifyAssignedCrew(Reserva $reservation): void
