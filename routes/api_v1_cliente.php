@@ -60,6 +60,8 @@ Route::prefix('cliente')->middleware(['auth.token', 'role:client,admin'])->group
     Route::post('/stripe/payment-intent/confirm', [StripePagoControlador::class, 'confirmFlightRequestPayment']);
     Route::post('/reservas/{reservation}/reintentar-pago', [PagoControlador::class, 'retryReservaPago']);
     Route::post('/stripe/checkout/create', [StripePagoControlador::class, 'createCheckout']);
+    Route::get('/stripe/checkout/success', [StripePagoControlador::class, 'success']);
+    Route::get('/stripe/checkout/cancel', [StripePagoControlador::class, 'cancel']);
     Route::post('/stripe/payment-intent', [StripePagoControlador::class, 'createPaymentIntent']);
     Route::post('/stripe/wire-intent', [StripePagoControlador::class, 'createWireIntent']);
 

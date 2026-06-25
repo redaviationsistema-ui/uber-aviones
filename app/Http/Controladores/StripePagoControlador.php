@@ -5,6 +5,7 @@ namespace App\Http\Controladores;
 use App\Modelos\Pago;
 use App\Modelos\Reserva;
 use App\Modelos\SolicitudVuelo;
+use Illuminate\Http\RedirectResponse;
 use App\Servicios\Pagos\PaymentFeeCalculationServicio;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -349,6 +350,112 @@ class StripePagoControlador extends ControladorBase
         ]);
     }
 
+    public function success(Request $request): JsonResponse
+    {
+        if ($response = $this->ensureStripeIsConfigured()) {
+            return $response;
+        }
+
+        $data = $request->validate([
+            'session_id' => ['nullable', 'string', 'max:255'],
+            'checkout_session_id' => ['nullable', 'string', 'max:255'],
+        ]);
+
+        $sessionId = trim((string) ($data['session_id'] ?? $data['checkout_session_id'] ?? ''));
+        $userId = (int) $request->user()->id;
+
+        $payment = Pago::query()
+            ->with(['reservation.flightRequest', 'flightRequest'])
+            ->where('user_id', $userId)
+            ->where('payment_type', 'reservation')
+            ->where('provider', 'stripe')
+            ->when($sessionId !== '', function ($query) use ($sessionId) {
+                $query->where('stripe_checkout_session_id', $sessionId)
+                    ->orWhere('transaction_reference', $sessionId);
+            })
+            ->latest('id')
+            ->first();
+
+        abort_if(! $payment, 404, 'No encontramos el pago de reserva solicitado.');
+
+        if ($sessionId !== '' || filled($payment->stripe_checkout_session_id)) {
+            $this->syncCheckoutSessionPayment(
+                $payment,
+                $sessionId !== '' ? $sessionId : (string) $payment->stripe_checkout_session_id,
+            );
+            $payment->refresh();
+        }
+
+        $reservation = $payment->reservation?->fresh(['contract', 'payments', 'flightRequest']);
+        $flightRequest = $reservation?->flightRequest?->fresh(['reservation']) ?? $payment->flightRequest?->fresh(['reservation']);
+
+        return $this->ok([
+            'payment_order' => $payment->fresh(),
+            'reservation' => $reservation,
+            'reservation_id' => $reservation?->id,
+            'flight_request' => $flightRequest,
+            'flight_request_id' => $flightRequest?->id ?? $payment->flight_request_id,
+            'payment_status' => $payment->status,
+            'workflow_status' => $payment->status === 'paid' ? 'pago confirmado' : 'pago pendiente',
+        ]);
+    }
+
+    public function cancel(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'session_id' => ['nullable', 'string', 'max:255'],
+            'checkout_session_id' => ['nullable', 'string', 'max:255'],
+        ]);
+
+        $sessionId = trim((string) ($data['session_id'] ?? $data['checkout_session_id'] ?? ''));
+        $userId = (int) $request->user()->id;
+
+        $payment = Pago::query()
+            ->with(['reservation', 'flightRequest'])
+            ->where('user_id', $userId)
+            ->where('payment_type', 'reservation')
+            ->where('provider', 'stripe')
+            ->where('status', 'pending')
+            ->when($sessionId !== '', function ($query) use ($sessionId) {
+                $query->where('stripe_checkout_session_id', $sessionId)
+                    ->orWhere('transaction_reference', $sessionId);
+            })
+            ->latest('id')
+            ->first();
+
+        if ($payment) {
+            $this->markCancelledCheckoutPayment($payment, $sessionId);
+            $payment->refresh();
+        }
+
+        return $this->ok([
+            'message' => 'Flujo de pago de reserva cancelado.',
+            'payment_order' => $payment,
+            'reservation' => $payment?->reservation?->fresh(['contract', 'payments', 'flightRequest']),
+            'flight_request' => $payment?->flightRequest?->fresh(['reservation']),
+        ]);
+    }
+
+    public function mobileReturn(Request $request): RedirectResponse
+    {
+        $data = $request->validate([
+            'checkout' => ['nullable', 'string', 'max:32'],
+            'session_id' => ['nullable', 'string', 'max:255'],
+            'checkout_session_id' => ['nullable', 'string', 'max:255'],
+        ]);
+
+        $checkout = strtolower((string) ($data['checkout'] ?? 'success'));
+        $sessionId = (string) ($data['session_id'] ?? $data['checkout_session_id'] ?? '');
+
+        $query = http_build_query([
+            'checkout' => $checkout === 'cancelled' ? 'cancel' : $checkout,
+            'session_id' => $sessionId,
+            'refresh' => 'reservation_payment',
+        ]);
+
+        return redirect()->away('redsky://cliente/pago?'.$query);
+    }
+
     private function resolveFlightRequestAmount(SolicitudVuelo $flightRequest): float
     {
         $pricingContext = is_array($flightRequest->pricing_context) ? $flightRequest->pricing_context : [];
@@ -529,6 +636,103 @@ class StripePagoControlador extends ControladorBase
             'payment_status' => 'paid',
             'workflow_status' => 'pago confirmado',
         ]);
+    }
+
+    private function syncCheckoutSessionPayment(Pago $payment, string $sessionId): void
+    {
+        $sessionId = trim($sessionId);
+        if ($sessionId === '') {
+            return;
+        }
+
+        Stripe::setApiKey((string) config('services.stripe.secret'));
+
+        $session = Session::retrieve($sessionId, [
+            'expand' => ['payment_intent'],
+        ]);
+
+        abort_if(! $session, 404, 'Stripe no devolvio informacion de la sesion de Checkout.');
+
+        $metadataFlightRequestId = (int) ($session->metadata->flight_request_id ?? 0);
+        if ($metadataFlightRequestId > 0 && (int) $payment->flight_request_id > 0) {
+            abort_if($metadataFlightRequestId !== (int) $payment->flight_request_id, 409, 'La sesion de Checkout no corresponde a esta reserva.');
+        }
+
+        $paymentStatus = strtolower((string) ($session->payment_status ?? ''));
+        $sessionStatus = strtolower((string) ($session->status ?? ''));
+
+        if (in_array($paymentStatus, ['paid', 'no_payment_required'], true) || $sessionStatus === 'complete') {
+            $flightRequest = SolicitudVuelo::query()
+                ->with(['reservation.payments' => fn ($query) => $query->latest('id'), 'quotes'])
+                ->findOrFail((int) $payment->flight_request_id);
+            $reservation = $payment->reservation ?: $this->ensureReservationForFlightRequest($flightRequest, (int) $payment->user_id);
+
+            $this->finalizeSuccessfulPayment(
+                flightRequest: $flightRequest,
+                reservation: $reservation,
+                paymentIntentId: (string) ($session->payment_intent->id ?? $session->payment_intent ?? ''),
+                brandOverride: (string) (
+                    data_get($session, 'payment_intent.payment_method_details.card.brand')
+                    ?? data_get($session, 'payment_intent.charges.data.0.payment_method_details.card.brand')
+                    ?? ''
+                ),
+            );
+
+            return;
+        }
+
+        if (in_array($paymentStatus, ['unpaid', 'no_payment_required'], true) || in_array($sessionStatus, ['expired', 'open'], true)) {
+            DB::transaction(function () use ($payment, $session, $sessionId) {
+                $flightRequest = $payment->flightRequest;
+                $reservation = $payment->reservation;
+
+                $payment->update([
+                    'status' => 'pending',
+                    'stripe_checkout_session_id' => $sessionId,
+                    'gateway_response' => json_decode(json_encode($session), true),
+                ]);
+
+                if ($flightRequest) {
+                    $flightRequest->update([
+                        'payment_status' => 'pending',
+                        'stripe_checkout_session_id' => $sessionId,
+                        'workflow_status' => 'pago pendiente',
+                    ]);
+                }
+
+                if ($reservation) {
+                    $reservation->update([
+                        'status' => 'pending_payment',
+                    ]);
+                }
+            });
+        }
+    }
+
+    private function markCancelledCheckoutPayment(Pago $payment, string $sessionId = ''): void
+    {
+        DB::transaction(function () use ($payment, $sessionId) {
+            $flightRequest = $payment->flightRequest;
+            $reservation = $payment->reservation;
+
+            $payment->update([
+                'status' => 'cancelled',
+                'failure_reason' => 'Checkout cancelado por el cliente.',
+                'stripe_checkout_session_id' => $sessionId !== '' ? $sessionId : $payment->stripe_checkout_session_id,
+            ]);
+
+            if ($flightRequest && $flightRequest->payment_status !== 'paid') {
+                $flightRequest->update([
+                    'payment_status' => 'cancelled',
+                ]);
+            }
+
+            if ($reservation && $reservation->status !== 'paid') {
+                $reservation->update([
+                    'status' => 'pending_payment',
+                ]);
+            }
+        });
     }
 
     private function ensureStripeIsConfigured(): ?JsonResponse

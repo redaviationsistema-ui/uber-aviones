@@ -13,6 +13,7 @@ use App\Http\Controladores\RedAviation\SobrecargoControlador;
 use App\Http\Controladores\RedAviation\SuscripcionControlador;
 use App\Http\Controladores\NotificacionControlador;
 use App\Http\Controladores\ReservaControlador;
+use App\Http\Controladores\StripePagoControlador;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/plans', [BillingPlanControlador::class, 'index']);
@@ -21,6 +22,7 @@ Route::get('/billing/plans/client-access', [BillingPlanControlador::class, 'clie
 Route::get('/billing/plans/provider-aircraft', [BillingPlanControlador::class, 'providerAircraft']);
 Route::post('/client/quotes/preview', [ClienteControlador::class, 'previewQuotes']);
 Route::get('/client/access-payment/mobile-return', [ClientAccessBillingControlador::class, 'mobileReturn']);
+Route::get('/client/flight-payment/mobile-return', [StripePagoControlador::class, 'mobileReturn']);
 
 Route::middleware(['auth.token'])->group(function () {
     Route::get('/crew-operation-incidents', [CrewOperationIncidentController::class, 'index']);
