@@ -30,6 +30,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 use Stripe\Checkout\Session;
 use Stripe\PaymentIntent;
 use Stripe\Stripe;
@@ -1381,6 +1382,17 @@ class AdminControlador extends ControladorBase
         ]);
 
         $hasAssignedCrew = ! empty($data['sobrecargo_user_id']);
+        $currentWorkflowStatus = Str::lower(trim((string) ($flightRequest->workflow_status ?? '')));
+
+        if (
+            $hasAssignedCrew
+            && ! in_array($currentWorkflowStatus, ['flight_confirmed', 'vuelo confirmado', 'tracking_live', 'tracking en vivo'], true)
+        ) {
+            throw ValidationException::withMessages([
+                'sobrecargo_user_id' => 'La sobrecargo solo puede asignarse cuando el vuelo ya esta confirmado para despacho operativo.',
+            ]);
+        }
+
         $nextWorkflowStatus = $hasAssignedCrew
             ? 'tracking_live'
             : ($flightRequest->workflow_status ?: 'operador_asignado');
@@ -1424,7 +1436,7 @@ class AdminControlador extends ControladorBase
                 'aircraft_category' => $aircraft?->category,
                 'aircraft_capacity' => $aircraft?->capacity,
                 'operational_status' => $nextWorkflowStatus,
-                'operational_ready' => $hasAssignedCrew,
+                'operational_ready' => (bool) ($visibilityPayload['operational_ready'] ?? false),
             ],
         ]);
 
@@ -1468,8 +1480,17 @@ class AdminControlador extends ControladorBase
             $operationHasAssignedCrew = (bool) $operation?->sobrecargo_user_id;
 
             if (
+                in_array($normalizedWorkflowStatus, ['tracking_live', 'tracking en vivo'], true)
+                && ! $operationHasAssignedCrew
+            ) {
+                throw ValidationException::withMessages([
+                    'workflow_status' => 'No puedes mover el vuelo a tracking en vivo sin una sobrecargo asignada.',
+                ]);
+            }
+
+            if (
                 $operationHasAssignedCrew
-                && in_array($normalizedWorkflowStatus, ['payment_confirmed', 'pago confirmado', 'flight_confirmed', 'vuelo confirmado', 'tracking_live', 'tracking en vivo'], true)
+                && in_array($normalizedWorkflowStatus, ['flight_confirmed', 'vuelo confirmado', 'tracking_live', 'tracking en vivo'], true)
             ) {
                 $requestedWorkflowStatus = 'tracking_live';
                 $normalizedWorkflowStatus = 'tracking_live';
@@ -1489,9 +1510,7 @@ class AdminControlador extends ControladorBase
                 'visibility_payload' => [
                     ...$visibilityPayload,
                     'operational_status' => $requestedWorkflowStatus ?? ($visibilityPayload['operational_status'] ?? null),
-                    'operational_ready' => $operationHasAssignedCrew
-                        ? true
-                        : (bool) ($visibilityPayload['operational_ready'] ?? false),
+                    'operational_ready' => (bool) ($visibilityPayload['operational_ready'] ?? false),
                     'admin_flow' => [
                         'state' => $adminFlowState,
                         'reason' => $adminReason,
@@ -1662,10 +1681,19 @@ class AdminControlador extends ControladorBase
             'access_payments' => $payments->through(function (AccessPayment $payment) {
                 $user = $payment->user;
 
+                $storedPricing = is_array(data_get($payment->gateway_response, 'pricing')) ? data_get($payment->gateway_response, 'pricing') : [];
+                $baseAmount = (float) ($storedPricing['base_amount'] ?? ($payment->billingPlan?->amount ?? $payment->amount ?? 0));
+                $stripeFee = (float) ($storedPricing['stripe_fee'] ?? max(round(((float) $payment->amount) - $baseAmount, 2), 0));
+                $totalAmount = (float) ($storedPricing['total_amount'] ?? $payment->amount);
+
                 return [
                     'id' => $payment->id,
                     'user_id' => $payment->user_id,
                     'amount' => $payment->amount,
+                    'base_amount' => round($baseAmount, 2),
+                    'stripe_fee' => round($stripeFee, 2),
+                    'administrative_fee' => 0.0,
+                    'total_amount' => round($totalAmount, 2),
                     'currency' => $payment->currency,
                     'status' => $payment->status,
                     'provider' => $payment->provider,

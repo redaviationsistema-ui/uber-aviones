@@ -411,7 +411,72 @@ class PlataformaVuelosApiTest extends TestCase
         $this->assertIsArray(data_get($requestPayload, 'operation.timeline'));
     }
 
-    public function test_admin_assign_promotes_payment_confirmed_request_to_tracking_live_when_crew_is_assigned(): void
+    public function test_admin_assign_promotes_flight_confirmed_request_to_tracking_live_when_crew_is_assigned(): void
+    {
+        $this->seed();
+
+        $adminToken = $this->postJson('/api/v1/auth/login', [
+            'email' => 'admin@privateflights.test',
+            'password' => 'password',
+        ])->assertOk()->json('token');
+
+        $sobrecargo = Usuario::query()->where('email', 'sobrecargo@redaviation.test')->firstOrFail();
+        $provider = Proveedor::query()->firstOrFail();
+        $aircraft = Aeronave::query()->where('provider_id', $provider->id)->firstOrFail();
+        $client = Usuario::query()->where('email', 'cliente@privateflights.test')->firstOrFail();
+
+        $flightRequest = SolicitudVuelo::query()->create([
+            'client_id' => $client->id,
+            'assigned_provider_id' => $provider->id,
+            'assigned_aircraft_id' => $aircraft->id,
+            'assigned_aircraft_model' => $aircraft->model,
+            'origin' => 'MMTO',
+            'destination' => 'MMMY',
+            'departure_datetime' => now()->addDay(),
+            'passengers' => 1,
+            'trip_type' => 'one_way',
+            'status' => 'confirmada',
+            'workflow_status' => 'flight_confirmed',
+            'visibility_payload' => [
+                'operational_status' => 'flight_confirmed',
+                'operational_ready' => false,
+            ],
+        ]);
+
+        $this->withToken($adminToken)
+            ->postJson("/api/v1/admin/requests/{$flightRequest->id}/assign", [
+                'provider_id' => $provider->id,
+                'aircraft_id' => $aircraft->id,
+                'sobrecargo_user_id' => $sobrecargo->id,
+            ])
+            ->assertOk();
+
+        $this->assertDatabaseHas('flight_requests', [
+            'id' => $flightRequest->id,
+            'workflow_status' => 'tracking_live',
+        ]);
+
+        $this->assertDatabaseHas('operations', [
+            'flight_request_id' => $flightRequest->id,
+            'sobrecargo_user_id' => $sobrecargo->id,
+            'status' => 'tracking_live',
+            'crew_status' => 'pending_crew_response',
+        ]);
+
+        $requestPayload = $this->withToken($adminToken)
+            ->getJson('/api/v1/admin/requests')
+            ->assertOk()
+            ->json('requests');
+
+        $matchedRequest = collect($requestPayload)->firstWhere('id', $flightRequest->id);
+
+        $this->assertNotNull($matchedRequest);
+        $this->assertSame('tracking_live', $matchedRequest['workflow_status']);
+        $this->assertSame('tracking_live', data_get($matchedRequest, 'operation.status'));
+        $this->assertFalse((bool) data_get($matchedRequest, 'operational_ready'));
+    }
+
+    public function test_admin_assign_with_crew_rejects_requests_before_flight_confirmed(): void
     {
         $this->seed();
 
@@ -449,30 +514,14 @@ class PlataformaVuelosApiTest extends TestCase
                 'aircraft_id' => $aircraft->id,
                 'sobrecargo_user_id' => $sobrecargo->id,
             ])
-            ->assertOk();
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['sobrecargo_user_id']);
 
-        $this->assertDatabaseHas('flight_requests', [
-            'id' => $flightRequest->id,
-            'workflow_status' => 'tracking_live',
-        ]);
-
-        $this->assertDatabaseHas('operations', [
+        $this->assertDatabaseMissing('operations', [
             'flight_request_id' => $flightRequest->id,
             'sobrecargo_user_id' => $sobrecargo->id,
             'status' => 'tracking_live',
-            'crew_status' => 'pending_crew_response',
         ]);
-
-        $requestPayload = $this->withToken($adminToken)
-            ->getJson('/api/v1/admin/requests')
-            ->assertOk()
-            ->json('requests');
-
-        $matchedRequest = collect($requestPayload)->firstWhere('id', $flightRequest->id);
-
-        $this->assertNotNull($matchedRequest);
-        $this->assertSame('tracking_live', $matchedRequest['workflow_status']);
-        $this->assertSame('tracking_live', data_get($matchedRequest, 'operation.status'));
     }
 
     public function test_admin_workflow_endpoint_promotes_to_tracking_live_when_operation_already_has_crew(): void
@@ -500,9 +549,9 @@ class PlataformaVuelosApiTest extends TestCase
             'passengers' => 1,
             'trip_type' => 'one_way',
             'status' => 'matched',
-            'workflow_status' => 'payment_confirmed',
+            'workflow_status' => 'flight_confirmed',
             'visibility_payload' => [
-                'operational_status' => 'payment_confirmed',
+                'operational_status' => 'flight_confirmed',
                 'operational_ready' => false,
             ],
         ]);
@@ -518,7 +567,7 @@ class PlataformaVuelosApiTest extends TestCase
 
         $response = $this->withToken($adminToken)
             ->putJson("/api/v1/admin/requests/{$flightRequest->id}/workflow", [
-                'workflow_status' => 'payment_confirmed',
+                'workflow_status' => 'flight_confirmed',
                 'payment_status' => 'Pagado',
                 'contract_status' => 'signed',
                 'notes' => 'Presentacion 15:00',
@@ -538,6 +587,151 @@ class PlataformaVuelosApiTest extends TestCase
             'sobrecargo_user_id' => $sobrecargo->id,
             'status' => 'tracking_live',
         ]);
+    }
+
+    public function test_admin_workflow_endpoint_rejects_tracking_live_without_assigned_crew(): void
+    {
+        $this->seed();
+
+        $adminToken = $this->postJson('/api/v1/auth/login', [
+            'email' => 'admin@privateflights.test',
+            'password' => 'password',
+        ])->assertOk()->json('token');
+
+        $provider = Proveedor::query()->firstOrFail();
+        $aircraft = Aeronave::query()->where('provider_id', $provider->id)->firstOrFail();
+        $client = Usuario::query()->where('email', 'cliente@privateflights.test')->firstOrFail();
+
+        $flightRequest = SolicitudVuelo::query()->create([
+            'client_id' => $client->id,
+            'assigned_provider_id' => $provider->id,
+            'assigned_aircraft_id' => $aircraft->id,
+            'assigned_aircraft_model' => $aircraft->model,
+            'origin' => 'MMTO',
+            'destination' => 'MMMY',
+            'departure_datetime' => now()->addDay(),
+            'passengers' => 1,
+            'trip_type' => 'one_way',
+            'status' => 'confirmada',
+            'workflow_status' => 'flight_confirmed',
+            'visibility_payload' => [
+                'operational_status' => 'flight_confirmed',
+                'operational_ready' => false,
+            ],
+        ]);
+
+        Operacion::query()->create([
+            'flight_request_id' => $flightRequest->id,
+            'provider_id' => $provider->id,
+            'aircraft_id' => $aircraft->id,
+            'status' => 'confirmada',
+        ]);
+
+        $this->withToken($adminToken)
+            ->putJson("/api/v1/admin/requests/{$flightRequest->id}/workflow", [
+                'workflow_status' => 'tracking_live',
+                'notes' => 'Intento sin sobrecargo',
+            ])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['workflow_status']);
+    }
+
+    public function test_provider_release_promotes_operational_ready_only_to_flight_confirmed_without_assigned_crew(): void
+    {
+        $this->seed();
+
+        $providerToken = $this->postJson('/api/v1/auth/login', [
+            'email' => 'proveedor@privateflights.test',
+            'password' => 'password',
+        ])->assertOk()->json('token');
+
+        $providerUser = Usuario::query()->where('email', 'proveedor@privateflights.test')->firstOrFail();
+        $provider = $providerUser->provider()->firstOrFail();
+        $aircraft = Aeronave::query()->where('provider_id', $provider->id)->firstOrFail();
+        $client = Usuario::query()->where('email', 'cliente@privateflights.test')->firstOrFail();
+
+        $flightRequest = SolicitudVuelo::query()->create([
+            'client_id' => $client->id,
+            'assigned_provider_id' => $provider->id,
+            'assigned_aircraft_id' => $aircraft->id,
+            'assigned_aircraft_model' => $aircraft->model,
+            'origin' => 'MMTO',
+            'destination' => 'MMMY',
+            'departure_datetime' => now()->addDay(),
+            'passengers' => 1,
+            'trip_type' => 'one_way',
+            'status' => 'confirmada',
+            'workflow_status' => 'payment_confirmed',
+            'visibility_payload' => [
+                'operational_status' => 'payment_confirmed',
+                'operational_ready' => false,
+            ],
+        ]);
+
+        $response = $this->withToken($providerToken)
+            ->putJson("/api/v1/proveedor/solicitudes/{$flightRequest->id}/release-provider", [
+                'provider_operational_release' => [
+                    'status' => 'operational_ready',
+                    'aircraft_id' => $aircraft->id,
+                    'aircraft_label' => $aircraft->model,
+                ],
+                'operational_ready' => true,
+            ])
+            ->assertOk();
+
+        $this->assertSame('flight_confirmed', $response->json('request.workflow_status'));
+        $this->assertSame('confirmada', $response->json('operation.status'));
+
+        $this->assertDatabaseHas('flight_requests', [
+            'id' => $flightRequest->id,
+            'workflow_status' => 'flight_confirmed',
+        ]);
+    }
+
+    public function test_provider_release_rejects_tracking_live_without_assigned_crew(): void
+    {
+        $this->seed();
+
+        $providerToken = $this->postJson('/api/v1/auth/login', [
+            'email' => 'proveedor@privateflights.test',
+            'password' => 'password',
+        ])->assertOk()->json('token');
+
+        $providerUser = Usuario::query()->where('email', 'proveedor@privateflights.test')->firstOrFail();
+        $provider = $providerUser->provider()->firstOrFail();
+        $aircraft = Aeronave::query()->where('provider_id', $provider->id)->firstOrFail();
+        $client = Usuario::query()->where('email', 'cliente@privateflights.test')->firstOrFail();
+
+        $flightRequest = SolicitudVuelo::query()->create([
+            'client_id' => $client->id,
+            'assigned_provider_id' => $provider->id,
+            'assigned_aircraft_id' => $aircraft->id,
+            'assigned_aircraft_model' => $aircraft->model,
+            'origin' => 'MMTO',
+            'destination' => 'MMMY',
+            'departure_datetime' => now()->addDay(),
+            'passengers' => 1,
+            'trip_type' => 'one_way',
+            'status' => 'confirmada',
+            'workflow_status' => 'flight_confirmed',
+            'visibility_payload' => [
+                'operational_status' => 'flight_confirmed',
+                'operational_ready' => false,
+            ],
+        ]);
+
+        $this->withToken($providerToken)
+            ->putJson("/api/v1/proveedor/solicitudes/{$flightRequest->id}/release-provider", [
+                'provider_operational_release' => [
+                    'status' => 'operational_ready',
+                    'aircraft_id' => $aircraft->id,
+                    'aircraft_label' => $aircraft->model,
+                ],
+                'workflow_status' => 'tracking_live',
+                'operational_ready' => true,
+            ])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['workflow_status']);
     }
 
     public function test_preview_quote_applies_iva_only_to_taxable_flight_amount(): void

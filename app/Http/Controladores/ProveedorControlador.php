@@ -23,6 +23,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 
 class ProveedorControlador extends ControladorBase
 {
@@ -713,10 +714,28 @@ class ProveedorControlador extends ControladorBase
             'crew_overall_status' => $crewOverallStatus,
         ];
         $releaseStatus = Str::lower(trim((string) ($release['status'] ?? $data['operational_status'] ?? 'pending')));
+        $currentWorkflowStatus = $flightRequest->workflow_status;
+        $existingOperation = Operacion::query()
+            ->where('flight_request_id', $flightRequest->id)
+            ->where('provider_id', $providerId)
+            ->latest('id')
+            ->first();
+        $operationHasAssignedCrew = (bool) $existingOperation?->sobrecargo_user_id;
         $workflowStatus = $this->normalizeReleaseWorkflowStatus(
             $data['workflow_status'] ?? $data['status'] ?? $data['state'] ?? null,
-            $releaseStatus
+            $releaseStatus,
+            $currentWorkflowStatus,
+            $operationHasAssignedCrew,
         );
+
+        if (
+            Str::lower(trim((string) $workflowStatus)) === 'tracking_live'
+            && ! $operationHasAssignedCrew
+        ) {
+            throw ValidationException::withMessages([
+                'workflow_status' => 'Asigna primero la sobrecargo antes de mover el vuelo a tracking en vivo.',
+            ]);
+        }
 
         $result = DB::transaction(function () use ($request, $flightRequest, $providerId, $release, $releaseStatus, $workflowStatus, $data) {
             $visibilityPayload = is_array($flightRequest->visibility_payload) ? $flightRequest->visibility_payload : [];
@@ -743,7 +762,7 @@ class ProveedorControlador extends ControladorBase
                     'operational_status' => $releaseStatus,
                     'aircraft_confirmed' => (bool) ($data['aircraft_confirmed'] ?? false),
                     'crew_confirmed' => (bool) ($data['crew_confirmed'] ?? false),
-                    'operational_ready' => (bool) ($data['operational_ready'] ?? false),
+                    'operational_ready' => (bool) ($data['operational_ready'] ?? ($releaseStatus === 'operational_ready')),
                 ],
             ]);
             $flightRequest->save();
@@ -1290,15 +1309,25 @@ class ProveedorControlador extends ControladorBase
         };
     }
 
-    private function normalizeReleaseWorkflowStatus(?string $workflowStatus, string $releaseStatus): ?string
+    private function normalizeReleaseWorkflowStatus(
+        ?string $workflowStatus,
+        string $releaseStatus,
+        ?string $currentWorkflowStatus = null,
+        bool $operationHasAssignedCrew = false
+    ): ?string
     {
         $normalizedWorkflowStatus = Str::lower(trim((string) $workflowStatus));
         if ($normalizedWorkflowStatus !== '') {
             return $normalizedWorkflowStatus;
         }
 
+        $normalizedCurrentWorkflowStatus = Str::lower(trim((string) $currentWorkflowStatus));
+
         return match ($releaseStatus) {
-            'operational_ready' => 'tracking_live',
+            'operational_ready' => $operationHasAssignedCrew
+                && in_array($normalizedCurrentWorkflowStatus, ['flight_confirmed', 'vuelo confirmado', 'tracking_live', 'tracking en vivo'], true)
+                    ? 'tracking_live'
+                    : 'flight_confirmed',
             default => null,
         };
     }

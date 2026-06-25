@@ -6,6 +6,7 @@ use App\Http\Controladores\ControladorBase;
 use App\Modelos\AccessPayment;
 use App\Modelos\Usuario;
 use App\Servicios\Billing\BillingPlanServicio;
+use App\Servicios\Pagos\PaymentFeeCalculationServicio;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -19,18 +20,22 @@ use Stripe\Subscription as StripeSubscription;
 
 class ClientAccessBillingControlador extends ControladorBase
 {
-    public function __construct(private readonly BillingPlanServicio $billingPlanServicio)
-    {
+    public function __construct(
+        private readonly BillingPlanServicio $billingPlanServicio,
+        private readonly PaymentFeeCalculationServicio $paymentFeeCalculationServicio,
+    ) {
     }
 
     public function status(Request $request)
     {
         $user = $request->user()->fresh(['demo', 'activeSuscripcion.plan']);
         $latestPayment = $this->latestPaymentForUser($user);
+        $paymentPreview = $this->resolveAccessPaymentPreview();
 
         return $this->ok([
-            'access' => $this->buildAccessPayload($user, $latestPayment),
-            'latest_payment' => $latestPayment,
+            'access' => $this->buildAccessPayload($user, $latestPayment, $paymentPreview),
+            'latest_payment' => $this->serializeAccessPayment($latestPayment),
+            'payment_preview' => $paymentPreview,
         ]);
     }
 
@@ -65,8 +70,11 @@ class ClientAccessBillingControlador extends ControladorBase
         $plan = $this->billingPlanServicio->findActiveByCode(BillingPlanServicio::CLIENT_ACCESS_CODE);
         abort_if(! $plan, 404, 'No encontramos el plan de acceso cliente.');
 
-        $amount = (float) ($plan->amount ?: $plan->price ?: 0);
-        abort_if($amount <= 0, 422, 'El plan de acceso cliente no tiene un monto valido.');
+        $baseAmount = (float) ($plan->amount ?: $plan->price ?: 0);
+        abort_if($baseAmount <= 0, 422, 'El plan de acceso cliente no tiene un monto valido.');
+
+        $pricing = $this->paymentFeeCalculationServicio->membershipBreakdown($baseAmount);
+        $amount = (float) $pricing['total_amount'];
 
         Stripe::setApiKey((string) config('services.stripe.secret'));
 
@@ -78,6 +86,7 @@ class ClientAccessBillingControlador extends ControladorBase
             currency: strtoupper((string) ($plan->currency ?: 'USD')),
             periodStart: $periodStart,
             periodEnd: $periodEnd,
+            pricing: $pricing,
         );
 
         $successUrl = $data['success_url']
@@ -116,6 +125,7 @@ class ClientAccessBillingControlador extends ControladorBase
         $payment->update([
             'provider_checkout_id' => $session->id,
             'gateway_response' => [
+                'pricing' => $pricing,
                 'source' => 'client_access_subscription_checkout_created',
                 'checkout_url' => $session->url,
                 'stripe_payload' => json_decode(json_encode($session), true),
@@ -129,7 +139,7 @@ class ClientAccessBillingControlador extends ControladorBase
         ]);
 
         return $this->ok([
-            'payment' => $payment->fresh('billingPlan'),
+            'payment' => $this->serializeAccessPayment($payment->fresh('billingPlan')),
             'checkout_url' => $session->url,
             'checkout_session_id' => $session->id,
         ], 201);
@@ -183,7 +193,7 @@ class ClientAccessBillingControlador extends ControladorBase
         $freshUser = $request->user()->fresh();
 
         return $this->ok([
-            'payment' => $payment->fresh('billingPlan'),
+            'payment' => $this->serializeAccessPayment($payment->fresh('billingPlan')),
             'access' => $this->buildAccessPayload($freshUser),
         ]);
     }
@@ -297,13 +307,6 @@ class ClientAccessBillingControlador extends ControladorBase
 
     private function buildCheckoutLineItem($plan, float $amount): array
     {
-        if ($plan->stripe_price_id) {
-            return [
-                'price' => $plan->stripe_price_id,
-                'quantity' => 1,
-            ];
-        }
-
         return [
             'price_data' => [
                 'currency' => strtolower((string) ($plan->currency ?: 'USD')),
@@ -320,8 +323,15 @@ class ClientAccessBillingControlador extends ControladorBase
         ];
     }
 
-    private function createPendingPayment(int $userId, int $planId, float $amount, string $currency, Carbon $periodStart, Carbon $periodEnd): AccessPayment
-    {
+    private function createPendingPayment(
+        int $userId,
+        int $planId,
+        float $amount,
+        string $currency,
+        Carbon $periodStart,
+        Carbon $periodEnd,
+        array $pricing,
+    ): AccessPayment {
         return AccessPayment::create([
             'user_id' => $userId,
             'billing_plan_id' => $planId,
@@ -331,6 +341,9 @@ class ClientAccessBillingControlador extends ControladorBase
             'billing_period_end' => $periodEnd->toDateString(),
             'status' => 'pending',
             'provider' => 'stripe',
+            'gateway_response' => [
+                'pricing' => $pricing,
+            ],
         ]);
     }
 
@@ -342,13 +355,45 @@ class ClientAccessBillingControlador extends ControladorBase
         return [$start, $end];
     }
 
-    private function buildAccessPayload(Usuario $user, ?AccessPayment $latestPayment = null): array
+    private function buildAccessPayload(
+        Usuario $user,
+        ?AccessPayment $latestPayment = null,
+        ?array $paymentPreview = null,
+    ): array
     {
         $access = $user->accessStatus()['commercial_access'];
 
         return array_merge($access, [
-            'latest_payment' => $latestPayment ?? $this->latestPaymentForUser($user),
+            'latest_payment' => $this->serializeAccessPayment($latestPayment ?? $this->latestPaymentForUser($user)),
+            'payment_preview' => $paymentPreview ?? $this->resolveAccessPaymentPreview(),
         ]);
+    }
+
+    private function resolveAccessPaymentPreview(): ?array
+    {
+        $plan = $this->billingPlanServicio->findActiveByCode(BillingPlanServicio::CLIENT_ACCESS_CODE);
+        if (! $plan) {
+            return null;
+        }
+
+        $baseAmount = (float) ($plan->amount ?: $plan->price ?: 0);
+        if ($baseAmount <= 0) {
+            return null;
+        }
+
+        $pricing = $this->paymentFeeCalculationServicio->membershipBreakdown($baseAmount);
+
+        return [
+            ...$pricing,
+            'currency' => strtoupper((string) ($plan->currency ?: 'USD')),
+            'billing_plan' => [
+                'id' => $plan->id,
+                'code' => $plan->code,
+                'name' => $plan->name,
+                'amount' => $plan->amount,
+                'currency' => $plan->currency,
+            ],
+        ];
     }
 
     private function latestPaymentForUser(Usuario $user): ?AccessPayment
@@ -358,6 +403,57 @@ class ClientAccessBillingControlador extends ControladorBase
             ->where('user_id', $user->id)
             ->latest('id')
             ->first();
+    }
+
+    private function serializeAccessPayment(?AccessPayment $payment): ?array
+    {
+        if (! $payment) {
+            return null;
+        }
+
+        $gatewayResponse = is_array($payment->gateway_response) ? $payment->gateway_response : [];
+        $storedPricing = is_array($gatewayResponse['pricing'] ?? null) ? $gatewayResponse['pricing'] : [];
+        $baseAmount = (float) ($storedPricing['base_amount'] ?? ($payment->billingPlan?->amount ?? $payment->billingPlan?->price ?? $payment->amount ?? 0));
+        $stripeFee = (float) ($storedPricing['stripe_fee'] ?? max(round(((float) $payment->amount) - $baseAmount, 2), 0));
+        $administrativeFee = (float) ($storedPricing['administrative_fee'] ?? 0);
+        $totalAmount = (float) ($storedPricing['total_amount'] ?? ($payment->amount ?? ($baseAmount + $stripeFee + $administrativeFee)));
+
+        return [
+            'id' => $payment->id,
+            'user_id' => $payment->user_id,
+            'billing_plan_id' => $payment->billing_plan_id,
+            'amount' => round((float) $payment->amount, 2),
+            'base_amount' => round($baseAmount, 2),
+            'stripe_fee' => round($stripeFee, 2),
+            'administrative_fee' => round($administrativeFee, 2),
+            'total_amount' => round($totalAmount, 2),
+            'currency' => $payment->currency,
+            'status' => $payment->status,
+            'provider' => $payment->provider,
+            'provider_payment_id' => $payment->provider_payment_id,
+            'provider_invoice_id' => $payment->provider_invoice_id,
+            'provider_subscription_id' => $payment->provider_subscription_id,
+            'provider_customer_id' => $payment->provider_customer_id,
+            'provider_checkout_id' => $payment->provider_checkout_id,
+            'card_brand' => $payment->card_brand,
+            'card_last4' => $payment->card_last4,
+            'billing_period_start' => $payment->billing_period_start,
+            'billing_period_end' => $payment->billing_period_end,
+            'paid_at' => $payment->paid_at,
+            'failure_reason' => $payment->failure_reason,
+            'retry_count' => $payment->retry_count,
+            'grace_period_ends_at' => $payment->grace_period_ends_at,
+            'billing_plan' => $payment->billingPlan ? [
+                'id' => $payment->billingPlan->id,
+                'code' => $payment->billingPlan->code,
+                'name' => $payment->billingPlan->name,
+                'amount' => $payment->billingPlan->amount,
+                'currency' => $payment->billingPlan->currency,
+            ] : null,
+            'gateway_response' => $gatewayResponse,
+            'created_at' => $payment->created_at,
+            'updated_at' => $payment->updated_at,
+        ];
     }
 
     private function syncCheckoutSubscriptionStatus(AccessPayment $payment, string $sessionId): AccessPayment
@@ -394,6 +490,7 @@ class ClientAccessBillingControlador extends ControladorBase
             : ($payment->billing_period_end ? Carbon::parse($payment->billing_period_end)->endOfDay() : now()->addMonthNoOverflow()->endOfDay());
 
         $payload = [
+            'pricing' => data_get($payment->gateway_response, 'pricing', []),
             'checkout_session' => json_decode(json_encode($session), true),
             'subscription' => $subscription ? json_decode(json_encode($subscription), true) : null,
             'invoice' => $invoicePayload ? json_decode(json_encode($invoicePayload), true) : null,

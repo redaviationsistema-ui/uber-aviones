@@ -5,6 +5,7 @@ namespace App\Http\Controladores;
 use App\Modelos\Pago;
 use App\Modelos\Reserva;
 use App\Modelos\SolicitudVuelo;
+use App\Servicios\Pagos\PaymentFeeCalculationServicio;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -15,6 +16,10 @@ use Stripe\Stripe;
 
 class StripePagoControlador extends ControladorBase
 {
+    public function __construct(private readonly PaymentFeeCalculationServicio $paymentFeeCalculationServicio)
+    {
+    }
+
     public function confirmFlightRequestPayment(Request $request)
     {
         if ($response = $this->ensureStripeIsConfigured()) {
@@ -92,7 +97,8 @@ class StripePagoControlador extends ControladorBase
         $flightRequest = SolicitudVuelo::with(['quotes', 'reservation'])->findOrFail($data['flight_request_id']);
         abort_if($flightRequest->client_id !== $request->user()->id, 403, 'No puedes pagar esta solicitud.');
 
-        $amount = $this->resolveFlightRequestAmount($flightRequest);
+        $pricingBreakdown = $this->resolveFlightRequestPricingBreakdown($flightRequest);
+        $amount = (float) ($pricingBreakdown['total_amount'] ?? $this->resolveFlightRequestAmount($flightRequest));
         abort_if($amount <= 0, 422, 'La solicitud no tiene un monto valido para cobrar.');
 
         if (in_array($flightRequest->payment_status, ['paid', 'bank_confirmed'], true)) {
@@ -136,18 +142,20 @@ class StripePagoControlador extends ControladorBase
             ],
         ]);
 
-        DB::transaction(function () use ($request, $flightRequest, $reservation, $session, $amount) {
+        DB::transaction(function () use ($request, $flightRequest, $reservation, $session, $amount, $pricingBreakdown) {
             $flightRequest->update([
                 'payment_method' => 'card',
                 'payment_status' => 'pending',
                 'stripe_checkout_session_id' => $session->id,
                 'workflow_status' => 'pago pendiente',
                 'status' => 'reserved',
+                'final_price' => $amount,
+                'pricing_context' => $this->mergeFlightRequestPricingContext($flightRequest, $pricingBreakdown),
             ]);
 
             $reservation->update([
                 'status' => 'pending_payment',
-                'total_amount' => $reservation->total_amount ?: $amount,
+                'total_amount' => $amount,
                 'currency' => $reservation->currency ?: ($flightRequest->currency ?: 'USD'),
             ]);
 
@@ -167,6 +175,7 @@ class StripePagoControlador extends ControladorBase
                     'stripe_checkout_session_id' => $session->id,
                     'gateway_response' => [
                         'checkout_url' => $session->url,
+                        'pricing' => $pricingBreakdown,
                     ],
                 ],
             );
@@ -194,7 +203,8 @@ class StripePagoControlador extends ControladorBase
         $flightRequest = SolicitudVuelo::with(['quotes', 'reservation'])->findOrFail($data['flight_request_id']);
         abort_if($flightRequest->client_id !== $request->user()->id, 403, 'No puedes pagar esta solicitud.');
 
-        $amount = $this->resolveFlightRequestAmount($flightRequest);
+        $pricingBreakdown = $this->resolveFlightRequestPricingBreakdown($flightRequest);
+        $amount = (float) ($pricingBreakdown['total_amount'] ?? $this->resolveFlightRequestAmount($flightRequest));
         abort_if($amount <= 0, 422, 'La solicitud no tiene un monto valido para cobrar.');
 
         if (in_array($flightRequest->payment_status, ['paid', 'bank_confirmed'], true)) {
@@ -219,18 +229,20 @@ class StripePagoControlador extends ControladorBase
             ],
         ]);
 
-        DB::transaction(function () use ($request, $flightRequest, $reservation, $paymentIntent, $amount) {
+        DB::transaction(function () use ($request, $flightRequest, $reservation, $paymentIntent, $amount, $pricingBreakdown) {
             $flightRequest->update([
                 'payment_method' => 'card',
                 'payment_status' => 'pending',
                 'stripe_payment_intent_id' => $paymentIntent->id,
                 'workflow_status' => 'pago pendiente',
                 'status' => 'reserved',
+                'final_price' => $amount,
+                'pricing_context' => $this->mergeFlightRequestPricingContext($flightRequest, $pricingBreakdown),
             ]);
 
             $reservation->update([
                 'status' => 'pending_payment',
-                'total_amount' => $reservation->total_amount ?: $amount,
+                'total_amount' => $amount,
                 'currency' => $reservation->currency ?: ($flightRequest->currency ?: 'USD'),
             ]);
 
@@ -250,6 +262,7 @@ class StripePagoControlador extends ControladorBase
                     'stripe_payment_intent_id' => $paymentIntent->id,
                     'gateway_response' => [
                         'client_secret_available' => true,
+                        'pricing' => $pricingBreakdown,
                     ],
                 ],
             );
@@ -274,24 +287,27 @@ class StripePagoControlador extends ControladorBase
         $flightRequest = SolicitudVuelo::with(['quotes', 'reservation'])->findOrFail($data['flight_request_id']);
         abort_if($flightRequest->client_id !== $request->user()->id, 403, 'No puedes pagar esta solicitud.');
 
-        $amount = $this->resolveFlightRequestAmount($flightRequest);
+        $pricingBreakdown = $this->resolveFlightRequestPricingBreakdown($flightRequest);
+        $amount = (float) ($pricingBreakdown['total_amount'] ?? $this->resolveFlightRequestAmount($flightRequest));
         abort_if($amount <= 0, 422, 'La solicitud no tiene un monto valido para transferencia.');
 
         $reservation = $this->ensureReservationForFlightRequest($flightRequest, $request->user()->id);
 
         $reference = 'WIRE-'.Str::upper(Str::random(10));
 
-        DB::transaction(function () use ($request, $flightRequest, $reservation, $amount, $reference, $data) {
+        DB::transaction(function () use ($request, $flightRequest, $reservation, $amount, $reference, $data, $pricingBreakdown) {
             $flightRequest->update([
                 'payment_method' => 'wire',
                 'payment_status' => 'pending_bank_confirmation',
                 'workflow_status' => 'pago pendiente',
                 'status' => 'reserved',
+                'final_price' => $amount,
+                'pricing_context' => $this->mergeFlightRequestPricingContext($flightRequest, $pricingBreakdown),
             ]);
 
             $reservation->update([
                 'status' => 'pending_payment',
-                'total_amount' => $reservation->total_amount ?: $amount,
+                'total_amount' => $amount,
                 'currency' => $reservation->currency ?: ($flightRequest->currency ?: 'USD'),
             ]);
 
@@ -311,6 +327,7 @@ class StripePagoControlador extends ControladorBase
                     'gateway_response' => [
                         'contact_email' => $data['contact_email'] ?? $request->user()->email,
                         'reference' => $reference,
+                        'pricing' => $pricingBreakdown,
                     ],
                 ],
             );
@@ -337,10 +354,48 @@ class StripePagoControlador extends ControladorBase
         $pricingContext = is_array($flightRequest->pricing_context) ? $flightRequest->pricing_context : [];
 
         return (float) (
-            $flightRequest->final_price
+            $pricingContext['total_amount']
+            ?? $flightRequest->final_price
             ?: ($pricingContext['selected_card_price'] ?? 0)
+            ?: ($pricingContext['total'] ?? 0)
             ?: ($pricingContext['final_price'] ?? 0)
         );
+    }
+
+    private function resolveFlightRequestPricingBreakdown(SolicitudVuelo $flightRequest): array
+    {
+        $pricingContext = is_array($flightRequest->pricing_context) ? $flightRequest->pricing_context : [];
+        $flightCost = (float) (
+            $pricingContext['flight_cost']
+            ?? $pricingContext['billable_flight_cost']
+            ?? $pricingContext['base_amount']
+            ?? 0
+        );
+
+        if ($flightCost > 0) {
+            return $this->paymentFeeCalculationServicio->flightBreakdown($flightCost);
+        }
+
+        $totalAmount = (float) ($pricingContext['total_amount'] ?? $flightRequest->final_price ?? 0);
+
+        return [
+            'flight_cost' => round($flightCost, 2),
+            'base_amount' => round($flightCost, 2),
+            'stripe_fee' => 0.0,
+            'administrative_fee' => 0.0,
+            'total_amount' => round($totalAmount, 2),
+        ];
+    }
+
+    private function mergeFlightRequestPricingContext(SolicitudVuelo $flightRequest, array $pricingBreakdown): array
+    {
+        $pricingContext = is_array($flightRequest->pricing_context) ? $flightRequest->pricing_context : [];
+
+        return array_merge($pricingContext, $pricingBreakdown, [
+            'selected_card_price' => (float) $pricingBreakdown['total_amount'],
+            'total' => (float) $pricingBreakdown['total_amount'],
+            'final_price' => (float) $pricingBreakdown['total_amount'],
+        ]);
     }
 
     private function ensureReservationForFlightRequest(SolicitudVuelo $flightRequest, int $userId): Reserva
@@ -408,19 +463,23 @@ class StripePagoControlador extends ControladorBase
             ?? ''
         ));
 
-        DB::transaction(function () use ($flightRequest, $reservation, $paymentIntent, $brand) {
+        $pricingBreakdown = $this->resolveFlightRequestPricingBreakdown($flightRequest);
+
+        DB::transaction(function () use ($flightRequest, $reservation, $paymentIntent, $brand, $pricingBreakdown) {
             $flightRequest->update([
                 'payment_method' => 'card',
                 'payment_status' => 'paid',
                 'stripe_payment_intent_id' => $paymentIntent->id,
                 'workflow_status' => 'pago confirmado',
                 'status' => 'reserved',
+                'final_price' => (float) $pricingBreakdown['total_amount'],
+                'pricing_context' => $this->mergeFlightRequestPricingContext($flightRequest, $pricingBreakdown),
             ]);
 
             $reservation->update([
                 'status' => 'paid',
                 'confirmed_at' => $reservation->confirmed_at ?: now(),
-                'total_amount' => $reservation->total_amount ?: (((int) ($paymentIntent->amount ?? 0)) / 100),
+                'total_amount' => (float) $pricingBreakdown['total_amount'],
                 'currency' => $reservation->currency ?: strtoupper((string) ($paymentIntent->currency ?? $flightRequest->currency ?? 'USD')),
             ]);
 
@@ -442,6 +501,7 @@ class StripePagoControlador extends ControladorBase
                     'failure_reason' => null,
                     'gateway_response' => [
                         'brand' => $brand ?: null,
+                        'pricing' => $pricingBreakdown,
                         'payment_intent' => json_decode(json_encode($paymentIntent), true),
                     ],
                 ],

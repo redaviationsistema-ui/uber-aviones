@@ -118,7 +118,8 @@ class ReservaControlador extends ControladorBase
                     ->first();
 
                 $amount = (float) (
-                    $acceptedQuote?->total
+                    data_get($flightRequest->pricing_context, 'total_amount')
+                    ?? $acceptedQuote?->total
                     ?? $flightRequest->final_price
                     ?? data_get($flightRequest->pricing_context, 'final_price')
                     ?? data_get($flightRequest->pricing_context, 'total')
@@ -146,12 +147,14 @@ class ReservaControlador extends ControladorBase
             ]);
         }
 
+        $commissionBaseAmount = (float) (data_get($flightRequest->pricing_context, 'flight_cost') ?? $reservation->total_amount);
+
         Comision::firstOrCreate(
             ['reservation_id' => $reservation->id],
             [
                 'provider_id' => $reservation->provider_id,
-                'platform_fee' => round(((float) $reservation->total_amount) * 0.10, 2),
-                'provider_amount' => round(((float) $reservation->total_amount) * 0.90, 2),
+                'platform_fee' => round($commissionBaseAmount * 0.10, 2),
+                'provider_amount' => round($commissionBaseAmount * 0.90, 2),
                 'status' => 'held',
             ]
         );

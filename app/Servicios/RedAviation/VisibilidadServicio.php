@@ -88,6 +88,7 @@ class VisibilidadServicio
                     ? $this->aeronaveVisibleParaCliente($preferredMatch->aircraft, $solicitud->aircraft_type)['main_image']
                     : null),
             'quote_total' => $preferredMatch?->estimated_price
+                ?? $solicitud->pricing_context['total_amount']
                 ?? $solicitud->final_price
                 ?? $solicitud->pricing_context['total']
                 ?? $solicitud->pricing_context['final_price']
@@ -97,6 +98,10 @@ class VisibilidadServicio
             'operational_fee' => $solicitud->operational_fee,
             'priority_price' => $solicitud->priority_price,
             'final_price' => $solicitud->final_price,
+            'flight_cost' => data_get($solicitud->pricing_context, 'flight_cost'),
+            'stripe_fee' => data_get($solicitud->pricing_context, 'stripe_fee'),
+            'administrative_fee' => data_get($solicitud->pricing_context, 'administrative_fee'),
+            'total_amount' => data_get($solicitud->pricing_context, 'total_amount', $solicitud->final_price),
             'currency' => $solicitud->currency,
             'pricing_context' => $solicitud->pricing_context,
             'visibility_payload' => $visibilityPayload,
@@ -167,6 +172,7 @@ class VisibilidadServicio
             'aircraft_id' => $solicitud->assigned_aircraft_id ?? $match?->aircraft_id,
             'provider_id' => $solicitud->assigned_provider_id ?? $match?->provider_id,
             'quote_total' => $match?->estimated_price
+                ?? $solicitud->pricing_context['total_amount']
                 ?? $solicitud->final_price
                 ?? $solicitud->pricing_context['total']
                 ?? $solicitud->pricing_context['final_price']
@@ -175,6 +181,10 @@ class VisibilidadServicio
             'operational_fee' => $solicitud->operational_fee,
             'priority_price' => $solicitud->priority_price,
             'final_price' => $solicitud->final_price,
+            'flight_cost' => data_get($solicitud->pricing_context, 'flight_cost'),
+            'stripe_fee' => data_get($solicitud->pricing_context, 'stripe_fee'),
+            'administrative_fee' => data_get($solicitud->pricing_context, 'administrative_fee'),
+            'total_amount' => data_get($solicitud->pricing_context, 'total_amount', $solicitud->final_price),
             'currency' => $solicitud->currency,
             'pricing_context' => $solicitud->pricing_context,
             'visibility_payload' => $visibilityPayload,
@@ -251,6 +261,7 @@ class VisibilidadServicio
             'aircraft_id' => $solicitud->assigned_aircraft_id ?? $preferredMatch?->aircraft_id,
             'provider_id' => $solicitud->assigned_provider_id ?? $preferredMatch?->provider_id,
             'quote_total' => $preferredMatch?->estimated_price
+                ?? $solicitud->pricing_context['total_amount']
                 ?? $solicitud->final_price
                 ?? $solicitud->pricing_context['total']
                 ?? $solicitud->pricing_context['final_price']
@@ -259,6 +270,10 @@ class VisibilidadServicio
             'operational_fee' => $solicitud->operational_fee,
             'priority_price' => $solicitud->priority_price,
             'final_price' => $solicitud->final_price,
+            'flight_cost' => data_get($solicitud->pricing_context, 'flight_cost'),
+            'stripe_fee' => data_get($solicitud->pricing_context, 'stripe_fee'),
+            'administrative_fee' => data_get($solicitud->pricing_context, 'administrative_fee'),
+            'total_amount' => data_get($solicitud->pricing_context, 'total_amount', $solicitud->final_price),
             'currency' => $solicitud->currency,
             'pricing_context' => $solicitud->pricing_context,
             'visibility_payload' => $visibilityPayload,
