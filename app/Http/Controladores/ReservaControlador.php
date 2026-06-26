@@ -14,6 +14,7 @@ use App\Servicios\Contratos\DocuSignServicio;
 use Barryvdh\DomPDF\Facade\Pdf;
 use JsonException;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -24,13 +25,26 @@ class ReservaControlador extends ControladorBase
 {
     public function index(Request $request)
     {
-        $query = Reserva::with(['quote', 'aircraft', 'provider.user'])->latest();
+        $query = Reserva::with([
+            'quote',
+            'aircraft',
+            'provider.user',
+            'flightRequest',
+            'payments' => fn ($payments) => $payments->latest('id'),
+        ])->latest();
 
         if ($request->user()->hasRole('client') && ! $request->user()->hasRole('admin')) {
             $query->where('client_id', $request->user()->id);
         }
 
-        return $this->ok(['reservations' => $query->paginate(20)]);
+        $reservations = $query->paginate(20);
+        $reservations->setCollection(
+            $reservations->getCollection()->map(
+                fn (Reserva $reservation) => $this->normalizeStripePendingReservationState($reservation)
+            )
+        );
+
+        return $this->ok(['reservations' => $reservations]);
     }
 
     public function providerIndex(Request $request)
@@ -58,7 +72,11 @@ class ReservaControlador extends ControladorBase
             abort_if($reservation->provider_id !== $request->user()->provider?->id, 403);
         }
 
-        return $this->ok(['reservation' => $reservation->load(['quote', 'aircraft', 'provider', 'legs', 'contract', 'review', 'payments'])]);
+        return $this->ok([
+            'reservation' => $this->normalizeStripePendingReservationState(
+                $reservation->load(['quote', 'aircraft', 'provider', 'flightRequest', 'legs', 'contract', 'review', 'payments'])
+            ),
+        ]);
     }
 
     public function store(Request $request)
@@ -162,6 +180,49 @@ class ReservaControlador extends ControladorBase
         $this->writeAudit($request, 'create', 'reservations', 'Reserva creada o recuperada para el flujo del cliente.');
 
         return $this->ok(['reservation' => $reservation->load(['quote', 'aircraft', 'contract'])], 201);
+    }
+
+    private function normalizeStripePendingReservationState(Reserva $reservation): Reserva
+    {
+        $latestPayment = $reservation->payments->sortByDesc('id')->first();
+        $flightRequest = $reservation->flightRequest;
+
+        if (! $latestPayment || ! $flightRequest) {
+            return $reservation;
+        }
+
+        $paymentStatus = strtolower(trim((string) $latestPayment->status));
+        $provider = strtolower(trim((string) $latestPayment->provider));
+        $hasPaidSignal = ! empty($latestPayment->paid_at)
+            && $provider === 'stripe'
+            && in_array($paymentStatus, ['pending', 'processing', ''], true);
+
+        if (! $hasPaidSignal) {
+            return $reservation;
+        }
+
+        DB::transaction(function () use ($reservation, $flightRequest, $latestPayment) {
+            $flightRequest->forceFill([
+                'payment_status' => 'paid',
+                'payment_method' => trim((string) $flightRequest->payment_method) !== '' ? $flightRequest->payment_method : 'stripe_checkout',
+                'workflow_status' => 'pago confirmado',
+                'updated_at' => now(),
+            ])->save();
+
+            $reservation->forceFill([
+                'status' => 'paid',
+                'confirmed_at' => $reservation->confirmed_at ?: $latestPayment->paid_at ?: now(),
+                'updated_at' => now(),
+            ])->save();
+
+            $latestPayment->forceFill([
+                'status' => 'paid',
+                'failure_reason' => null,
+                'updated_at' => now(),
+            ])->save();
+        });
+
+        return $reservation->fresh(['quote', 'aircraft', 'provider.user', 'flightRequest', 'payments']);
     }
 
     public function showContract(Request $request, mixed $reservation, DocuSignServicio $docuSignServicio)
