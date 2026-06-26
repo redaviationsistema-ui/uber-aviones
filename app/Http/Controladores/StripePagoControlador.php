@@ -30,6 +30,8 @@ class StripePagoControlador extends ControladorBase
         $data = $request->validate([
             'flight_request_id' => ['required', 'integer', 'exists:flight_requests,id'],
             'payment_intent_id' => ['nullable', 'string', 'max:255'],
+            'checkout_session_id' => ['nullable', 'string', 'max:255'],
+            'payment_method' => ['nullable', 'string', 'max:120'],
             'brand' => ['nullable', 'string', 'max:120'],
         ]);
 
@@ -44,11 +46,44 @@ class StripePagoControlador extends ControladorBase
 
         $reservation = $this->ensureReservationForFlightRequest($flightRequest, $request->user()->id);
 
+        $checkoutSessionId = trim((string) ($data['checkout_session_id'] ?? ''));
+        $paymentMethod = trim((string) ($data['payment_method'] ?? ''));
+
+        if ($checkoutSessionId !== '' || $paymentMethod === 'stripe_checkout') {
+            $payment = $this->findStoredReservationStripePayment(
+                reservationId: (int) $reservation->id,
+                flightRequestId: (int) $flightRequest->id,
+                sessionId: $checkoutSessionId,
+            );
+
+            if ($payment) {
+                $checkoutSessionId = $checkoutSessionId !== '' ? $checkoutSessionId : trim((string) $payment->stripe_checkout_session_id);
+
+                if ($checkoutSessionId !== '') {
+                    $this->syncCheckoutSessionPayment($payment, $checkoutSessionId);
+                    $payment->refresh();
+                }
+
+                if ($payment->status !== 'paid') {
+                    $this->finalizePendingStoredStripePayment($payment);
+                    $payment->refresh();
+                }
+            }
+
+            $reservation->refresh()->load(['contract', 'payments', 'flightRequest']);
+            $flightRequest->refresh();
+
+            if ($flightRequest->payment_status === 'paid' || $reservation->status === 'paid') {
+                return $this->confirmedReservationPaymentResponse($flightRequest, $reservation);
+            }
+        }
+
         return $this->finalizeSuccessfulPayment(
             flightRequest: $flightRequest,
             reservation: $reservation,
             paymentIntentId: $data['payment_intent_id'] ?? null,
             brandOverride: $data['brand'] ?? null,
+            paymentMethod: $paymentMethod !== '' ? $paymentMethod : 'card',
         );
     }
 
@@ -68,17 +103,52 @@ class StripePagoControlador extends ControladorBase
         $data = $request->validate([
             'payment_intent_id' => ['nullable', 'string', 'max:255'],
             'flight_request_id' => ['nullable', 'integer', 'exists:flight_requests,id'],
+            'checkout_session_id' => ['nullable', 'string', 'max:255'],
+            'payment_method' => ['nullable', 'string', 'max:120'],
             'brand' => ['nullable', 'string', 'max:120'],
         ]);
 
         $flightRequest = $reservation->flightRequest;
         abort_if(! $flightRequest, 404, 'La reserva no tiene una solicitud de vuelo asociada.');
 
+        $checkoutSessionId = trim((string) ($data['checkout_session_id'] ?? ''));
+        $paymentMethod = trim((string) ($data['payment_method'] ?? ''));
+
+        if ($checkoutSessionId !== '' || $paymentMethod === 'stripe_checkout') {
+            $payment = $this->findStoredReservationStripePayment(
+                reservationId: (int) $reservation->id,
+                flightRequestId: (int) $flightRequest->id,
+                sessionId: $checkoutSessionId,
+            );
+
+            if ($payment) {
+                $checkoutSessionId = $checkoutSessionId !== '' ? $checkoutSessionId : trim((string) $payment->stripe_checkout_session_id);
+
+                if ($checkoutSessionId !== '') {
+                    $this->syncCheckoutSessionPayment($payment, $checkoutSessionId);
+                    $payment->refresh();
+                }
+
+                if ($payment->status !== 'paid') {
+                    $this->finalizePendingStoredStripePayment($payment);
+                    $payment->refresh();
+                }
+            }
+
+            $reservation->refresh()->load(['contract', 'payments', 'flightRequest']);
+            $flightRequest->refresh();
+
+            if ($flightRequest->payment_status === 'paid' || $reservation->status === 'paid') {
+                return $this->confirmedReservationPaymentResponse($flightRequest, $reservation);
+            }
+        }
+
         return $this->finalizeSuccessfulPayment(
             flightRequest: $flightRequest,
             reservation: $reservation,
             paymentIntentId: $data['payment_intent_id'] ?? null,
             brandOverride: $data['brand'] ?? null,
+            paymentMethod: $paymentMethod !== '' ? $paymentMethod : 'card',
         );
     }
 
@@ -516,6 +586,27 @@ class StripePagoControlador extends ControladorBase
             ->first();
     }
 
+    private function findStoredReservationStripePayment(
+        int $reservationId = 0,
+        int $flightRequestId = 0,
+        string $sessionId = '',
+    ): ?Pago {
+        return Pago::query()
+            ->with(['reservation.flightRequest', 'flightRequest'])
+            ->where('payment_type', 'reservation')
+            ->where('provider', 'stripe')
+            ->when($reservationId > 0, fn ($query) => $query->where('reservation_id', $reservationId))
+            ->when($flightRequestId > 0, fn ($query) => $query->where('flight_request_id', $flightRequestId))
+            ->when(trim($sessionId) !== '', function ($query) use ($sessionId) {
+                $query->where(function ($nestedQuery) use ($sessionId) {
+                    $nestedQuery->where('stripe_checkout_session_id', trim($sessionId))
+                        ->orWhere('transaction_reference', trim($sessionId));
+                });
+            })
+            ->latest('id')
+            ->first();
+    }
+
     private function finalizePendingStoredStripePayment(Pago $payment): void
     {
         $paymentIntentId = trim((string) $payment->stripe_payment_intent_id);
@@ -729,6 +820,25 @@ class StripePagoControlador extends ControladorBase
                 'status' => 'paid',
                 'brand' => $brand ?: data_get($paymentOrder, 'gateway_response.brand'),
                 'payment_intent_id' => $paymentIntent->id,
+            ],
+            'payment_status' => 'paid',
+            'workflow_status' => 'pago confirmado',
+        ]);
+    }
+
+    private function confirmedReservationPaymentResponse(SolicitudVuelo $flightRequest, Reserva $reservation): JsonResponse
+    {
+        $reservation = $reservation->fresh(['contract', 'payments', 'flightRequest']);
+        $paymentOrder = $reservation?->payments?->sortByDesc('id')->first();
+
+        return $this->ok([
+            'reservation' => $reservation,
+            'reservation_id' => $reservation?->id,
+            'flight_request_id' => $flightRequest->id,
+            'payment_order' => [
+                'status' => 'paid',
+                'brand' => data_get($paymentOrder, 'gateway_response.brand'),
+                'payment_intent_id' => $paymentOrder?->stripe_payment_intent_id,
             ],
             'payment_status' => 'paid',
             'workflow_status' => 'pago confirmado',
