@@ -145,7 +145,7 @@ class StripePagoControlador extends ControladorBase
 
         DB::transaction(function () use ($request, $flightRequest, $reservation, $session, $amount, $pricingBreakdown) {
             $flightRequest->update([
-                'payment_method' => 'card',
+                'payment_method' => 'stripe_checkout',
                 'payment_status' => 'pending',
                 'stripe_checkout_session_id' => $session->id,
                 'workflow_status' => 'pago pendiente',
@@ -370,8 +370,10 @@ class StripePagoControlador extends ControladorBase
             ->where('payment_type', 'reservation')
             ->where('provider', 'stripe')
             ->when($sessionId !== '', function ($query) use ($sessionId) {
-                $query->where('stripe_checkout_session_id', $sessionId)
-                    ->orWhere('transaction_reference', $sessionId);
+                $query->where(function ($nestedQuery) use ($sessionId) {
+                    $nestedQuery->where('stripe_checkout_session_id', $sessionId)
+                        ->orWhere('transaction_reference', $sessionId);
+                });
             })
             ->latest('id')
             ->first();
@@ -417,8 +419,10 @@ class StripePagoControlador extends ControladorBase
             ->where('provider', 'stripe')
             ->where('status', 'pending')
             ->when($sessionId !== '', function ($query) use ($sessionId) {
-                $query->where('stripe_checkout_session_id', $sessionId)
-                    ->orWhere('transaction_reference', $sessionId);
+                $query->where(function ($nestedQuery) use ($sessionId) {
+                    $nestedQuery->where('stripe_checkout_session_id', $sessionId)
+                        ->orWhere('transaction_reference', $sessionId);
+                });
             })
             ->latest('id')
             ->first();
@@ -442,6 +446,8 @@ class StripePagoControlador extends ControladorBase
             'checkout' => ['nullable', 'string', 'max:32'],
             'session_id' => ['nullable', 'string', 'max:255'],
             'checkout_session_id' => ['nullable', 'string', 'max:255'],
+            'reservation_id' => ['nullable', 'integer'],
+            'flight_request_id' => ['nullable', 'integer'],
         ]);
 
         $checkout = strtolower((string) ($data['checkout'] ?? 'success'));
@@ -451,6 +457,8 @@ class StripePagoControlador extends ControladorBase
             'checkout' => $checkout === 'cancelled' ? 'cancel' : $checkout,
             'session_id' => $sessionId,
             'refresh' => 'reservation_payment',
+            'reservation_id' => $data['reservation_id'] ?? null,
+            'flight_request_id' => $data['flight_request_id'] ?? null,
         ]);
 
         return redirect()->away('redsky://cliente/pago?'.$query);
@@ -542,6 +550,7 @@ class StripePagoControlador extends ControladorBase
         Reserva $reservation,
         ?string $paymentIntentId = null,
         ?string $brandOverride = null,
+        string $paymentMethod = 'card',
     ): JsonResponse {
         $paymentIntentId = trim((string) (
             $paymentIntentId
@@ -572,9 +581,9 @@ class StripePagoControlador extends ControladorBase
 
         $pricingBreakdown = $this->resolveFlightRequestPricingBreakdown($flightRequest);
 
-        DB::transaction(function () use ($flightRequest, $reservation, $paymentIntent, $brand, $pricingBreakdown) {
+        DB::transaction(function () use ($flightRequest, $reservation, $paymentIntent, $brand, $pricingBreakdown, $paymentMethod) {
             $flightRequest->update([
-                'payment_method' => 'card',
+                'payment_method' => $paymentMethod,
                 'payment_status' => 'paid',
                 'stripe_payment_intent_id' => $paymentIntent->id,
                 'workflow_status' => 'pago confirmado',
@@ -676,6 +685,7 @@ class StripePagoControlador extends ControladorBase
                     ?? data_get($session, 'payment_intent.charges.data.0.payment_method_details.card.brand')
                     ?? ''
                 ),
+                paymentMethod: 'stripe_checkout',
             );
 
             return;

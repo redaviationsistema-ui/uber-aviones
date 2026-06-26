@@ -147,7 +147,7 @@ class StripeWebhookControlador extends ControladorBase
             $reservation = $flightRequest->reservation()->latest('id')->first();
 
             $flightRequest->update([
-                'payment_method' => 'card',
+                'payment_method' => 'stripe_checkout',
                 'payment_status' => 'paid',
                 'stripe_checkout_session_id' => $session->id,
                 'stripe_payment_intent_id' => $session->payment_intent ?? null,
