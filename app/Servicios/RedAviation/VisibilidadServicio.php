@@ -31,6 +31,18 @@ class VisibilidadServicio
             : ($solicitud->relationLoaded('operaciones')
                 ? $solicitud->operaciones->sortByDesc('id')->first()
                 : $solicitud->operaciones()->latest('id')->first());
+        $reservation = $solicitud->relationLoaded('reservation')
+            ? $solicitud->reservation
+            : $solicitud->reservation()->with(['contract', 'latestPayment'])->first();
+        $latestPayment = $reservation?->relationLoaded('latestPayment')
+            ? $reservation->latestPayment
+            : ($reservation?->relationLoaded('payments')
+                ? $reservation->payments->sortByDesc('id')->first()
+                : $reservation?->latestPayment()->first());
+        $contract = $reservation?->contract;
+        $contractReadyForPayment = in_array(strtolower((string) ($contract?->status ?? '')), ['signed', 'completed'], true)
+            || strtolower((string) ($contract?->docusign_status ?? '')) === 'completed'
+            || filled($contract?->signed_pdf_path);
 
         $timeline = $includeTimeline && $operacion
             ? ($operacion->relationLoaded('timeline')
@@ -109,7 +121,34 @@ class VisibilidadServicio
             'legs' => $this->visibleLegs($solicitud),
             'notes' => $solicitud->notes,
             'status' => $solicitud->workflow_status ?? $solicitud->status,
+            'workflow_status' => $solicitud->workflow_status ?? $solicitud->status,
+            'contract_status' => $contract?->status,
+            'payment_status' => $solicitud->payment_status
+                ?? $latestPayment?->status
+                ?? $reservation?->status,
+            'reservation_id' => $reservation?->id,
             'summary_only' => $summaryOnly,
+            'reservation' => $reservation ? [
+                'id' => $reservation->id,
+                'status' => $reservation->status,
+                'contract_status' => $contract?->status,
+                'payment_status' => $solicitud->payment_status ?? $latestPayment?->status,
+            ] : null,
+            'contract' => $contract ? [
+                'id' => $contract->id,
+                'status' => $contract->status,
+                'docusign_status' => $contract->docusign_status,
+                'signed_at' => $contract->signed_at,
+                'completed_at' => $contract->completed_at,
+                'signed_pdf_url' => filled($contract->signed_pdf_path)
+                    ? route('cliente.contratos.pdf-firmado', ['contract' => $contract->id])
+                    : null,
+                'frontend_state' => [
+                    'contract_id' => $contract->id,
+                    'ui_status' => strtolower((string) ($contract->docusign_status ?: $contract->status ?: 'generated')),
+                    'ready_for_payment' => $contractReadyForPayment,
+                ],
+            ] : null,
             'chat' => $chat ? [
                 'id' => $chat->id,
                 'status' => $chat->status,

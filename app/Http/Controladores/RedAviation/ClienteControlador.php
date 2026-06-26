@@ -852,6 +852,9 @@ class ClienteControlador extends ControladorBase
                 'latestOperation:id,flight_request_id,status',
                 'chatsProtegidos:id,flight_request_id,status',
                 'legs:id,flight_request_id,leg_order,origin,destination,departure_datetime,arrival_datetime,passengers,distance_km',
+                'reservation:id,flight_request_id,status',
+                'reservation.contract:id,reservation_id,status,docusign_status,signed_at,completed_at,signed_pdf_path',
+                'reservation.latestPayment:id,reservation_id,status,provider,stripe_checkout_session_id,stripe_payment_intent_id',
             ])
             ->where('client_id', $request->user()->id)
             ->latest()
@@ -889,6 +892,9 @@ class ClienteControlador extends ControladorBase
                     'latestOperation:id,flight_request_id,status',
                     'latestOperation.timeline:id,operation_id,status,title,description,created_at',
                     'legs:id,flight_request_id,leg_order,origin,destination,departure_datetime,arrival_datetime,passengers,distance_km',
+                    'reservation:id,flight_request_id,status',
+                    'reservation.contract:id,reservation_id,status,docusign_status,signed_at,completed_at,signed_pdf_path',
+                    'reservation.latestPayment:id,reservation_id,status,provider,stripe_checkout_session_id,stripe_payment_intent_id',
                 ])
             ),
         ]);
