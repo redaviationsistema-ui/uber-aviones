@@ -122,17 +122,24 @@ class VisibilidadServicio
             'notes' => $solicitud->notes,
             'status' => $solicitud->workflow_status ?? $solicitud->status,
             'workflow_status' => $solicitud->workflow_status ?? $solicitud->status,
+            'booking_status' => $solicitud->payment_status === 'paid' ? 'confirmed' : $solicitud->status,
+            'reservation_status' => $reservation?->status,
             'contract_status' => $contract?->status,
             'payment_status' => $solicitud->payment_status
                 ?? $latestPayment?->status
                 ?? $reservation?->status,
+            'stripe_checkout_session_id' => $solicitud->stripe_checkout_session_id ?? $latestPayment?->stripe_checkout_session_id,
+            'stripe_payment_intent_id' => $solicitud->stripe_payment_intent_id ?? $latestPayment?->stripe_payment_intent_id,
             'reservation_id' => $reservation?->id,
             'summary_only' => $summaryOnly,
             'reservation' => $reservation ? [
                 'id' => $reservation->id,
                 'status' => $reservation->status,
+                'booking_status' => $reservation->status === 'confirmed' ? 'confirmed' : $reservation->status,
                 'contract_status' => $contract?->status,
                 'payment_status' => $solicitud->payment_status ?? $latestPayment?->status,
+                'stripe_checkout_session_id' => $solicitud->stripe_checkout_session_id ?? $latestPayment?->stripe_checkout_session_id,
+                'stripe_payment_intent_id' => $solicitud->stripe_payment_intent_id ?? $latestPayment?->stripe_payment_intent_id,
             ] : null,
             'contract' => $contract ? [
                 'id' => $contract->id,
@@ -233,16 +240,22 @@ class VisibilidadServicio
             'legs' => $this->visibleLegs($solicitud),
             'status' => $operatorStatus,
             'workflow_status' => $solicitud->workflow_status ?? $solicitud->status,
+            'booking_status' => $solicitud->payment_status === 'paid' ? 'confirmed' : $reservation?->status,
             'contract_status' => $reservation?->contract?->status,
             'payment_status' => $solicitud->payment_status
                 ?? $latestPayment?->status
                 ?? $reservation?->status,
+            'stripe_checkout_session_id' => $solicitud->stripe_checkout_session_id ?? $latestPayment?->stripe_checkout_session_id,
+            'stripe_payment_intent_id' => $solicitud->stripe_payment_intent_id ?? $latestPayment?->stripe_payment_intent_id,
             'reservation_id' => $reservation?->id,
             'reservation' => $reservation ? [
                 'id' => $reservation->id,
                 'status' => $reservation->status,
+                'booking_status' => $reservation->status === 'confirmed' ? 'confirmed' : $reservation->status,
                 'contract_status' => $reservation->contract?->status,
                 'payment_status' => $solicitud->payment_status ?? $latestPayment?->status,
+                'stripe_checkout_session_id' => $solicitud->stripe_checkout_session_id ?? $latestPayment?->stripe_checkout_session_id,
+                'stripe_payment_intent_id' => $solicitud->stripe_payment_intent_id ?? $latestPayment?->stripe_payment_intent_id,
             ] : null,
             'operation' => $operation ? [
                 'id' => $operation->id,

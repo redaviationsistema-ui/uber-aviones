@@ -931,12 +931,13 @@ class ClienteControlador extends ControladorBase
             $flightRequest->forceFill([
                 'payment_status' => 'paid',
                 'payment_method' => trim((string) $flightRequest->payment_method) !== '' ? $flightRequest->payment_method : 'stripe_checkout',
-                'workflow_status' => 'pago confirmado',
+                'workflow_status' => 'vuelo confirmado',
+                'status' => 'confirmed',
                 'updated_at' => now(),
             ])->save();
 
             $reservation->forceFill([
-                'status' => 'paid',
+                'status' => 'confirmed',
                 'confirmed_at' => $reservation->confirmed_at ?: $latestPayment->paid_at ?: now(),
                 'updated_at' => now(),
             ])->save();

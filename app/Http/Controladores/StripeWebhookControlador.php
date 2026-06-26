@@ -14,6 +14,7 @@ use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Stripe\Webhook;
 use Throwable;
 
@@ -25,14 +26,30 @@ class StripeWebhookControlador extends ControladorBase
         $signature = (string) $request->header('Stripe-Signature');
         $secret = (string) config('services.stripe.webhook_secret');
 
+        Log::info('Stripe webhook recibido.', [
+            'has_signature' => $signature !== '',
+            'secret_configured' => $secret !== '',
+            'payload_length' => strlen($payload),
+        ]);
+
         try {
             $event = Webhook::constructEvent($payload, $signature, $secret);
         } catch (Throwable $exception) {
+            Log::warning('Stripe webhook invalido.', [
+                'message' => $exception->getMessage(),
+                'has_signature' => $signature !== '',
+                'secret_configured' => $secret !== '',
+            ]);
             return response()->json([
                 'success' => false,
                 'message' => 'Webhook invalido',
             ], 400);
         }
+
+        Log::info('Stripe webhook validado.', [
+            'event_id' => $event->id,
+            'event_type' => $event->type,
+        ]);
 
         $existing = DB::table('webhook_events')
             ->where('provider', 'stripe')
@@ -93,6 +110,11 @@ class StripeWebhookControlador extends ControladorBase
                     'error_message' => null,
                 ]);
         } catch (Throwable $exception) {
+            Log::error('Stripe webhook fallo al procesarse.', [
+                'event_id' => $event->id,
+                'event_type' => $event->type,
+                'message' => $exception->getMessage(),
+            ]);
             DB::table('webhook_events')
                 ->where('provider', 'stripe')
                 ->where('event_id', $event->id)
@@ -134,12 +156,26 @@ class StripeWebhookControlador extends ControladorBase
         }
 
         $flightRequestId = (int) ($session->metadata->flight_request_id ?? 0);
+        Log::info('Stripe checkout.session.completed recibido.', [
+            'checkout_session_id' => (string) ($session->id ?? ''),
+            'payment_intent_id' => (string) ($session->payment_intent ?? ''),
+            'flight_request_id' => $flightRequestId,
+            'metadata' => $metadata,
+        ]);
         if (! $flightRequestId) {
+            Log::warning('Stripe checkout.session.completed sin flight_request_id.', [
+                'checkout_session_id' => (string) ($session->id ?? ''),
+            ]);
             return;
         }
 
         $flightRequest = SolicitudVuelo::find($flightRequestId);
         if (! $flightRequest) {
+            Log::warning('Stripe checkout.session.completed sin flight request encontrada.', [
+                'checkout_session_id' => (string) ($session->id ?? ''),
+                'payment_intent_id' => (string) ($session->payment_intent ?? ''),
+                'flight_request_id' => $flightRequestId,
+            ]);
             return;
         }
 
@@ -151,13 +187,13 @@ class StripeWebhookControlador extends ControladorBase
                 'payment_status' => 'paid',
                 'stripe_checkout_session_id' => $session->id,
                 'stripe_payment_intent_id' => $session->payment_intent ?? null,
-                'workflow_status' => 'pago confirmado',
-                'status' => 'reserved',
+                'workflow_status' => 'vuelo confirmado',
+                'status' => 'confirmed',
             ]);
 
             if ($reservation) {
                 $reservation->update([
-                    'status' => 'paid',
+                    'status' => 'confirmed',
                     'confirmed_at' => $reservation->confirmed_at ?: now(),
                 ]);
             }
@@ -183,6 +219,16 @@ class StripeWebhookControlador extends ControladorBase
                 ],
             );
         });
+
+        Log::info('Stripe checkout.session.completed actualizo reserva.', [
+            'checkout_session_id' => (string) ($session->id ?? ''),
+            'payment_intent_id' => (string) ($session->payment_intent ?? ''),
+            'flight_request_id' => $flightRequestId,
+            'reservation_id' => $flightRequest->reservation()->latest('id')->value('id'),
+            'payment_status' => 'paid',
+            'booking_status' => 'confirmed',
+            'status' => 'confirmed',
+        ]);
     }
 
     private function handleCheckoutExpired(object $session): void
@@ -271,29 +317,48 @@ class StripeWebhookControlador extends ControladorBase
         }
 
         $flightRequestId = (int) ($paymentIntent->metadata->flight_request_id ?? 0);
+        Log::info('Stripe payment_intent.succeeded recibido.', [
+            'payment_intent_id' => (string) ($paymentIntent->id ?? ''),
+            'checkout_session_id' => (string) ($metadata['checkout_session_id'] ?? ''),
+            'flight_request_id' => $flightRequestId,
+            'metadata' => $metadata,
+        ]);
         if (! $flightRequestId) {
+            Log::warning('Stripe payment_intent.succeeded sin flight_request_id.', [
+                'payment_intent_id' => (string) ($paymentIntent->id ?? ''),
+            ]);
             return;
         }
 
         $flightRequest = SolicitudVuelo::find($flightRequestId);
         if (! $flightRequest) {
+            Log::warning('Stripe payment_intent.succeeded sin flight request encontrada.', [
+                'payment_intent_id' => (string) ($paymentIntent->id ?? ''),
+                'flight_request_id' => $flightRequestId,
+            ]);
             return;
         }
 
         DB::transaction(function () use ($flightRequest, $paymentIntent) {
             $reservation = $flightRequest->reservation()->latest('id')->first();
+            $checkoutSessionId = $this->resolveCheckoutSessionIdFromGatewayPayload(
+                $paymentIntent,
+                $flightRequest,
+                $reservation,
+            );
 
             $flightRequest->update([
                 'payment_method' => 'card',
                 'payment_status' => 'paid',
+                'stripe_checkout_session_id' => $checkoutSessionId ?: $flightRequest->stripe_checkout_session_id,
                 'stripe_payment_intent_id' => $paymentIntent->id,
-                'workflow_status' => 'pago confirmado',
-                'status' => 'reserved',
+                'workflow_status' => 'vuelo confirmado',
+                'status' => 'confirmed',
             ]);
 
             if ($reservation) {
                 $reservation->update([
-                    'status' => 'paid',
+                    'status' => 'confirmed',
                     'confirmed_at' => $reservation->confirmed_at ?: now(),
                 ]);
             }
@@ -310,6 +375,7 @@ class StripeWebhookControlador extends ControladorBase
                     'amount' => ((int) ($paymentIntent->amount ?? 0)) / 100,
                     'currency' => strtoupper((string) ($paymentIntent->currency ?? $flightRequest->currency ?? 'USD')),
                     'transaction_reference' => $paymentIntent->id,
+                    'stripe_checkout_session_id' => $checkoutSessionId ?: null,
                     'stripe_payment_intent_id' => $paymentIntent->id,
                     'status' => 'paid',
                     'paid_at' => now(),
@@ -318,6 +384,15 @@ class StripeWebhookControlador extends ControladorBase
                 ],
             );
         });
+
+        Log::info('Stripe payment_intent.succeeded actualizo reserva.', [
+            'payment_intent_id' => (string) ($paymentIntent->id ?? ''),
+            'flight_request_id' => $flightRequestId,
+            'reservation_id' => $flightRequest->reservation()->latest('id')->value('id'),
+            'payment_status' => 'paid',
+            'booking_status' => 'confirmed',
+            'status' => 'confirmed',
+        ]);
     }
 
     private function handlePaymentFailed(object $paymentIntent): void
@@ -325,6 +400,12 @@ class StripeWebhookControlador extends ControladorBase
         $metadata = $this->extractMetadata($paymentIntent);
         $context = $metadata['billing_context'] ?? null;
         $message = $paymentIntent->last_payment_error->message ?? 'Pago rechazado por Stripe.';
+        Log::warning('Stripe payment_intent.payment_failed recibido.', [
+            'payment_intent_id' => (string) ($paymentIntent->id ?? ''),
+            'checkout_session_id' => (string) ($metadata['checkout_session_id'] ?? ''),
+            'flight_request_id' => (int) ($paymentIntent->metadata->flight_request_id ?? 0),
+            'message' => (string) $message,
+        ]);
 
         if ($context === 'client_access') {
             $this->markAccessPaymentFailed((int) ($metadata['access_payment_id'] ?? 0), (string) $message);
@@ -340,6 +421,37 @@ class StripeWebhookControlador extends ControladorBase
             paymentStatus: 'failed',
             reason: (string) $message,
         );
+    }
+
+    private function resolveCheckoutSessionIdFromGatewayPayload(
+        object $paymentIntent,
+        SolicitudVuelo $flightRequest,
+        mixed $reservation = null,
+    ): string {
+        $metadata = $this->extractMetadata($paymentIntent);
+        $fromMetadata = trim((string) ($metadata['checkout_session_id'] ?? ''));
+        if ($fromMetadata !== '') {
+            return $fromMetadata;
+        }
+
+        $payment = Pago::query()
+            ->where('provider', 'stripe')
+            ->where(function ($query) use ($paymentIntent, $flightRequest, $reservation) {
+                $query->where('stripe_payment_intent_id', (string) ($paymentIntent->id ?? ''))
+                    ->orWhere('transaction_reference', (string) ($paymentIntent->id ?? ''));
+
+                if ($flightRequest->id) {
+                    $query->orWhere('flight_request_id', $flightRequest->id);
+                }
+
+                if ($reservation?->id) {
+                    $query->orWhere('reservation_id', $reservation->id);
+                }
+            })
+            ->latest('id')
+            ->first();
+
+        return trim((string) ($payment?->stripe_checkout_session_id ?? $flightRequest->stripe_checkout_session_id ?? ''));
     }
 
     private function handlePaymentCanceled(object $paymentIntent): void

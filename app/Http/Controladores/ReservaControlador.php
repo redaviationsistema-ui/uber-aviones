@@ -40,7 +40,9 @@ class ReservaControlador extends ControladorBase
         $reservations = $query->paginate(20);
         $reservations->setCollection(
             $reservations->getCollection()->map(
-                fn (Reserva $reservation) => $this->normalizeStripePendingReservationState($reservation)
+                fn (Reserva $reservation) => $this->appendReservationStripeState(
+                    $this->normalizeStripePendingReservationState($reservation)
+                )
             )
         );
 
@@ -73,8 +75,10 @@ class ReservaControlador extends ControladorBase
         }
 
         return $this->ok([
-            'reservation' => $this->normalizeStripePendingReservationState(
-                $reservation->load(['quote', 'aircraft', 'provider', 'flightRequest', 'legs', 'contract', 'review', 'payments'])
+            'reservation' => $this->appendReservationStripeState(
+                $this->normalizeStripePendingReservationState(
+                    $reservation->load(['quote', 'aircraft', 'provider', 'flightRequest', 'legs', 'contract', 'review', 'payments'])
+                )
             ),
         ]);
     }
@@ -205,12 +209,13 @@ class ReservaControlador extends ControladorBase
             $flightRequest->forceFill([
                 'payment_status' => 'paid',
                 'payment_method' => trim((string) $flightRequest->payment_method) !== '' ? $flightRequest->payment_method : 'stripe_checkout',
-                'workflow_status' => 'pago confirmado',
+                'workflow_status' => 'vuelo confirmado',
+                'status' => 'confirmed',
                 'updated_at' => now(),
             ])->save();
 
             $reservation->forceFill([
-                'status' => 'paid',
+                'status' => 'confirmed',
                 'confirmed_at' => $reservation->confirmed_at ?: $latestPayment->paid_at ?: now(),
                 'updated_at' => now(),
             ])->save();
@@ -223,6 +228,21 @@ class ReservaControlador extends ControladorBase
         });
 
         return $reservation->fresh(['quote', 'aircraft', 'provider.user', 'flightRequest', 'payments']);
+    }
+
+    private function appendReservationStripeState(Reserva $reservation): Reserva
+    {
+        $flightRequest = $reservation->flightRequest;
+        $latestPayment = $reservation->payments->sortByDesc('id')->first();
+        $paymentStatus = $flightRequest?->payment_status
+            ?: ($latestPayment?->status ?: null);
+
+        $reservation->setAttribute('payment_status', $paymentStatus);
+        $reservation->setAttribute('booking_status', $reservation->status === 'confirmed' ? 'confirmed' : $reservation->status);
+        $reservation->setAttribute('stripe_checkout_session_id', $flightRequest?->stripe_checkout_session_id ?: $latestPayment?->stripe_checkout_session_id);
+        $reservation->setAttribute('stripe_payment_intent_id', $flightRequest?->stripe_payment_intent_id ?: $latestPayment?->stripe_payment_intent_id);
+
+        return $reservation;
     }
 
     public function showContract(Request $request, mixed $reservation, DocuSignServicio $docuSignServicio)
