@@ -210,7 +210,7 @@ class ReservaControlador extends ControladorBase
                 'payment_status' => 'paid',
                 'payment_method' => trim((string) $flightRequest->payment_method) !== '' ? $flightRequest->payment_method : 'stripe_checkout',
                 'workflow_status' => 'vuelo confirmado',
-                'status' => 'confirmed',
+                'status' => 'reserved',
                 'updated_at' => now(),
             ])->save();
 

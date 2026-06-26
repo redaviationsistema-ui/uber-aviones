@@ -188,7 +188,7 @@ class StripeWebhookControlador extends ControladorBase
                 'stripe_checkout_session_id' => $session->id,
                 'stripe_payment_intent_id' => $session->payment_intent ?? null,
                 'workflow_status' => 'vuelo confirmado',
-                'status' => 'confirmed',
+                'status' => 'reserved',
             ]);
 
             if ($reservation) {
@@ -353,7 +353,7 @@ class StripeWebhookControlador extends ControladorBase
                 'stripe_checkout_session_id' => $checkoutSessionId ?: $flightRequest->stripe_checkout_session_id,
                 'stripe_payment_intent_id' => $paymentIntent->id,
                 'workflow_status' => 'vuelo confirmado',
-                'status' => 'confirmed',
+                'status' => 'reserved',
             ]);
 
             if ($reservation) {

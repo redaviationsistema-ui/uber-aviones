@@ -2,6 +2,7 @@
 
 namespace App\Http\Controladores;
 
+use App\Enumeraciones\EstadoSolicitudVuelo;
 use App\Modelos\Pago;
 use App\Modelos\Reserva;
 use App\Modelos\SolicitudVuelo;
@@ -887,8 +888,9 @@ class StripePagoControlador extends ControladorBase
         ));
 
         $pricingBreakdown = $this->resolveFlightRequestPricingBreakdown($flightRequest);
+        $flightRequestStatus = $this->resolveConfirmedFlightRequestStatus($flightRequest);
 
-        DB::transaction(function () use ($flightRequest, $reservation, $paymentIntent, $brand, $pricingBreakdown, $paymentMethod) {
+        DB::transaction(function () use ($flightRequest, $reservation, $paymentIntent, $brand, $pricingBreakdown, $paymentMethod, $flightRequestStatus) {
             $flightRequest->update([
                 'payment_method' => $paymentMethod,
                 'payment_status' => 'paid',
@@ -897,7 +899,7 @@ class StripePagoControlador extends ControladorBase
                     : $flightRequest->stripe_checkout_session_id,
                 'stripe_payment_intent_id' => $paymentIntent->id,
                 'workflow_status' => 'vuelo confirmado',
-                'status' => 'confirmed',
+                'status' => $flightRequestStatus,
                 'final_price' => (float) $pricingBreakdown['total_amount'],
                 'pricing_context' => $this->mergeFlightRequestPricingContext($flightRequest, $pricingBreakdown),
             ]);
@@ -974,6 +976,26 @@ class StripePagoControlador extends ControladorBase
             'status' => 'confirmed',
             'workflow_status' => 'vuelo confirmado',
         ]);
+    }
+
+    private function resolveConfirmedFlightRequestStatus(SolicitudVuelo $flightRequest): string
+    {
+        $currentStatus = strtolower(trim((string) ($flightRequest->status ?? '')));
+        $allowedStatuses = array_map(
+            static fn (EstadoSolicitudVuelo $status) => $status->value,
+            EstadoSolicitudVuelo::cases(),
+        );
+
+        if (in_array($currentStatus, $allowedStatuses, true)) {
+            return in_array($currentStatus, [
+                EstadoSolicitudVuelo::Cancelled->value,
+                EstadoSolicitudVuelo::Expired->value,
+            ], true)
+                ? EstadoSolicitudVuelo::Reserved->value
+                : $currentStatus;
+        }
+
+        return EstadoSolicitudVuelo::Reserved->value;
     }
 
     private function confirmedReservationPaymentResponse(SolicitudVuelo $flightRequest, Reserva $reservation): JsonResponse
