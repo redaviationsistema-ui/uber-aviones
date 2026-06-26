@@ -854,14 +854,18 @@ class ClienteControlador extends ControladorBase
                 'legs:id,flight_request_id,leg_order,origin,destination,departure_datetime,arrival_datetime,passengers,distance_km',
                 'reservation:id,flight_request_id,status',
                 'reservation.contract:id,reservation_id,status,docusign_status,signed_at,completed_at,signed_pdf_path',
-                'reservation.latestPayment:id,reservation_id,status,provider,stripe_checkout_session_id,stripe_payment_intent_id',
+                'reservation.latestPayment:id,reservation_id,flight_request_id,status,provider,paid_at,stripe_checkout_session_id,stripe_payment_intent_id',
             ])
             ->where('client_id', $request->user()->id)
             ->latest()
             ->paginate($perPage);
 
+        $normalizedSolicitudes = $solicitudes->getCollection()->map(
+            fn (SolicitudVuelo $solicitud) => $this->normalizeStripePendingPaymentState($solicitud)
+        );
+
         return $this->ok([
-            'flight_requests' => $solicitudes->getCollection()->map(
+            'flight_requests' => $normalizedSolicitudes->map(
                 fn ($solicitud) => $this->visibilidadServicio->solicitudParaCliente($solicitud, [
                     'include_matches' => false,
                     'include_timeline' => false,
@@ -880,23 +884,83 @@ class ClienteControlador extends ControladorBase
     {
         abort_if($flightRequest->client_id !== $request->user()->id, 403);
 
+        $flightRequest = $this->normalizeStripePendingPaymentState(
+            $flightRequest->load([
+                'assignedAircraft:id,model,category,capacity',
+                'assignedAircraft.images:id,aircraft_id,kind,title,image_url,is_main,sort_order,visible_to_client',
+                'matches:id,flight_request_id,aircraft_id,status,estimated_price,visibility_payload',
+                'matches.aircraft:id,model,capacity,category',
+                'matches.aircraft.images:id,aircraft_id,kind,title,image_url,is_main,sort_order,visible_to_client',
+                'chatsProtegidos:id,flight_request_id,status',
+                'latestOperation:id,flight_request_id,status',
+                'latestOperation.timeline:id,operation_id,status,title,description,created_at',
+                'legs:id,flight_request_id,leg_order,origin,destination,departure_datetime,arrival_datetime,passengers,distance_km',
+                'reservation:id,flight_request_id,status',
+                'reservation.contract:id,reservation_id,status,docusign_status,signed_at,completed_at,signed_pdf_path',
+                'reservation.latestPayment:id,reservation_id,flight_request_id,status,provider,paid_at,stripe_checkout_session_id,stripe_payment_intent_id',
+            ])
+        );
+
         return $this->ok([
-            'flight_request' => $this->visibilidadServicio->solicitudParaCliente(
-                $flightRequest->load([
-                    'assignedAircraft:id,model,category,capacity',
-                    'assignedAircraft.images:id,aircraft_id,kind,title,image_url,is_main,sort_order,visible_to_client',
-                    'matches:id,flight_request_id,aircraft_id,status,estimated_price,visibility_payload',
-                    'matches.aircraft:id,model,capacity,category',
-                    'matches.aircraft.images:id,aircraft_id,kind,title,image_url,is_main,sort_order,visible_to_client',
-                    'chatsProtegidos:id,flight_request_id,status',
-                    'latestOperation:id,flight_request_id,status',
-                    'latestOperation.timeline:id,operation_id,status,title,description,created_at',
-                    'legs:id,flight_request_id,leg_order,origin,destination,departure_datetime,arrival_datetime,passengers,distance_km',
-                    'reservation:id,flight_request_id,status',
-                    'reservation.contract:id,reservation_id,status,docusign_status,signed_at,completed_at,signed_pdf_path',
-                    'reservation.latestPayment:id,reservation_id,status,provider,stripe_checkout_session_id,stripe_payment_intent_id',
-                ])
-            ),
+            'flight_request' => $this->visibilidadServicio->solicitudParaCliente($flightRequest),
+        ]);
+    }
+
+    private function normalizeStripePendingPaymentState(SolicitudVuelo $flightRequest): SolicitudVuelo
+    {
+        $reservation = $flightRequest->reservation;
+        $latestPayment = $reservation?->latestPayment;
+
+        if (! $reservation || ! $latestPayment) {
+            return $flightRequest;
+        }
+
+        $paymentStatus = strtolower(trim((string) $latestPayment->status));
+        $provider = strtolower(trim((string) $latestPayment->provider));
+        $flightRequestPaymentStatus = strtolower(trim((string) $flightRequest->payment_status));
+        $reservationStatus = strtolower(trim((string) $reservation->status));
+        $hasPaidSignal = ! empty($latestPayment->paid_at)
+            && $provider === 'stripe'
+            && in_array($paymentStatus, ['pending', 'processing', ''], true);
+
+        if (! $hasPaidSignal) {
+            return $flightRequest;
+        }
+
+        DB::transaction(function () use ($flightRequest, $reservation, $latestPayment) {
+            $flightRequest->forceFill([
+                'payment_status' => 'paid',
+                'payment_method' => trim((string) $flightRequest->payment_method) !== '' ? $flightRequest->payment_method : 'stripe_checkout',
+                'workflow_status' => 'pago confirmado',
+                'updated_at' => now(),
+            ])->save();
+
+            $reservation->forceFill([
+                'status' => 'paid',
+                'confirmed_at' => $reservation->confirmed_at ?: $latestPayment->paid_at ?: now(),
+                'updated_at' => now(),
+            ])->save();
+
+            $latestPayment->forceFill([
+                'status' => 'paid',
+                'failure_reason' => null,
+                'updated_at' => now(),
+            ])->save();
+        });
+
+        return $flightRequest->fresh([
+            'assignedAircraft:id,model,category,capacity',
+            'assignedAircraft.images:id,aircraft_id,kind,title,image_url,is_main,sort_order,visible_to_client',
+            'matches:id,flight_request_id,aircraft_id,status,estimated_price,visibility_payload',
+            'matches.aircraft:id,model,capacity,category',
+            'matches.aircraft.images:id,aircraft_id,kind,title,image_url,is_main,sort_order,visible_to_client',
+            'chatsProtegidos:id,flight_request_id,status',
+            'latestOperation:id,flight_request_id,status',
+            'latestOperation.timeline:id,operation_id,status,title,description,created_at',
+            'legs:id,flight_request_id,leg_order,origin,destination,departure_datetime,arrival_datetime,passengers,distance_km',
+            'reservation:id,flight_request_id,status,confirmed_at',
+            'reservation.contract:id,reservation_id,status,docusign_status,signed_at,completed_at,signed_pdf_path',
+            'reservation.latestPayment:id,reservation_id,flight_request_id,status,provider,paid_at,stripe_checkout_session_id,stripe_payment_intent_id',
         ]);
     }
 
