@@ -452,6 +452,24 @@ class StripePagoControlador extends ControladorBase
 
         $checkout = strtolower((string) ($data['checkout'] ?? 'success'));
         $sessionId = (string) ($data['session_id'] ?? $data['checkout_session_id'] ?? '');
+        $reservationId = (int) ($data['reservation_id'] ?? 0);
+        $flightRequestId = (int) ($data['flight_request_id'] ?? 0);
+
+        if ($checkout !== 'cancelled' && $checkout !== 'cancel' && $sessionId !== '' && ! $this->ensureStripeIsConfigured()) {
+            try {
+                $payment = $this->findReservationCheckoutPayment(
+                    sessionId: $sessionId,
+                    reservationId: $reservationId,
+                    flightRequestId: $flightRequestId,
+                );
+
+                if ($payment) {
+                    $this->syncCheckoutSessionPayment($payment, $sessionId);
+                }
+            } catch (\Throwable $exception) {
+                report($exception);
+            }
+        }
 
         $query = http_build_query([
             'checkout' => $checkout === 'cancelled' ? 'cancel' : $checkout,
@@ -462,6 +480,30 @@ class StripePagoControlador extends ControladorBase
         ]);
 
         return redirect()->away('redsky://cliente/pago?'.$query);
+    }
+
+    private function findReservationCheckoutPayment(
+        string $sessionId,
+        int $reservationId = 0,
+        int $flightRequestId = 0,
+    ): ?Pago {
+        $sessionId = trim($sessionId);
+        if ($sessionId === '') {
+            return null;
+        }
+
+        return Pago::query()
+            ->with(['reservation.flightRequest', 'flightRequest'])
+            ->where('payment_type', 'reservation')
+            ->where('provider', 'stripe')
+            ->where(function ($query) use ($sessionId) {
+                $query->where('stripe_checkout_session_id', $sessionId)
+                    ->orWhere('transaction_reference', $sessionId);
+            })
+            ->when($reservationId > 0, fn ($query) => $query->where('reservation_id', $reservationId))
+            ->when($flightRequestId > 0, fn ($query) => $query->where('flight_request_id', $flightRequestId))
+            ->latest('id')
+            ->first();
     }
 
     private function resolveFlightRequestAmount(SolicitudVuelo $flightRequest): float
