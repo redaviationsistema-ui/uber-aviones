@@ -30,6 +30,18 @@ class ClientAccessBillingControlador extends ControladorBase
     {
         $user = $request->user()->fresh(['demo', 'activeSuscripcion.plan']);
         $latestPayment = $this->latestPaymentForUser($user);
+        if ($latestPayment && $this->paymentCanBeSyncedFromCheckout($latestPayment)) {
+            try {
+                $latestPayment = $this->syncCheckoutSubscriptionStatus(
+                    $latestPayment,
+                    (string) $latestPayment->provider_checkout_id,
+                );
+                $user = $request->user()->fresh(['demo', 'activeSuscripcion.plan']);
+            } catch (\Throwable) {
+                // El estado debe seguir respondiendo aun si Stripe no esta disponible.
+            }
+        }
+
         $paymentPreview = $this->resolveAccessPaymentPreview();
 
         return $this->ok([
@@ -61,10 +73,12 @@ class ClientAccessBillingControlador extends ControladorBase
         }
 
         if ($this->hasBlockingActiveAccess($user)) {
-            return response()->json([
-                'success' => false,
-                'message' => 'El cliente ya cuenta con una suscripcion comercial activa fuera de la ventana de renovacion.',
-            ], 409);
+            return $this->ok([
+                'already_active' => true,
+                'message' => 'El cliente ya cuenta con una suscripcion comercial activa.',
+                'access' => $this->buildAccessPayload($user),
+                'latest_payment' => $this->serializeAccessPayment($this->latestPaymentForUser($user)),
+            ]);
         }
 
         $plan = $this->billingPlanServicio->findActiveByCode(BillingPlanServicio::CLIENT_ACCESS_CODE);
@@ -411,6 +425,23 @@ class ClientAccessBillingControlador extends ControladorBase
             ->where('user_id', $user->id)
             ->latest('id')
             ->first();
+    }
+
+    private function paymentCanBeSyncedFromCheckout(AccessPayment $payment): bool
+    {
+        $sessionId = trim((string) $payment->provider_checkout_id);
+        if ($sessionId === '' || ! config('services.stripe.secret')) {
+            return false;
+        }
+
+        return in_array((string) $payment->status, [
+            'pending',
+            'processing',
+            'requires_payment_method',
+            'requires_confirmation',
+            'requires_action',
+            'payment_pending',
+        ], true);
     }
 
     private function serializeAccessPayment(?AccessPayment $payment): ?array
