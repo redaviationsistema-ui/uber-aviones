@@ -943,6 +943,20 @@ class StripePagoControlador extends ControladorBase
                 $responsePayload['brand'] = $brand;
                 $payment->update(['gateway_response' => $responsePayload]);
             }
+
+            Pago::query()
+                ->where('payment_type', 'reservation')
+                ->whereIn('status', ['pending', 'processing'])
+                ->where(function ($query) use ($reservation, $flightRequest) {
+                    $query->where('reservation_id', $reservation->id)
+                        ->orWhere('flight_request_id', $flightRequest->id);
+                })
+                ->where('id', '!=', $payment->id)
+                ->update([
+                    'status' => 'cancelled',
+                    'failure_reason' => 'Reemplazado por pago Stripe confirmado.',
+                    'updated_at' => now(),
+                ]);
         });
 
         $reservation->refresh()->load(['contract', 'payments', 'flightRequest']);
