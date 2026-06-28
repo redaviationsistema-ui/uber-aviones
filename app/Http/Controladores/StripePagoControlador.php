@@ -1186,6 +1186,8 @@ class StripePagoControlador extends ControladorBase
 
         abort_if(! $session, 404, 'Stripe no devolvio informacion de la sesion de Checkout.');
         $paymentIntent = $this->resolvePaymentIntentFromCheckoutSession($session);
+        $paymentStatus = strtolower((string) ($session->payment_status ?? ''));
+        $sessionStatus = strtolower((string) ($session->status ?? ''));
         $paymentIntentStatus = strtolower((string) ($paymentIntent->status ?? ''));
         $paymentIntentId = (string) ($paymentIntent->id ?? $session->payment_intent ?? '');
         Log::info('Stripe session', [
@@ -1262,7 +1264,11 @@ class StripePagoControlador extends ControladorBase
                 ->first();
         }
 
-        if ($paymentIntentStatus === 'succeeded' && $flightRequest) {
+        $checkoutIsPaid = in_array($paymentStatus, ['paid', 'no_payment_required'], true)
+            || $sessionStatus === 'complete'
+            || $paymentIntentStatus === 'succeeded';
+
+        if ($checkoutIsPaid && $flightRequest) {
             $reservation = $reservation ?: $this->ensureReservationForFlightRequest($flightRequest, $userId);
             $this->finalizeSuccessfulPayment(
                 flightRequest: $flightRequest,
