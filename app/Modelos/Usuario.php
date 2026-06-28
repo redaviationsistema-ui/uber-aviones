@@ -38,6 +38,11 @@ class Usuario extends Authenticatable
     use HasFactory;
     use Notifiable;
 
+    protected static function newFactory()
+    {
+        return \Database\Factories\UsuarioFactory::new();
+    }
+
     public const ROLE_CLIENT = 'client';
     public const ROLE_PROVIDER = 'provider';
     public const ROLE_SOBRECARGO = 'sobrecargo';

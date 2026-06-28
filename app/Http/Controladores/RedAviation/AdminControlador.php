@@ -1878,6 +1878,16 @@ class AdminControlador extends ControladorBase
                 ?? data_get($gatewayPayload, 'payment_intent.charges.data.0.payment_method_details.card.last4')
                 ?? ''
             );
+            $subscriptionId = (string) (
+                data_get($gatewayPayload, 'checkout_session.subscription')
+                ?? $payment->provider_subscription_id
+                ?? ''
+            );
+            $customerId = (string) (
+                data_get($gatewayPayload, 'checkout_session.customer')
+                ?? $payment->provider_customer_id
+                ?? ''
+            );
 
             $periodStart = $payment->billing_period_start ?: now()->toDateString();
             $periodEnd = $payment->billing_period_end ?: now()->addMonthNoOverflow()->toDateString();
@@ -1886,6 +1896,8 @@ class AdminControlador extends ControladorBase
                 'status' => 'paid',
                 'provider_payment_id' => $providerPaymentId !== '' ? $providerPaymentId : $payment->provider_payment_id,
                 'provider_checkout_id' => $checkoutSessionId !== '' ? $checkoutSessionId : $payment->provider_checkout_id,
+                'provider_subscription_id' => $subscriptionId !== '' ? $subscriptionId : $payment->provider_subscription_id,
+                'provider_customer_id' => $customerId !== '' ? $customerId : $payment->provider_customer_id,
                 'billing_period_start' => $periodStart,
                 'billing_period_end' => $periodEnd,
                 'card_brand' => $cardBrand !== '' ? $cardBrand : $payment->card_brand,
@@ -1894,12 +1906,20 @@ class AdminControlador extends ControladorBase
                 'gateway_response' => $gatewayPayload,
             ]);
 
-            DB::table('users')->where('id', $payment->user_id)->update([
+            DB::table('users')
+                ->where('id', $payment->user_id)
+                ->where(function ($query) use ($payment) {
+                    $query->whereNull('access_payment_id')
+                        ->orWhere('access_payment_id', '<=', $payment->id);
+                })
+                ->update([
                 'access_status' => 'active',
                 'has_paid_access' => true,
                 'paid_access_at' => DB::raw('coalesce(paid_access_at, now())'),
                 'access_expires_at' => Carbon::parse($periodEnd)->endOfDay(),
                 'access_payment_id' => $payment->id,
+                'provider_subscription_id' => $subscriptionId !== '' ? $subscriptionId : DB::raw('provider_subscription_id'),
+                'provider_customer_id' => $customerId !== '' ? $customerId : DB::raw('provider_customer_id'),
                 'updated_at' => now(),
             ]);
         });

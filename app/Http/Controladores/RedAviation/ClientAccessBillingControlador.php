@@ -166,9 +166,17 @@ class ClientAccessBillingControlador extends ControladorBase
         $data = $request->validate([
             'session_id' => ['nullable', 'string', 'max:255'],
             'checkout_session_id' => ['nullable', 'string', 'max:255'],
+            'checkoutSessionId' => ['nullable', 'string', 'max:255'],
+            'sessionId' => ['nullable', 'string', 'max:255'],
+            'stripe_session_id' => ['nullable', 'string', 'max:255'],
         ]);
 
-        $sessionId = $data['session_id'] ?? $data['checkout_session_id'] ?? null;
+        $sessionId = $data['session_id']
+            ?? $data['checkout_session_id']
+            ?? $data['checkoutSessionId']
+            ?? $data['sessionId']
+            ?? $data['stripe_session_id']
+            ?? null;
         $user = $request->user()->fresh();
         $payment = AccessPayment::query()
             ->with('billingPlan:id,code,name,amount,currency')
@@ -481,7 +489,18 @@ class ClientAccessBillingControlador extends ControladorBase
             $invoicePayload = Invoice::retrieve($invoiceId);
         }
 
-        $status = (string) ($subscription->status ?? $session->status ?? 'pending');
+        $subscriptionStatus = (string) ($subscription->status ?? '');
+        $sessionStatus = (string) ($session->status ?? '');
+        $sessionPaymentStatus = (string) ($session->payment_status ?? '');
+        $invoiceStatus = (string) ($invoicePayload?->status ?? '');
+        $invoicePaid = (bool) ($invoicePayload?->paid ?? false);
+        $amountPaid = (int) ($invoicePayload?->amount_paid ?? 0);
+        $isPaid = in_array($subscriptionStatus, ['active', 'trialing'], true)
+            || $sessionPaymentStatus === 'paid'
+            || $invoiceStatus === 'paid'
+            || $invoicePaid
+            || $amountPaid > 0;
+        $status = $isPaid ? 'active' : ($subscriptionStatus ?: $sessionStatus ?: 'pending');
         $periodStart = ! empty($subscription?->current_period_start)
             ? Carbon::createFromTimestamp((int) $subscription->current_period_start)->startOfDay()
             : ($payment->billing_period_start ? Carbon::parse($payment->billing_period_start)->startOfDay() : now()->startOfDay());
@@ -496,14 +515,14 @@ class ClientAccessBillingControlador extends ControladorBase
             'invoice' => $invoicePayload ? json_decode(json_encode($invoicePayload), true) : null,
         ];
 
-        DB::transaction(function () use ($payment, $session, $subscription, $invoicePayload, $status, $periodStart, $periodEnd, $payload) {
+        DB::transaction(function () use ($payment, $session, $subscription, $invoicePayload, $status, $isPaid, $periodStart, $periodEnd, $payload) {
             $customerId = (string) ($session->customer ?? $subscription?->customer ?? $payment->provider_customer_id ?? '');
             $subscriptionId = (string) ($subscription?->id ?? $session->subscription ?? $payment->provider_subscription_id ?? '');
             $invoiceId = (string) ($invoicePayload?->id ?? $session->invoice ?? $payment->provider_invoice_id ?? '');
             $paymentIntentId = (string) ($invoicePayload?->payment_intent ?? $session->payment_intent ?? $payment->provider_payment_id ?? '');
 
             $payment->update([
-                'status' => in_array($status, ['active', 'trialing'], true) ? 'paid' : $payment->status,
+                'status' => $isPaid ? 'paid' : $payment->status,
                 'provider_checkout_id' => (string) $session->id,
                 'provider_customer_id' => $customerId !== '' ? $customerId : $payment->provider_customer_id,
                 'provider_subscription_id' => $subscriptionId !== '' ? $subscriptionId : $payment->provider_subscription_id,
@@ -511,23 +530,29 @@ class ClientAccessBillingControlador extends ControladorBase
                 'provider_payment_id' => $paymentIntentId !== '' ? $paymentIntentId : $payment->provider_payment_id,
                 'billing_period_start' => $periodStart->toDateString(),
                 'billing_period_end' => $periodEnd->toDateString(),
-                'paid_at' => in_array($status, ['active', 'trialing'], true) ? ($payment->paid_at ?: now()) : $payment->paid_at,
+                'paid_at' => $isPaid ? ($payment->paid_at ?: now()) : $payment->paid_at,
                 'gateway_response' => $payload,
             ]);
 
-            if (in_array($status, ['active', 'trialing'], true)) {
-                DB::table('users')->where('id', $payment->user_id)->update([
-                    'access_status' => 'active',
-                    'has_paid_access' => true,
-                    'paid_access_at' => now(),
-                    'access_expires_at' => $periodEnd,
-                    'grace_period_ends_at' => null,
-                    'next_retry_at' => null,
-                    'provider_subscription_id' => $subscriptionId !== '' ? $subscriptionId : DB::raw('provider_subscription_id'),
-                    'provider_customer_id' => $customerId !== '' ? $customerId : DB::raw('provider_customer_id'),
-                    'access_payment_id' => $payment->id,
-                    'updated_at' => now(),
-                ]);
+            if ($isPaid) {
+                DB::table('users')
+                    ->where('id', $payment->user_id)
+                    ->where(function ($query) use ($payment) {
+                        $query->whereNull('access_payment_id')
+                            ->orWhere('access_payment_id', '<=', $payment->id);
+                    })
+                    ->update([
+                        'access_status' => 'active',
+                        'has_paid_access' => true,
+                        'paid_access_at' => now(),
+                        'access_expires_at' => $periodEnd,
+                        'grace_period_ends_at' => null,
+                        'next_retry_at' => null,
+                        'provider_subscription_id' => $subscriptionId !== '' ? $subscriptionId : DB::raw('provider_subscription_id'),
+                        'provider_customer_id' => $customerId !== '' ? $customerId : DB::raw('provider_customer_id'),
+                        'access_payment_id' => $payment->id,
+                        'updated_at' => now(),
+                    ]);
             }
         });
 

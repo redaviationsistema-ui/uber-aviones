@@ -628,22 +628,58 @@ class StripeWebhookControlador extends ControladorBase
 
         $customerId = (string) ($session->customer ?? '');
         $subscriptionId = (string) ($session->subscription ?? '');
+        $paymentStatus = (string) ($session->payment_status ?? '');
+        $sessionStatus = (string) ($session->status ?? '');
+        $isPaid = $paymentStatus === 'paid';
 
-        DB::transaction(function () use ($payment, $session, $customerId, $subscriptionId) {
+        if ($isPaid) {
+            $periodStart = $payment->billing_period_start?->toDateString() ?: now()->toDateString();
+            $periodEnd = $payment->billing_period_end?->toDateString() ?: now()->addMonthNoOverflow()->toDateString();
+
+            $this->syncClientAccessSubscriptionPaidState(
+                payment: $payment,
+                providerSubscriptionId: $subscriptionId,
+                providerCustomerId: $customerId,
+                providerInvoiceId: (string) ($session->invoice ?? ''),
+                providerPaymentId: (string) ($session->payment_intent ?? $session->id ?? ''),
+                amount: ((int) ($session->amount_total ?? 0)) / 100,
+                currency: strtoupper((string) ($session->currency ?? $payment->currency ?? 'USD')),
+                periodStart: $periodStart,
+                periodEnd: $periodEnd,
+                gatewayPayload: [
+                    'source' => 'checkout_session_completed_paid',
+                    'stripe_payload' => json_decode(json_encode($session), true),
+                ],
+            );
+            return;
+        }
+
+        DB::transaction(function () use ($payment, $session, $customerId, $subscriptionId, $paymentStatus, $sessionStatus) {
             $payment->update([
                 'provider_checkout_id' => (string) ($session->id ?? $payment->provider_checkout_id),
                 'provider_customer_id' => $customerId !== '' ? $customerId : $payment->provider_customer_id,
                 'provider_subscription_id' => $subscriptionId !== '' ? $subscriptionId : $payment->provider_subscription_id,
-                'gateway_response' => json_decode(json_encode($session), true),
+                'gateway_response' => [
+                    'source' => 'checkout_session_completed_pending',
+                    'checkout_status' => $sessionStatus,
+                    'payment_status' => $paymentStatus,
+                    'stripe_payload' => json_decode(json_encode($session), true),
+                ],
             ]);
 
-            DB::table('users')->where('id', $payment->user_id)->update([
-                'access_status' => 'payment_pending',
-                'provider_subscription_id' => $subscriptionId !== '' ? $subscriptionId : DB::raw('provider_subscription_id'),
-                'provider_customer_id' => $customerId !== '' ? $customerId : DB::raw('provider_customer_id'),
-                'access_payment_id' => $payment->id,
-                'updated_at' => now(),
-            ]);
+            DB::table('users')
+                ->where('id', $payment->user_id)
+                ->where(function ($query) use ($payment) {
+                    $query->whereNull('access_payment_id')
+                        ->orWhere('access_payment_id', '<=', $payment->id);
+                })
+                ->update([
+                    'access_status' => 'payment_pending',
+                    'provider_subscription_id' => $subscriptionId !== '' ? $subscriptionId : DB::raw('provider_subscription_id'),
+                    'provider_customer_id' => $customerId !== '' ? $customerId : DB::raw('provider_customer_id'),
+                    'access_payment_id' => $payment->id,
+                    'updated_at' => now(),
+                ]);
         });
     }
 
@@ -731,16 +767,22 @@ class StripeWebhookControlador extends ControladorBase
                 'gateway_response' => json_decode(json_encode($invoice), true),
             ]);
 
-            DB::table('users')->where('id', $payment->user_id)->update([
-                'access_status' => 'past_due',
-                'has_paid_access' => true,
-                'grace_period_ends_at' => $graceEndsAt,
-                'next_retry_at' => $retryAt,
-                'provider_subscription_id' => $providerSubscriptionId ?: DB::raw('provider_subscription_id'),
-                'provider_customer_id' => $providerCustomerId ?: DB::raw('provider_customer_id'),
-                'access_payment_id' => $payment->id,
-                'updated_at' => now(),
-            ]);
+            DB::table('users')
+                ->where('id', $payment->user_id)
+                ->where(function ($query) use ($payment) {
+                    $query->whereNull('access_payment_id')
+                        ->orWhere('access_payment_id', '<=', $payment->id);
+                })
+                ->update([
+                    'access_status' => 'past_due',
+                    'has_paid_access' => true,
+                    'grace_period_ends_at' => $graceEndsAt,
+                    'next_retry_at' => $retryAt,
+                    'provider_subscription_id' => $providerSubscriptionId ?: DB::raw('provider_subscription_id'),
+                    'provider_customer_id' => $providerCustomerId ?: DB::raw('provider_customer_id'),
+                    'access_payment_id' => $payment->id,
+                    'updated_at' => now(),
+                ]);
         });
 
         $this->createAccessNotification(
@@ -1087,14 +1129,20 @@ class StripeWebhookControlador extends ControladorBase
                 'gateway_response' => $gatewayPayload,
             ]);
 
-            DB::table('users')->where('id', $payment->user_id)->update([
-                'access_status' => 'active',
-                'has_paid_access' => true,
-                'paid_access_at' => now(),
-                'access_expires_at' => Carbon::parse($periodEnd)->endOfDay(),
-                'access_payment_id' => $payment->id,
-                'updated_at' => now(),
-            ]);
+            DB::table('users')
+                ->where('id', $payment->user_id)
+                ->where(function ($query) use ($payment) {
+                    $query->whereNull('access_payment_id')
+                        ->orWhere('access_payment_id', '<=', $payment->id);
+                })
+                ->update([
+                    'access_status' => 'active',
+                    'has_paid_access' => true,
+                    'paid_access_at' => now(),
+                    'access_expires_at' => Carbon::parse($periodEnd)->endOfDay(),
+                    'access_payment_id' => $payment->id,
+                    'updated_at' => now(),
+                ]);
         });
     }
 
@@ -1324,18 +1372,24 @@ class StripeWebhookControlador extends ControladorBase
                 'gateway_response' => $gatewayPayload,
             ]);
 
-            DB::table('users')->where('id', $payment->user_id)->update([
-                'access_status' => 'active',
-                'has_paid_access' => true,
-                'paid_access_at' => now(),
-                'access_expires_at' => Carbon::parse($periodEnd)->endOfDay(),
-                'grace_period_ends_at' => null,
-                'next_retry_at' => null,
-                'provider_subscription_id' => $providerSubscriptionId ?: DB::raw('provider_subscription_id'),
-                'provider_customer_id' => $providerCustomerId ?: DB::raw('provider_customer_id'),
-                'access_payment_id' => $payment->id,
-                'updated_at' => now(),
-            ]);
+            DB::table('users')
+                ->where('id', $payment->user_id)
+                ->where(function ($query) use ($payment) {
+                    $query->whereNull('access_payment_id')
+                        ->orWhere('access_payment_id', '<=', $payment->id);
+                })
+                ->update([
+                    'access_status' => 'active',
+                    'has_paid_access' => true,
+                    'paid_access_at' => now(),
+                    'access_expires_at' => Carbon::parse($periodEnd)->endOfDay(),
+                    'grace_period_ends_at' => null,
+                    'next_retry_at' => null,
+                    'provider_subscription_id' => $providerSubscriptionId ?: DB::raw('provider_subscription_id'),
+                    'provider_customer_id' => $providerCustomerId ?: DB::raw('provider_customer_id'),
+                    'access_payment_id' => $payment->id,
+                    'updated_at' => now(),
+                ]);
         });
     }
 

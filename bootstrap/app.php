@@ -25,6 +25,41 @@ use Illuminate\Http\Request;
 use Illuminate\Validation\ValidationException;
 use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 
+if (! function_exists('agregarCabecerasCorsApi')) {
+    function agregarCabecerasCorsApi(Request $request, \Illuminate\Http\JsonResponse $response): \Illuminate\Http\JsonResponse
+    {
+        if (! $request->is('api/*')) {
+            return $response;
+        }
+
+        $origin = trim((string) $request->headers->get('Origin', ''));
+        $allowedOrigins = collect(explode(',', (string) env('CORS_ALLOWED_ORIGINS', '')))
+            ->map(fn ($item) => trim($item))
+            ->filter()
+            ->values();
+
+        if ($allowedOrigins->isEmpty()) {
+            $allowedOrigins = collect([
+                'http://localhost:5173',
+                'http://127.0.0.1:5173',
+                'https://redskyg.com',
+                'https://www.redskyg.com',
+                rtrim((string) env('APP_URL', ''), '/'),
+            ])->filter()->values();
+        }
+
+        if ($origin !== '' && $allowedOrigins->contains($origin)) {
+            $response->headers->set('Access-Control-Allow-Origin', $origin);
+            $response->headers->set('Access-Control-Allow-Credentials', 'true');
+            $response->headers->set('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+            $response->headers->set('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept');
+            $response->headers->set('Vary', 'Origin');
+        }
+
+        return $response;
+    }
+}
+
 return Application::configure(basePath: dirname(__DIR__))
     ->withRouting(
          web: __DIR__.'/../routes/web.php',
@@ -105,37 +140,4 @@ return Application::configure(basePath: dirname(__DIR__))
             ], $status));
         });
     })->create();
-
-function agregarCabecerasCorsApi(Request $request, \Illuminate\Http\JsonResponse $response): \Illuminate\Http\JsonResponse
-{
-    if (! $request->is('api/*')) {
-        return $response;
-    }
-
-    $origin = trim((string) $request->headers->get('Origin', ''));
-    $allowedOrigins = collect(explode(',', (string) env('CORS_ALLOWED_ORIGINS', '')))
-        ->map(fn ($item) => trim($item))
-        ->filter()
-        ->values();
-
-    if ($allowedOrigins->isEmpty()) {
-        $allowedOrigins = collect([
-            'http://localhost:5173',
-            'http://127.0.0.1:5173',
-            'https://redskyg.com',
-            'https://www.redskyg.com',
-            rtrim((string) env('APP_URL', ''), '/'),
-        ])->filter()->values();
-    }
-
-    if ($origin !== '' && $allowedOrigins->contains($origin)) {
-        $response->headers->set('Access-Control-Allow-Origin', $origin);
-        $response->headers->set('Access-Control-Allow-Credentials', 'true');
-        $response->headers->set('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
-        $response->headers->set('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept');
-        $response->headers->set('Vary', 'Origin');
-    }
-
-    return $response;
-}
 
