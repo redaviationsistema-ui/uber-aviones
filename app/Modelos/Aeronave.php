@@ -7,6 +7,30 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
+/**
+ * @property int $id
+ * @property int|null $provider_id
+ * @property string|null $model
+ * @property string|null $manufacturer
+ * @property string|null $category
+ * @property int|null $capacity
+ * @property string|null $base_airport
+ * @property int|null $base_airport_id
+ * @property int|null $range_km
+ * @property int|null $speed_kmh
+ * @property string|null $currency
+ * @property string|null $status
+ * @property mixed $hourly_rate
+ * @property mixed $airport_expenses_usd
+ * @property mixed $minimum_hours
+ * @property mixed $minimum_route_price
+ * @property mixed $climb_descent_minutes
+ * @property mixed $operational_cost
+ * @property mixed $repositioning_fee
+ * @property mixed $overnight_fee
+ * @property-read \App\Modelos\Proveedor|null $provider
+ * @property-read \App\Modelos\Aeropuerto|null $baseAirport
+ */
 class Aeronave extends Model
 {
     protected $table = 'aircraft';

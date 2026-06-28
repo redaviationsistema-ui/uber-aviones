@@ -11,6 +11,26 @@ use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Illuminate\Support\Facades\Storage;
 
+/**
+ * @property int $id
+ * @property string|null $name
+ * @property string|null $email
+ * @property string|null $phone
+ * @property string|null $role
+ * @property int|null $provider_id
+ * @property string|null $status
+ * @property int|null $free_quotes_used
+ * @property int|null $free_quote_limit
+ * @property bool|null $has_paid_access
+ * @property string|null $access_status
+ * @property mixed $trial_started_at
+ * @property mixed $trial_ends_at
+ * @property mixed $access_expires_at
+ * @property mixed $grace_period_ends_at
+ * @property mixed $next_retry_at
+ * @property-read \App\Modelos\Demo|null $demo
+ * @property-read \App\Modelos\Suscripcion|null $activeSuscripcion
+ */
 class Usuario extends Authenticatable
 {
     protected $table = 'users';

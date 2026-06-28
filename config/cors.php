@@ -1,9 +1,21 @@
 <?php
 
 return [
-    'paths' => ['api/*', 'api/v1/*', 'sanctum/csrf-cookie'],
+    'paths' => [
+        'api/*',
+        'api/v1/*',
+        'sanctum/csrf-cookie',
+        'broadcasting/auth',
+    ],
 
-    'allowed_methods' => ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    'allowed_methods' => [
+        'GET',
+        'POST',
+        'PUT',
+        'PATCH',
+        'DELETE',
+        'OPTIONS',
+    ],
 
     'allowed_origins' => array_values(array_filter(array_map(
         static fn ($item) => trim($item),
@@ -15,7 +27,7 @@ return [
 
     'allowed_origins_patterns' => [],
 
-    'allowed_headers' => ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+    'allowed_headers' => ['*'],
 
     'exposed_headers' => [],
 

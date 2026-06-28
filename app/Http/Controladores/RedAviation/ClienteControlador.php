@@ -2,10 +2,12 @@
 
 namespace App\Http\Controladores\RedAviation;
 
+use App\Events\NewFlightRequestCreated;
 use App\Http\Controladores\ControladorBase;
 use App\Modelos\Aeronave;
 use App\Modelos\Aeropuerto;
 use App\Modelos\ImagenAeronave;
+use App\Modelos\Notificacion;
 use App\Modelos\Operacion;
 use App\Modelos\ReglaGastoAeropuerto;
 use App\Modelos\ReglaPrecioCategoria;
@@ -254,7 +256,7 @@ class ClienteControlador extends ControladorBase
         ]);
     }
 
-    public function previewQuotes(Request $request)
+    public function previewQuotes(Request $request): \Illuminate\Http\JsonResponse
     {
         $user = $this->resolveOptionalApiUser($request);
         $commercialGate = null;
@@ -625,6 +627,7 @@ class ClienteControlador extends ControladorBase
         });
 
         $this->writeAudit($request, 'create', 'red_aviation.flight_requests', 'Solicitud Red Aviation creada.');
+        $this->notifyProvidersAboutFlightRequest($solicitud->fresh(['assignedAircraft', 'matches.aircraft']));
 
         return $this->ok([
             'flight_request' => $this->visibilidadServicio->solicitudParaCliente(
@@ -635,9 +638,48 @@ class ClienteControlador extends ControladorBase
         ], 201);
     }
 
+    private function notifyProvidersAboutFlightRequest(SolicitudVuelo $solicitud): void
+    {
+        $solicitud->loadMissing(['assignedAircraft', 'matches.aircraft']);
+        $providerIds = collect([$solicitud->assigned_provider_id])
+            ->merge($solicitud->matches->pluck('provider_id'))
+            ->filter()
+            ->unique()
+            ->values();
+
+        foreach ($providerIds as $providerId) {
+            $event = new NewFlightRequestCreated($solicitud, (int) $providerId);
+            $payload = $event->broadcastWith();
+            event($event);
+            $this->createProviderFlightRequestNotification((int) $providerId, $payload);
+        }
+    }
+
+    private function createProviderFlightRequestNotification(int $providerId, array $payload): void
+    {
+        try {
+            $userIds = Usuario::query()
+                ->where('provider_id', $providerId)
+                ->pluck('id');
+
+            foreach ($userIds as $userId) {
+                Notificacion::create([
+                    'user_id' => $userId,
+                    'provider_id' => $providerId,
+                    'type' => 'flight.request.created',
+                    'title' => 'Nueva solicitud de vuelo',
+                    'message' => ($payload['route'] ?? 'Ruta por confirmar').' · '.($payload['aircraft_name'] ?? 'Aeronave por confirmar'),
+                    'payload' => $payload,
+                    'data' => $payload,
+                ]);
+            }
+        } catch (\Throwable $exception) {
+            report($exception);
+        }
+    }
     private function resolveCommercialAccessGate($user): array
     {
-        if ($user->hasRole(\App\Modelos\Usuario::ROLE_ADMIN)) {
+        if ($user->hasRole(Usuario::ROLE_ADMIN)) {
             return ['allowed' => true, 'consume_trial_quote' => false, 'plan' => null];
         }
 
@@ -1767,7 +1809,6 @@ class ClienteControlador extends ControladorBase
             'return_to_base_cost' => $returnToBaseCost,
             'overnight_nights' => $overnightNights,
             'overnight_cost' => $overnightCost,
-            'overnight' => $overnightCost,
             'airport_fees' => $expenseFee,
             'airport_expenses' => $expenseFee,
             'expense_fee' => $expenseFee,
@@ -1931,7 +1972,7 @@ class ClienteControlador extends ControladorBase
         $normalized = mb_strtolower(trim((string) ($value ?? '')));
 
         return match ($normalized) {
-            'helicoptero', 'helicóptero', 'helicopter' => 'Helicoptero',
+            'helicoptero', 'helicÃ³ptero', 'helicopter' => 'Helicoptero',
             'light jet', 'light_jet', 'lightjet' => 'Light Jet',
             'mid jet', 'mid_jet', 'midjet', 'midsize jet', 'midsize_jet', 'super mid', 'super_mid' => 'Mid Jet',
             'heavy jet', 'heavy_jet', 'heavyjet', 'long range', 'long_range' => 'Heavy Jet',
@@ -1958,7 +1999,7 @@ class ClienteControlador extends ControladorBase
         $normalized = mb_strtolower(trim((string) ($value ?? '')));
 
         return match ($normalized) {
-            'helicoptero', 'helicóptero', 'helicopter' => 'helicopter',
+            'helicoptero', 'helicÃ³ptero', 'helicopter' => 'helicopter',
             'turboprop', 'turbo prop', 'turbo_prop' => 'turboprop',
             'light jet', 'light_jet', 'lightjet' => 'light_jet',
             'mid jet', 'mid_jet', 'midjet', 'midsize jet', 'midsize_jet', 'super mid', 'super_mid' => 'mid_jet',
@@ -2617,7 +2658,7 @@ class ClienteControlador extends ControladorBase
             return 'Salida optimizada desde origen';
         }
 
-        return 'Opción activa para tu ruta';
+        return 'OpciÃ³n activa para tu ruta';
     }
 
     private function responseTime(Aeronave $aircraft, string $origin): string
@@ -2746,7 +2787,7 @@ class ClienteControlador extends ControladorBase
         $normalized = mb_strtolower(trim((string) ($value ?? '')));
 
         return match ($normalized) {
-            'helicoptero', 'helicóptero', 'helicopter' => 'Helicoptero',
+            'helicoptero', 'helicÃ³ptero', 'helicopter' => 'Helicoptero',
             'turboprop', 'turbo prop' => 'Turboprop',
             'light jet', 'light_jet', 'lightjet' => 'Light Jet',
             'mid jet', 'mid_jet', 'midjet', 'midsize jet', 'midsize_jet', 'super mid', 'super_mid' => 'Mid Jet',
@@ -2814,3 +2855,5 @@ class ClienteControlador extends ControladorBase
         return $minimumRoutePrice > 0 ? $minimumRoutePrice : 3000.0;
     }
 }
+
+

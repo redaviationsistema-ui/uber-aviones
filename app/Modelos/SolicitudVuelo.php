@@ -8,6 +8,24 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 
+/**
+ * @property int $id
+ * @property int|null $client_id
+ * @property int|null $assigned_provider_id
+ * @property int|null $assigned_aircraft_id
+ * @property string|null $origin
+ * @property string|null $destination
+ * @property int|null $passengers
+ * @property string|null $trip_type
+ * @property string|null $aircraft_type
+ * @property mixed $base_price
+ * @property mixed $operational_fee
+ * @property mixed $priority_price
+ * @property mixed $final_price
+ * @property string|null $currency
+ * @property string|null $status
+ * @property string|null $workflow_status
+ */
 class SolicitudVuelo extends Model
 {
     protected $table = 'flight_requests';

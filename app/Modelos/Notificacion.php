@@ -9,11 +9,12 @@ class Notificacion extends Model
 {
     protected $table = 'notifications';
 
-    protected $fillable = ['user_id', 'type', 'title', 'message', 'data', 'read_at'];
+    protected $fillable = ['user_id', 'provider_id', 'type', 'title', 'message', 'payload', 'data', 'read_at'];
 
     protected function casts(): array
     {
         return [
+            'payload' => 'array',
             'data' => 'array',
             'read_at' => 'datetime',
         ];
