@@ -569,6 +569,13 @@ class StripePagoControlador extends ControladorBase
                 : (string) ($flightRequest?->stripe_checkout_session_id ?? $latestPayment?->stripe_checkout_session_id ?? '');
             $resolvedPaymentIntentId = (string) ($flightRequest?->stripe_payment_intent_id ?? $latestPayment?->stripe_payment_intent_id ?? '');
             $resolvedPaymentStatus = (string) ($flightRequest?->payment_status ?? $latestPayment?->status ?? 'pending');
+            $resolvedCheckoutUrl = (string) (
+                data_get($latestPayment?->gateway_response, 'checkout_url')
+                ?? data_get($latestPayment?->gateway_response, 'url')
+                ?? data_get($latestPayment?->gateway_response, 'session.url')
+                ?? data_get($latestPayment?->gateway_response, 'checkout_session.url')
+                ?? ''
+            );
             $resolvedBookingStatus = in_array((string) ($reservation?->status ?? $flightRequest?->status ?? ''), ['confirmed'], true)
                 || $resolvedPaymentStatus === 'paid'
                 ? 'confirmed'
@@ -584,6 +591,7 @@ class StripePagoControlador extends ControladorBase
                 'booking_status' => $resolvedBookingStatus,
                 'status' => $resolvedBookingStatus === 'confirmed' ? 'confirmed' : 'pending_payment',
                 'workflow_status' => $resolvedBookingStatus === 'confirmed' ? 'vuelo confirmado' : 'pago pendiente',
+                'checkout_url' => $resolvedCheckoutUrl !== '' ? $resolvedCheckoutUrl : null,
                 'stripe_checkout_session_id' => $resolvedSessionId,
                 'stripe_payment_intent_id' => $resolvedPaymentIntentId !== '' ? $resolvedPaymentIntentId : null,
             ]);
