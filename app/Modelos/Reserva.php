@@ -71,7 +71,20 @@ class Reserva extends Model
 
     public function latestPayment(): HasOne
     {
-        return $this->hasOne(Pago::class, 'reservation_id')->latestOfMany();
+        return $this->hasOne(Pago::class, 'reservation_id')
+            ->latestOfMany()
+            ->select([
+                'payments.id',
+                'payments.reservation_id',
+                'payments.flight_request_id',
+                'payments.status',
+                'payments.provider',
+                'payments.paid_at',
+                'payments.stripe_checkout_session_id',
+                'payments.stripe_payment_intent_id',
+                'payments.created_at',
+                'payments.updated_at',
+            ]);
     }
 
     public function contract(): HasOne

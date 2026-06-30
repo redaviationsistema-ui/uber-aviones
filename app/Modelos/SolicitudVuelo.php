@@ -135,7 +135,27 @@ class SolicitudVuelo extends Model
 
     public function latestOperation(): HasOne
     {
-        return $this->hasOne(Operacion::class, 'flight_request_id')->latestOfMany();
+        return $this->hasOne(Operacion::class, 'flight_request_id')
+            ->latestOfMany()
+            ->select([
+                'operations.id',
+                'operations.flight_request_id',
+                'operations.status',
+                'operations.provider_id',
+                'operations.aircraft_id',
+                'operations.sobrecargo_user_id',
+                'operations.crew_status',
+                'operations.crew_confirmed_at',
+                'operations.crew_decline_reason',
+                'operations.crew_notes',
+                'operations.crew_checkin_at',
+                'operations.crew_service_started_at',
+                'operations.crew_service_completed_at',
+                'operations.started_at',
+                'operations.completed_at',
+                'operations.created_at',
+                'operations.updated_at',
+            ]);
     }
 
     public function reservation(): HasOne

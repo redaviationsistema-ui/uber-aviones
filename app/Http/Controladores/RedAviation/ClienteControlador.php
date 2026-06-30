@@ -891,12 +891,25 @@ class ClienteControlador extends ControladorBase
             ->with([
                 'assignedAircraft:id,model,category,capacity',
                 'assignedAircraft.images:id,aircraft_id,kind,title,image_url,is_main,sort_order,visible_to_client',
-                'latestOperation:id,flight_request_id,status',
+                'latestOperation' => fn ($query) => $query->select([
+                    'operations.id',
+                    'operations.flight_request_id',
+                    'operations.status',
+                ]),
                 'chatsProtegidos:id,flight_request_id,status',
                 'legs:id,flight_request_id,leg_order,origin,destination,departure_datetime,arrival_datetime,passengers,distance_km',
                 'reservation:id,flight_request_id,status',
                 'reservation.contract:id,reservation_id,status,docusign_status,signed_at,completed_at,signed_pdf_path',
-                'reservation.latestPayment:id,reservation_id,flight_request_id,status,provider,paid_at,stripe_checkout_session_id,stripe_payment_intent_id',
+                'reservation.latestPayment' => fn ($query) => $query->select([
+                    'payments.id',
+                    'payments.reservation_id',
+                    'payments.flight_request_id',
+                    'payments.status',
+                    'payments.provider',
+                    'payments.paid_at',
+                    'payments.stripe_checkout_session_id',
+                    'payments.stripe_payment_intent_id',
+                ]),
             ])
             ->where('client_id', $request->user()->id)
             ->latest()
@@ -934,12 +947,25 @@ class ClienteControlador extends ControladorBase
                 'matches.aircraft:id,model,capacity,category',
                 'matches.aircraft.images:id,aircraft_id,kind,title,image_url,is_main,sort_order,visible_to_client',
                 'chatsProtegidos:id,flight_request_id,status',
-                'latestOperation:id,flight_request_id,status',
+                'latestOperation' => fn ($query) => $query->select([
+                    'operations.id',
+                    'operations.flight_request_id',
+                    'operations.status',
+                ]),
                 'latestOperation.timeline:id,operation_id,status,title,description,created_at',
                 'legs:id,flight_request_id,leg_order,origin,destination,departure_datetime,arrival_datetime,passengers,distance_km',
                 'reservation:id,flight_request_id,status',
                 'reservation.contract:id,reservation_id,status,docusign_status,signed_at,completed_at,signed_pdf_path',
-                'reservation.latestPayment:id,reservation_id,flight_request_id,status,provider,paid_at,stripe_checkout_session_id,stripe_payment_intent_id',
+                'reservation.latestPayment' => fn ($query) => $query->select([
+                    'payments.id',
+                    'payments.reservation_id',
+                    'payments.flight_request_id',
+                    'payments.status',
+                    'payments.provider',
+                    'payments.paid_at',
+                    'payments.stripe_checkout_session_id',
+                    'payments.stripe_payment_intent_id',
+                ]),
             ])
         );
 
@@ -998,12 +1024,25 @@ class ClienteControlador extends ControladorBase
             'matches.aircraft:id,model,capacity,category',
             'matches.aircraft.images:id,aircraft_id,kind,title,image_url,is_main,sort_order,visible_to_client',
             'chatsProtegidos:id,flight_request_id,status',
-            'latestOperation:id,flight_request_id,status',
+            'latestOperation' => fn ($query) => $query->select([
+                    'operations.id',
+                    'operations.flight_request_id',
+                    'operations.status',
+                ]),
             'latestOperation.timeline:id,operation_id,status,title,description,created_at',
             'legs:id,flight_request_id,leg_order,origin,destination,departure_datetime,arrival_datetime,passengers,distance_km',
             'reservation:id,flight_request_id,status,confirmed_at',
             'reservation.contract:id,reservation_id,status,docusign_status,signed_at,completed_at,signed_pdf_path',
-            'reservation.latestPayment:id,reservation_id,flight_request_id,status,provider,paid_at,stripe_checkout_session_id,stripe_payment_intent_id',
+            'reservation.latestPayment' => fn ($query) => $query->select([
+                    'payments.id',
+                    'payments.reservation_id',
+                    'payments.flight_request_id',
+                    'payments.status',
+                    'payments.provider',
+                    'payments.paid_at',
+                    'payments.stripe_checkout_session_id',
+                    'payments.stripe_payment_intent_id',
+                ]),
         ]);
     }
 
