@@ -125,6 +125,7 @@ Route::middleware(['auth.token'])->group(function () {
     Route::prefix('admin')->middleware(['role:admin'])->group(function () {
         Route::put('/billing/plans/{plan}', [BillingPlanControlador::class, 'update']);
         Route::get('/dashboard', [AdminControlador::class, 'dashboard']);
+        Route::get('/clientes', [AdminControlador::class, 'clients']);
         Route::get('/users', [AdminControlador::class, 'users']);
         Route::get('/users/{user}', [AdminControlador::class, 'showUser']);
         Route::post('/users', [AdminControlador::class, 'storeUser']);

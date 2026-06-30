@@ -25,6 +25,7 @@ use Carbon\CarbonPeriod;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
@@ -101,6 +102,47 @@ class AdminControlador extends ControladorBase
         ]);
     }
 
+    public function clients()
+    {
+        $clients = Usuario::query()
+            ->select([
+                'id',
+                'name',
+                'email',
+                'phone',
+                'created_at',
+                'role',
+                'operational_role',
+                'provider_id',
+                'status',
+                'access_status',
+                'trial_started_at',
+                'trial_ends_at',
+                'free_quote_limit',
+                'free_quotes_used',
+                'has_paid_access',
+                'paid_access_at',
+                'access_payment_id',
+                'access_expires_at',
+                'updated_at',
+            ])
+            ->where(function ($query) {
+                $query
+                    ->where('role', Usuario::ROLE_CLIENT)
+                    ->orWhere('operational_role', Usuario::ROLE_CLIENT);
+            })
+            ->with([
+                'profile:id,user_id,company_name,city,base_airport',
+                'demo:id,user_id,status,started_at,expires_at',
+            ])
+            ->latest('id')
+            ->paginate(20);
+
+        return $this->ok([
+            'clients' => $clients->through(fn (Usuario $user) => $this->serializeAdminClientSummary($user)),
+        ]);
+    }
+
     public function showUser(Usuario $user)
     {
         $user->load([
@@ -150,10 +192,11 @@ class AdminControlador extends ControladorBase
     public function roles()
     {
         return $this->ok([
-            'roles' => Rol::query()
+            'roles' => Cache::remember('admin:red-aviation:active-roles', now()->addMinutes(5), fn () => Rol::query()
+                ->select(['id', 'code', 'name', 'type', 'description', 'is_active'])
                 ->where('is_active', true)
                 ->orderBy('name')
-                ->get(),
+                ->get()),
         ]);
     }
 
@@ -1707,7 +1750,29 @@ class AdminControlador extends ControladorBase
 
     public function clientAccessPayments()
     {
+        $latestPaymentIds = AccessPayment::query()
+            ->selectRaw('MAX(id)')
+            ->groupBy('user_id');
+
         $payments = AccessPayment::query()
+            ->select([
+                'id',
+                'user_id',
+                'billing_plan_id',
+                'amount',
+                'currency',
+                'status',
+                'provider',
+                'provider_payment_id',
+                'provider_checkout_id',
+                'billing_period_start',
+                'billing_period_end',
+                'paid_at',
+                'card_brand',
+                'card_last4',
+                'gateway_response',
+            ])
+            ->whereIn('id', $latestPaymentIds)
             ->with([
                 'user:id,name,email,phone,access_status,has_paid_access,paid_access_at,access_expires_at,access_payment_id',
                 'user.profile:id,user_id,company_name',
@@ -2497,6 +2562,43 @@ class AdminControlador extends ControladorBase
                     'code' => $user->activeSuscripcion->plan->code,
                     'billing_cycle' => $user->activeSuscripcion->plan->billing_cycle,
                 ] : null,
+            ] : null,
+        ];
+    }
+
+    private function serializeAdminClientSummary(Usuario $user): array
+    {
+        return [
+            'id' => $user->id,
+            'name' => $user->name,
+            'email' => $user->email,
+            'phone' => $user->phone,
+            'created_at' => $user->created_at,
+            'role' => $user->role,
+            'operational_role' => $user->operational_role,
+            'provider_id' => $user->provider_id,
+            'proveedor_id' => $user->provider_id,
+            'status' => $user->status,
+            'access_status' => $user->access_status,
+            'trial_started_at' => $user->trial_started_at,
+            'trial_ends_at' => $user->trial_ends_at,
+            'free_quote_limit' => (int) ($user->free_quote_limit ?? 1),
+            'free_quotes_used' => (int) ($user->free_quotes_used ?? 0),
+            'has_paid_access' => (bool) $user->has_paid_access,
+            'paid_access_at' => $user->paid_access_at,
+            'access_payment_id' => $user->access_payment_id,
+            'access_expires_at' => $user->access_expires_at,
+            'updated_at' => $user->updated_at,
+            'commercial_access' => $this->serializeAdminCommercialAccess($user),
+            'profile' => $user->profile ? [
+                'company_name' => $user->profile->company_name,
+                'city' => $user->profile->city,
+                'base_airport' => $user->profile->base_airport,
+            ] : null,
+            'demo' => $user->demo ? [
+                'status' => $user->demo->status,
+                'started_at' => $user->demo->started_at,
+                'expires_at' => $user->demo->expires_at,
             ] : null,
         ];
     }
