@@ -541,7 +541,46 @@ class AdminControlador extends ControladorBase
 
     public function operators()
     {
-        return $this->ok(['operators' => Proveedor::with('user')->latest()->paginate(20)]);
+        $operators = Proveedor::query()
+            ->select([
+                'id',
+                'user_id',
+                'company_name',
+                'commercial_name',
+                'approval_status',
+                'notes',
+                'created_at',
+            ])
+            ->with([
+                'user:id,name,email,phone',
+                'user.profile:id,user_id,company_name,base_airport',
+            ])
+            ->withCount([
+                'aircraft as aircraft_count',
+                'aircraft as active_aircraft_count' => fn ($query) => $query->where('status', 'active'),
+                'aircraft as trial_aircraft_count' => fn ($query) => $query->where('status', 'trial_active'),
+                'aircraft as pending_aircraft_count' => fn ($query) => $query->where('status', '!=', 'active'),
+            ])
+            ->latest('id')
+            ->paginate(20);
+
+        $operators->setCollection(
+            $operators->getCollection()->map(function (Proveedor $provider) {
+                return [
+                    ...$provider->toArray(),
+                    'base_airport' => $provider->user?->profile?->base_airport,
+                    'contact_name' => $provider->user?->name,
+                    'aircraft_metrics' => [
+                        'aircraft' => (int) $provider->aircraft_count,
+                        'active' => (int) $provider->active_aircraft_count,
+                        'trial' => (int) $provider->trial_aircraft_count,
+                        'pending' => (int) $provider->pending_aircraft_count,
+                    ],
+                ];
+            })
+        );
+
+        return $this->ok(['operators' => $operators]);
     }
 
     public function sobrecargos()
