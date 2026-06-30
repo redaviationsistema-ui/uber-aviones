@@ -30,6 +30,7 @@ class AutenticacionControlador extends ControladorBase
             'birth_date' => ['nullable', 'date'],
             'birthDate' => ['nullable', 'date'],
             'nationality' => ['nullable', 'string', 'max:120'],
+            'curp' => ['nullable', 'string', 'max:32'],
             'document_type' => ['nullable', 'string', 'max:50'],
             'document_number' => ['nullable', 'string', 'max:120'],
             'document_expiration' => ['nullable', 'date'],
@@ -41,6 +42,12 @@ class AutenticacionControlador extends ControladorBase
             'ine_scan_status' => ['nullable', 'string', 'max:40'],
             'company_name' => ['required_if:role,provider', 'nullable', 'string', 'max:255'],
             'commercial_name' => ['nullable', 'string', 'max:255'],
+            'legal_name' => ['nullable', 'string', 'max:255'],
+            'rfc' => ['nullable', 'string', 'max:50'],
+            'company_phone' => ['nullable', 'string', 'max:50'],
+            'company_email' => ['nullable', 'email', 'max:255'],
+            'representative_name' => ['nullable', 'string', 'max:255'],
+            'representative_phone' => ['nullable', 'string', 'max:50'],
             'identity_verification_status' => ['nullable', 'string', 'max:60'],
             'identity_verification_message' => ['nullable', 'string'],
             'identity_verified' => ['nullable', 'boolean'],
@@ -124,7 +131,7 @@ class AutenticacionControlador extends ControladorBase
                 'document_number' => $data['document_number'] ?? null,
                 'document_expiration' => $data['document_expiration'] ?? null,
                 'identity_validation_required' => $request->boolean('identity_validation_required'),
-                'ine_curp' => $data['ine_curp'] ?? null,
+                'ine_curp' => $data['curp'] ?? $data['ine_curp'] ?? null,
                 'ine_cic' => $data['ine_cic'] ?? null,
                 'ine_ocr' => $data['ine_ocr'] ?? null,
                 'ine_scan_raw' => $data['ine_scan_raw'] ?? null,
@@ -168,7 +175,21 @@ class AutenticacionControlador extends ControladorBase
             $provider = Proveedor::create([
                 'user_id' => $user->id,
                 'company_name' => $data['company_name'],
-                'commercial_name' => $data['commercial_name'] ?? null,
+                'commercial_name' => $data['commercial_name'] ?? $data['company_name'],
+                'legal_name' => $data['legal_name'] ?? null,
+                'rfc' => $data['rfc'] ?? null,
+                'company_phone' => $data['company_phone'] ?? $data['phone'] ?? null,
+                'company_email' => $data['company_email'] ?? $data['email'] ?? null,
+                'base_airport' => $baseAirport,
+                'status' => 'pending',
+                'representative_name' => $data['representative_name'] ?? $data['name'],
+                'representative_phone' => $data['representative_phone'] ?? $data['phone'] ?? null,
+                'birth_date' => $birthDate,
+                'curp' => $data['curp'] ?? $data['ine_curp'] ?? null,
+                'nationality' => $data['nationality'] ?? null,
+                'document_type' => $data['document_type'] ?? null,
+                'document_number' => $data['document_number'] ?? null,
+                'document_expiration' => $data['document_expiration'] ?? null,
                 'approval_status' => 'pending',
             ]);
 
@@ -383,8 +404,8 @@ class AutenticacionControlador extends ControladorBase
                 'activeSuscripcion.plan:id,name,code,billing_cycle,price_monthly,price_yearly,max_aircraft,max_users,has_priority,has_concierge,has_reports,is_enterprise',
             ]
             : [
-                'provider:id,user_id,company_name,commercial_name,approval_status,jet_a_price,margin_percent,fixed_fee,notes',
-                'ownedProvider:id,user_id,company_name,commercial_name,approval_status,jet_a_price,margin_percent,fixed_fee,notes',
+                'provider:id,user_id,company_name,commercial_name,legal_name,rfc,company_phone,company_email,base_airport,status,representative_name,representative_phone,birth_date,curp,nationality,document_type,document_number,document_expiration,approval_status,jet_a_price,margin_percent,fixed_fee,notes',
+                'ownedProvider:id,user_id,company_name,commercial_name,legal_name,rfc,company_phone,company_email,base_airport,status,representative_name,representative_phone,birth_date,curp,nationality,document_type,document_number,document_expiration,approval_status,jet_a_price,margin_percent,fixed_fee,notes',
                 'profile:id,user_id,company_name,business_type,country,city,base_airport,base_airport_id,address,avatar,avatar_url,tax_data,birth_date,nationality,document_type,document_number,document_expiration,identity_validation_required,ine_curp,ine_cic,ine_ocr,ine_scan_raw,ine_scan_status,ine_front_path,ine_back_path',
                 'profile.baseAirport:id,icao,iata,name',
                 'roles:id,code,name',
@@ -482,6 +503,12 @@ class AutenticacionControlador extends ControladorBase
 
         if ($this->usesSlimClientAuthPayload($user)) {
             return $basePayload;
+        }
+
+        if ($user->provider) {
+            $basePayload['company_name'] = $user->provider->company_name;
+            $basePayload['commercial_name'] = $user->provider->commercial_name;
+            $basePayload['legal_name'] = $user->provider->legal_name;
         }
 
         $basePayload['provider'] = $user->provider;

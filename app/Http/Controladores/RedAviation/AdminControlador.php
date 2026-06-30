@@ -2464,8 +2464,9 @@ class AdminControlador extends ControladorBase
         $provider = $user->ownedProvider()->firstOrCreate(
             ['user_id' => $user->id],
             [
-                'company_name' => $user->name,
-                'commercial_name' => $user->name,
+                'company_name' => $user->profile?->company_name ?: '',
+                'commercial_name' => $user->profile?->company_name ?: '',
+                'status' => 'pending',
                 'approval_status' => 'pending',
             ]
         );
