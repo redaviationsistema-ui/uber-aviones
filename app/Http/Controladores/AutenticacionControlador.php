@@ -40,7 +40,12 @@ class AutenticacionControlador extends ControladorBase
             'ine_ocr' => ['nullable', 'string', 'max:64'],
             'ine_scan_raw' => ['nullable', 'string'],
             'ine_scan_status' => ['nullable', 'string', 'max:40'],
-            'company_name' => ['required_if:role,provider', 'nullable', 'string', 'max:255'],
+            'company_name' => [
+                Rule::requiredIf(fn () => ($request->input('role') === 'provider') && ($request->input('operational_role') !== 'sobrecargo')),
+                'nullable',
+                'string',
+                'max:255',
+            ],
             'commercial_name' => ['nullable', 'string', 'max:255'],
             'legal_name' => ['nullable', 'string', 'max:255'],
             'rfc' => ['nullable', 'string', 'max:50'],
@@ -171,7 +176,7 @@ class AutenticacionControlador extends ControladorBase
 
         $responseExtras = [];
 
-        if ($user->role === Usuario::ROLE_PROVIDER) {
+        if ($user->role === Usuario::ROLE_PROVIDER && $user->operational_role !== Usuario::ROLE_SOBRECARGO) {
             $provider = Proveedor::create([
                 'user_id' => $user->id,
                 'company_name' => $data['company_name'],
