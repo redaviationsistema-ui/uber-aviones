@@ -12,7 +12,13 @@ abstract class ControladorBase
         return response()->json(['success' => true] + $data, $status);
     }
 
-    protected function writeAudit(Request $request, string $action, string $module, ?string $description = null): void
+    protected function writeAudit(
+        Request $request,
+        string $action,
+        string $module,
+        ?string $description = null,
+        array $context = []
+    ): void
     {
         RegistroAuditoria::create([
             'user_id' => $request->user()?->id,
@@ -20,6 +26,9 @@ abstract class ControladorBase
             'module' => $module,
             'description' => $description,
             'ip_address' => $request->ip(),
+            'user_agent' => $request->userAgent(),
+            'old_values' => $context['old_values'] ?? null,
+            'new_values' => $context['new_values'] ?? null,
         ]);
     }
 }

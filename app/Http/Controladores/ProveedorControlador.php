@@ -168,6 +168,18 @@ class ProveedorControlador extends ControladorBase
             ],
         ])->save();
 
+        $previousProvider = $provider->only([
+            'company_name',
+            'commercial_name',
+            'legal_name',
+            'rfc',
+            'company_phone',
+            'company_email',
+            'base_airport',
+            'representative_name',
+            'representative_phone',
+        ]);
+
         $provider->update([
             'company_name' => $data['company_name'] ?? $data['commercial_name'] ?? $data['trade_name'] ?? $provider->company_name,
             'commercial_name' => $data['commercial_name'] ?? $data['company_name'] ?? $data['trade_name'] ?? $provider->commercial_name,
@@ -196,7 +208,22 @@ class ProveedorControlador extends ControladorBase
             'email' => $data['email'] ?? null,
         ], fn ($value) => $value !== null));
 
-        $this->writeAudit($request, 'update', 'provider_company', 'Empresa del proveedor actualizada.');
+        $this->writeAudit($request, 'update', 'provider_company', 'Empresa del proveedor actualizada.', [
+            'old_values' => [
+                ...$previousProvider,
+                'provider_id' => $provider->id,
+            ],
+            'new_values' => [
+                'provider_id' => $provider->id,
+                'event_type' => 'company_updated',
+                'title' => 'Datos de empresa actualizados',
+                'description' => 'El proveedor actualizo razon social, RFC, contacto o base operativa.',
+                'company_name' => $provider->fresh()->company_name,
+                'commercial_name' => $provider->fresh()->commercial_name,
+                'legal_name' => $provider->fresh()->legal_name,
+                'rfc' => $provider->fresh()->rfc,
+            ],
+        ]);
 
         return $this->ok([
             'company' => $this->formatCompanyPayload($request->user()->fresh(['provider', 'profile'])),
@@ -236,8 +263,10 @@ class ProveedorControlador extends ControladorBase
             'resolved_original_name' => $document?->getClientOriginalName(),
         ]);
 
+        $createdDocument = null;
+
         if ($document instanceof UploadedFile) {
-            $this->createCompanyDocumentRecord($provider, $document, [
+            $createdDocument = $this->createCompanyDocumentRecord($provider, $document, [
                 'document_name' => $data['document_name'] ?? $data['original_name'] ?? $document->getClientOriginalName(),
                 'notes' => $data['notes'] ?? null,
                 'status' => 'pending',
@@ -268,7 +297,15 @@ class ProveedorControlador extends ControladorBase
             'admin_changes_requested_by' => null,
             'admin_changes_requested_at' => null,
         ]);
-        $this->writeAudit($request, 'submit_review', 'provider_company', 'Proveedor enviado a revision administrativa.');
+        $this->writeAudit($request, 'submit_review', 'provider_company', 'Proveedor enviado a revision administrativa.', [
+            'new_values' => [
+                'provider_id' => $provider->id,
+                'event_type' => 'sent_to_review',
+                'title' => 'Expediente enviado a revision',
+                'description' => $data['notes'] ?? 'El proveedor envio su expediente a revision administrativa.',
+                'document_id' => $createdDocument?->id,
+            ],
+        ]);
 
         return $this->ok([
             'company' => $this->formatCompanyPayload($user->fresh(['provider.companyDocuments', 'profile'])),
@@ -306,7 +343,15 @@ class ProveedorControlador extends ControladorBase
                 'expires_at' => $data['expires_at'] ?? null,
             ]));
 
-        $this->writeAudit($request, 'upload', 'provider_company_document', 'Documento de empresa cargado.');
+        $this->writeAudit($request, 'upload', 'provider_company_document', 'Documento de empresa cargado.', [
+            'new_values' => [
+                'provider_id' => $provider->id,
+                'document_id' => $document->id,
+                'event_type' => 'document_uploaded',
+                'title' => 'Documento legal cargado',
+                'description' => $document->document_name ?? $document->original_name ?? 'Documento de empresa',
+            ],
+        ]);
 
         return $this->ok([
             'document' => $document,
@@ -1228,6 +1273,7 @@ class ProveedorControlador extends ControladorBase
             'admin_rejected_at' => optional($provider?->admin_rejected_at)?->toISOString(),
             'admin_changes_requested_at' => optional($provider?->admin_changes_requested_at)?->toISOString(),
             'access_enabled' => $accessEnabled,
+            'provider_validation_requirements' => $provider ? $this->providerRequirementReviews($provider) : [],
             'validation_requirements' => $checklist,
             'can_validate' => collect($checklist)->every(fn (array $item) => (bool) ($item['complete'] ?? false)),
             'documents' => $documents,
@@ -1419,8 +1465,21 @@ class ProveedorControlador extends ControladorBase
         $satApproved = in_array($this->resolveSatValidationStatus($provider, $taxData), ['approved', 'aprobado', 'validated', 'validado'], true);
         $contactComplete = filled($provider->company_phone) && filled($provider->company_email);
         $representativeComplete = filled($provider->representative_name) && filled($provider->representative_phone);
+        $requirementReviews = $this->providerRequirementReviews($provider);
 
-        return [
+        return array_map(function (array $item) use ($requirementReviews) {
+            $review = $requirementReviews[$item['key']] ?? null;
+
+            return [
+                ...$item,
+                'response_status' => $review['status'] ?? 'pending',
+                'admin_note' => $review['admin_note'] ?? null,
+                'responded_at' => $review['updated_at'] ?? null,
+                'actor_id' => $review['actor_id'] ?? null,
+                'actor_name' => $review['actor_name'] ?? null,
+                'actor_type' => $review['actor_type'] ?? null,
+            ];
+        }, [
             [
                 'key' => 'company_identity',
                 'label' => 'Datos de empresa completos',
@@ -1469,7 +1528,14 @@ class ProveedorControlador extends ControladorBase
                 'complete' => $representativeComplete,
                 'message' => 'Falta representante legal completo.',
             ],
-        ];
+        ]);
+    }
+
+    private function providerRequirementReviews(Proveedor $provider): array
+    {
+        return is_array($provider->provider_validation_requirements)
+            ? $provider->provider_validation_requirements
+            : [];
     }
 
     private function formatOperationPayload(Operacion $operation): array

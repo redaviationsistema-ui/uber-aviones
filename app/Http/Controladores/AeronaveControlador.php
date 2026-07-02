@@ -131,6 +131,20 @@ class AeronaveControlador extends ControladorBase
             'currency' => $data['currency'] ?? 'USD',
         ]);
 
+        $this->writeAudit($request, 'create', 'provider_aircraft', 'Aeronave registrada por proveedor.', [
+            'new_values' => [
+                'provider_id' => $provider->id,
+                'aircraft_id' => $aircraft->id,
+                'event_type' => 'aircraft_created',
+                'title' => 'Aeronave registrada',
+                'description' => trim(implode(' · ', array_filter([
+                    $aircraft->model,
+                    $aircraft->registration,
+                    $aircraft->base_airport,
+                ]))),
+            ],
+        ]);
+
         return $this->ok([
             'aircraft' => $this->formatAircraftPayload(
                 $aircraft->fresh(['provider.user.activeSuscripcion.plan', 'availability', 'documents', 'images'])
@@ -154,8 +168,28 @@ class AeronaveControlador extends ControladorBase
     public function update(Request $request, Aeronave $aircraft)
     {
         $this->authorizeProveedorAeronave($request, $aircraft);
+        $previousState = $aircraft->only(['model', 'registration', 'base_airport', 'status', 'updated_at']);
 
         $aircraft->update($this->normalizeAircraftInput($request->validate($this->rules(false, $aircraft)), $aircraft));
+
+        $this->writeAudit($request, 'update', 'provider_aircraft', 'Aeronave actualizada por proveedor.', [
+            'old_values' => [
+                ...$previousState,
+                'provider_id' => $aircraft->provider_id,
+                'aircraft_id' => $aircraft->id,
+            ],
+            'new_values' => [
+                'provider_id' => $aircraft->provider_id,
+                'aircraft_id' => $aircraft->id,
+                'event_type' => 'aircraft_updated',
+                'title' => 'Aeronave actualizada',
+                'description' => trim(implode(' · ', array_filter([
+                    $aircraft->model,
+                    $aircraft->registration,
+                    $aircraft->base_airport,
+                ]))),
+            ],
+        ]);
 
         return $this->ok([
             'aircraft' => $this->formatAircraftPayload(
@@ -420,6 +454,17 @@ class AeronaveControlador extends ControladorBase
         }
 
         if (! empty($createdDocuments)) {
+            $this->writeAudit($request, 'upload', 'provider_aircraft_document', 'Documento de aeronave cargado.', [
+                'new_values' => [
+                    'provider_id' => $aircraft->provider_id,
+                    'aircraft_id' => $aircraft->id,
+                    'document_id' => $createdDocuments[0]->id,
+                    'event_type' => 'aircraft_document_uploaded',
+                    'title' => 'Documento de aeronave cargado',
+                    'description' => $createdDocuments[0]->document_name ?: $documentType,
+                ],
+            ]);
+
             return $this->ok([
                 'documents' => $createdDocuments,
                 'document' => $createdDocuments[0],
@@ -441,6 +486,17 @@ class AeronaveControlador extends ControladorBase
             'status' => 'pending',
             'verified_by_admin' => false,
             'notes' => $data['notes'] ?? null,
+        ]);
+
+        $this->writeAudit($request, 'upload', 'provider_aircraft_document', 'Documento de aeronave cargado.', [
+            'new_values' => [
+                'provider_id' => $aircraft->provider_id,
+                'aircraft_id' => $aircraft->id,
+                'document_id' => $document->id,
+                'event_type' => 'aircraft_document_uploaded',
+                'title' => 'Documento de aeronave cargado',
+                'description' => $document->document_name ?: $documentType,
+            ],
         ]);
 
         return $this->ok([
