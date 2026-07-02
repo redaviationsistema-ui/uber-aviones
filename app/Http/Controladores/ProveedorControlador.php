@@ -90,13 +90,16 @@ class ProveedorControlador extends ControladorBase
     public function profileStatus(Request $request)
     {
         $company = $this->formatCompanyPayload($request);
-        $approvalStatus = (string) ($company['approval_status'] ?? $company['status'] ?? 'pending');
-        $providerStatus = (string) ($company['admin_validation_status'] ?? 'expediente_incompleto');
+        $approvalStatus = (string) ($company['approval_status'] ?? 'pending');
+        $providerStatus = (string) ($company['admin_validation_status'] ?? 'draft');
+        $accessEnabled = (bool) ($company['access_enabled'] ?? false);
 
         return $this->ok([
             'provider_status' => $providerStatus,
             'approval_status' => $approvalStatus,
-            'can_register_aircraft' => $approvalStatus === 'approved',
+            'operator_status' => (string) ($company['operator_status'] ?? 'incomplete'),
+            'access_enabled' => $accessEnabled,
+            'can_register_aircraft' => $accessEnabled,
             'company' => $company,
         ]);
     }
@@ -245,12 +248,25 @@ class ProveedorControlador extends ControladorBase
             'approval_status' => 'pending',
             'status' => 'pending_review',
             'admin_validation_status' => 'pending_review',
+            'operator_status' => 'pending_review',
+            'access_enabled' => false,
             'admin_review_submitted_at' => now(),
+            'admin_notes' => $data['notes'] ?? $provider->admin_notes,
             'admin_validation_notes' => $data['notes'] ?? $provider->admin_validation_notes,
+            'changes_notes' => null,
+            'rejection_reason' => null,
+            'validated_by' => null,
+            'validated_at' => null,
+            'rejected_by' => null,
+            'rejected_at' => null,
+            'changes_requested_by' => null,
+            'changes_requested_at' => null,
             'admin_validated_by' => null,
             'admin_validated_at' => null,
             'admin_rejected_by' => null,
             'admin_rejected_at' => null,
+            'admin_changes_requested_by' => null,
+            'admin_changes_requested_at' => null,
         ]);
         $this->writeAudit($request, 'submit_review', 'provider_company', 'Proveedor enviado a revision administrativa.');
 
@@ -1159,9 +1175,11 @@ class ProveedorControlador extends ControladorBase
                 ->all()
             : $legacyDocuments;
 
-        $adminValidationStatus = $provider ? $this->resolveAdminValidationStatus($provider, $taxData) : 'expediente_incompleto';
+        $adminValidationStatus = $provider ? $this->resolveAdminValidationStatus($provider, $taxData) : 'draft';
+        $operatorStatus = $provider ? $this->resolveOperatorStatus($provider, $adminValidationStatus) : 'incomplete';
         $satValidationStatus = $provider ? $this->resolveSatValidationStatus($provider, $taxData) : (filled($taxData['rfc'] ?? null) ? 'approved' : 'pending');
         $checklist = $provider ? $this->companyValidationChecklist($provider, $documents, $taxData) : [];
+        $accessEnabled = $provider ? $this->resolveProviderAccessEnabled($provider, $adminValidationStatus) : false;
 
         return [
             'id' => $provider?->id,
@@ -1188,19 +1206,28 @@ class ProveedorControlador extends ControladorBase
             'base_airport' => $provider?->base_airport ?? $profile?->base_airport,
             'address' => $profile?->address,
             'legal_representative' => $provider?->representative_name ?? $taxData['legal_representative'] ?? null,
-            'status' => $provider?->status ?? $adminValidationStatus,
+            'status' => $provider?->status ?? $operatorStatus,
             'approval_status' => $provider?->approval_status ?? 'pending',
             'validation_status' => $provider?->approval_status ?? 'pending',
             'review_status' => $adminValidationStatus,
             'admin_validation_status' => $adminValidationStatus,
+            'operator_status' => $operatorStatus,
             'sat_validation_status' => $satValidationStatus,
-            'admin_notes' => $provider?->admin_validation_notes ?? $provider?->notes,
-            'admin_validation_notes' => $provider?->admin_validation_notes ?? $provider?->notes,
+            'admin_notes' => $provider?->admin_notes ?? $provider?->admin_validation_notes ?? $provider?->notes,
+            'admin_validation_notes' => $provider?->admin_validation_notes ?? $provider?->admin_notes ?? $provider?->notes,
+            'changes_notes' => $provider?->changes_notes,
+            'rejection_reason' => $provider?->rejection_reason,
+            'validated_by' => $provider?->validated_by ?? $provider?->admin_validated_by,
+            'validated_at' => optional($provider?->validated_at ?? $provider?->admin_validated_at)?->toISOString(),
+            'rejected_by' => $provider?->rejected_by ?? $provider?->admin_rejected_by,
+            'rejected_at' => optional($provider?->rejected_at ?? $provider?->admin_rejected_at)?->toISOString(),
+            'changes_requested_by' => $provider?->changes_requested_by ?? $provider?->admin_changes_requested_by,
+            'changes_requested_at' => optional($provider?->changes_requested_at ?? $provider?->admin_changes_requested_at)?->toISOString(),
             'admin_review_submitted_at' => optional($provider?->admin_review_submitted_at)?->toISOString(),
             'admin_validated_at' => optional($provider?->admin_validated_at)?->toISOString(),
             'admin_rejected_at' => optional($provider?->admin_rejected_at)?->toISOString(),
             'admin_changes_requested_at' => optional($provider?->admin_changes_requested_at)?->toISOString(),
-            'access_enabled' => ($provider?->approval_status === 'approved') && $adminValidationStatus === 'approved',
+            'access_enabled' => $accessEnabled,
             'validation_requirements' => $checklist,
             'can_validate' => collect($checklist)->every(fn (array $item) => (bool) ($item['complete'] ?? false)),
             'documents' => $documents,
@@ -1333,6 +1360,7 @@ class ProveedorControlador extends ControladorBase
     {
         $normalized = strtolower(trim((string) ($provider->admin_validation_status ?: ($taxData['admin_validation_status'] ?? ''))));
         if ($normalized !== '') {
+            if ($normalized === 'expediente_incompleto') return 'draft';
             return $normalized;
         }
 
@@ -1340,8 +1368,34 @@ class ProveedorControlador extends ControladorBase
             'approved' => 'approved',
             'rejected' => 'rejected',
             'suspended' => 'changes_required',
-            default => ($provider->admin_review_submitted_at ? 'pending_review' : 'expediente_incompleto'),
+            default => ($provider->admin_review_submitted_at ? 'pending_review' : 'draft'),
         };
+    }
+
+    private function resolveOperatorStatus(Proveedor $provider, ?string $adminValidationStatus = null): string
+    {
+        $normalized = strtolower(trim((string) ($provider->operator_status ?: '')));
+        if ($normalized !== '') {
+            return $normalized;
+        }
+
+        return match ($adminValidationStatus ?: $this->resolveAdminValidationStatus($provider)) {
+            'approved' => 'validated',
+            'rejected' => 'rejected',
+            'changes_required' => 'changes_required',
+            'pending_review', 'pending_validation' => 'pending_review',
+            default => 'incomplete',
+        };
+    }
+
+    private function resolveProviderAccessEnabled(Proveedor $provider, ?string $adminValidationStatus = null): bool
+    {
+        if ($provider->access_enabled !== null) {
+            return (bool) $provider->access_enabled;
+        }
+
+        return ($adminValidationStatus ?: $this->resolveAdminValidationStatus($provider)) === 'approved'
+            && strtolower(trim((string) $provider->approval_status)) === 'approved';
     }
 
     private function resolveSatValidationStatus(Proveedor $provider, array $taxData = []): string
@@ -1358,12 +1412,21 @@ class ProveedorControlador extends ControladorBase
     {
         $approvedDocumentStatuses = ['approved', 'aprobado', 'aprobada', 'vigente', 'validado'];
         $activeAircraftStatuses = ['active', 'trial_active', 'approved', 'aprobada', 'aprobado'];
+        $companyIdentityComplete = filled($provider->company_name) && filled($provider->commercial_name) && filled($provider->legal_name);
         $documentsApproved = $documents !== []
             && collect($documents)->every(fn (array $document) => in_array(strtolower(trim((string) ($document['status'] ?? $document['state'] ?? ''))), $approvedDocumentStatuses, true));
         $activeAircraft = $provider->aircraft->filter(fn ($aircraft) => in_array(strtolower(trim((string) $aircraft->status)), $activeAircraftStatuses, true))->count();
         $satApproved = in_array($this->resolveSatValidationStatus($provider, $taxData), ['approved', 'aprobado', 'validated', 'validado'], true);
+        $contactComplete = filled($provider->company_phone) && filled($provider->company_email);
+        $representativeComplete = filled($provider->representative_name) && filled($provider->representative_phone);
 
         return [
+            [
+                'key' => 'company_identity',
+                'label' => 'Datos de empresa completos',
+                'complete' => $companyIdentityComplete,
+                'message' => 'Faltan datos de empresa completos.',
+            ],
             [
                 'key' => 'rfc_valid',
                 'label' => 'RFC valido',
@@ -1397,13 +1460,13 @@ class ProveedorControlador extends ControladorBase
             [
                 'key' => 'contact_complete',
                 'label' => 'Datos de contacto completos',
-                'complete' => filled($provider->company_phone) && filled($provider->company_email),
+                'complete' => $contactComplete,
                 'message' => 'Faltan datos de contacto completos.',
             ],
             [
                 'key' => 'legal_representative_complete',
                 'label' => 'Representante legal completo',
-                'complete' => filled($provider->representative_name) && filled($provider->representative_phone),
+                'complete' => $representativeComplete,
                 'message' => 'Falta representante legal completo.',
             ],
         ];

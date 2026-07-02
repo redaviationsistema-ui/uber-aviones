@@ -289,27 +289,48 @@ class AdministradorControlador extends ControladorBase
     public function validateProveedor(Request $request, Proveedor $provider)
     {
         $checklist = $this->providerValidationChecklist($provider->fresh(['user.profile', 'aircraft', 'companyDocuments']));
-        $missing = collect($checklist)->where('complete', false)->pluck('message')->filter()->values()->all();
+        $missingLabels = collect($checklist)
+            ->where('complete', false)
+            ->pluck('label')
+            ->filter()
+            ->values()
+            ->all();
 
-        if ($missing !== []) {
+        if ($missingLabels !== []) {
             throw ValidationException::withMessages([
-                'validation' => $missing,
+                'validation' => [
+                    'No se puede validar todavia. Faltan requisitos obligatorios: '.implode(', ', $missingLabels).'.',
+                ],
             ]);
         }
 
         $data = $request->validate([
             'notes' => ['nullable', 'string', 'max:5000'],
+            'admin_notes' => ['nullable', 'string', 'max:5000'],
             'sat_validation_status' => ['nullable', 'string', 'max:50'],
         ]);
 
+        $adminNotes = $data['admin_notes'] ?? $data['notes'] ?? null;
+
         $provider->update([
             'admin_validation_status' => 'approved',
+            'operator_status' => 'validated',
             'approval_status' => 'approved',
             'status' => 'approved',
+            'access_enabled' => true,
             'sat_validation_status' => $data['sat_validation_status'] ?? ($provider->sat_validation_status ?: 'approved'),
-            'admin_validation_notes' => $data['notes'] ?? $provider->admin_validation_notes,
+            'admin_notes' => $adminNotes,
+            'admin_validation_notes' => $adminNotes,
+            'validated_by' => $request->user()?->id,
+            'validated_at' => now(),
             'admin_validated_by' => $request->user()?->id,
             'admin_validated_at' => now(),
+            'rejected_by' => null,
+            'rejected_at' => null,
+            'rejection_reason' => null,
+            'changes_requested_by' => null,
+            'changes_requested_at' => null,
+            'changes_notes' => null,
             'admin_rejected_by' => null,
             'admin_rejected_at' => null,
             'admin_changes_requested_by' => null,
@@ -325,13 +346,29 @@ class AdministradorControlador extends ControladorBase
     {
         $data = $request->validate([
             'notes' => ['required', 'string', 'max:5000'],
+            'admin_notes' => ['nullable', 'string', 'max:5000'],
+            'changes_notes' => ['nullable', 'string', 'max:5000'],
         ]);
+
+        $changesNotes = trim((string) ($data['changes_notes'] ?? $data['notes'] ?? ''));
+        $adminNotes = trim((string) ($data['admin_notes'] ?? $data['notes'] ?? ''));
 
         $provider->update([
             'admin_validation_status' => 'changes_required',
+            'operator_status' => 'changes_required',
             'approval_status' => 'pending',
             'status' => 'changes_required',
-            'admin_validation_notes' => $data['notes'],
+            'access_enabled' => false,
+            'changes_requested_by' => $request->user()?->id,
+            'changes_requested_at' => now(),
+            'changes_notes' => $changesNotes,
+            'admin_notes' => $adminNotes,
+            'admin_validation_notes' => $adminNotes,
+            'validated_by' => null,
+            'validated_at' => null,
+            'rejected_by' => null,
+            'rejected_at' => null,
+            'rejection_reason' => null,
             'admin_changes_requested_by' => $request->user()?->id,
             'admin_changes_requested_at' => now(),
             'admin_validated_by' => null,
@@ -349,13 +386,29 @@ class AdministradorControlador extends ControladorBase
     {
         $data = $request->validate([
             'notes' => ['required', 'string', 'max:5000'],
+            'admin_notes' => ['nullable', 'string', 'max:5000'],
+            'rejection_reason' => ['nullable', 'string', 'max:5000'],
         ]);
+
+        $rejectionReason = trim((string) ($data['rejection_reason'] ?? $data['notes'] ?? ''));
+        $adminNotes = trim((string) ($data['admin_notes'] ?? $data['notes'] ?? ''));
 
         $provider->update([
             'admin_validation_status' => 'rejected',
+            'operator_status' => 'rejected',
             'approval_status' => 'rejected',
             'status' => 'rejected',
-            'admin_validation_notes' => $data['notes'],
+            'access_enabled' => false,
+            'rejected_by' => $request->user()?->id,
+            'rejected_at' => now(),
+            'rejection_reason' => $rejectionReason,
+            'admin_notes' => $adminNotes,
+            'admin_validation_notes' => $adminNotes,
+            'validated_by' => null,
+            'validated_at' => null,
+            'changes_requested_by' => null,
+            'changes_requested_at' => null,
+            'changes_notes' => null,
             'admin_rejected_by' => $request->user()?->id,
             'admin_rejected_at' => now(),
             'admin_validated_by' => null,
@@ -678,14 +731,26 @@ class AdministradorControlador extends ControladorBase
             ->all();
         $checklist = $this->providerValidationChecklist($provider);
         $adminValidationStatus = $this->resolveAdminValidationStatus($provider);
+        $operatorStatus = $this->resolveOperatorStatus($provider, $adminValidationStatus);
+        $accessEnabled = $this->resolveProviderAccessEnabled($provider, $adminValidationStatus);
 
         return [
             ...$provider->attributesToArray(),
             'provider_id' => $provider->id,
             'admin_validation_status' => $adminValidationStatus,
+            'operator_status' => $operatorStatus,
             'sat_validation_status' => $this->resolveSatValidationStatus($provider),
-            'admin_validation_notes' => $provider->admin_validation_notes ?: $provider->notes,
-            'access_enabled' => $provider->approval_status === 'approved' && $adminValidationStatus === 'approved',
+            'admin_notes' => $provider->admin_notes ?: $provider->admin_validation_notes ?: $provider->notes,
+            'admin_validation_notes' => $provider->admin_validation_notes ?: $provider->admin_notes ?: $provider->notes,
+            'changes_notes' => $provider->changes_notes,
+            'rejection_reason' => $provider->rejection_reason,
+            'validated_by' => $provider->validated_by ?: $provider->admin_validated_by,
+            'validated_at' => optional($provider->validated_at ?: $provider->admin_validated_at)?->toISOString(),
+            'rejected_by' => $provider->rejected_by ?: $provider->admin_rejected_by,
+            'rejected_at' => optional($provider->rejected_at ?: $provider->admin_rejected_at)?->toISOString(),
+            'changes_requested_by' => $provider->changes_requested_by ?: $provider->admin_changes_requested_by,
+            'changes_requested_at' => optional($provider->changes_requested_at ?: $provider->admin_changes_requested_at)?->toISOString(),
+            'access_enabled' => $accessEnabled,
             'validation_requirements' => $checklist,
             'can_validate' => collect($checklist)->every(fn (array $item) => (bool) ($item['complete'] ?? false)),
             'documents' => $documents,
@@ -703,6 +768,7 @@ class AdministradorControlador extends ControladorBase
     {
         $normalized = strtolower(trim((string) ($provider->admin_validation_status ?: '')));
         if ($normalized !== '') {
+            if ($normalized === 'expediente_incompleto') return 'draft';
             return $normalized;
         }
 
@@ -710,8 +776,34 @@ class AdministradorControlador extends ControladorBase
             'approved' => 'approved',
             'rejected' => 'rejected',
             'suspended' => 'changes_required',
-            default => ($provider->admin_review_submitted_at ? 'pending_review' : 'expediente_incompleto'),
+            default => ($provider->admin_review_submitted_at ? 'pending_review' : 'draft'),
         };
+    }
+
+    private function resolveOperatorStatus(Proveedor $provider, ?string $adminValidationStatus = null): string
+    {
+        $normalized = strtolower(trim((string) ($provider->operator_status ?: '')));
+        if ($normalized !== '') {
+            return $normalized;
+        }
+
+        return match ($adminValidationStatus ?: $this->resolveAdminValidationStatus($provider)) {
+            'approved' => 'validated',
+            'rejected' => 'rejected',
+            'changes_required' => 'changes_required',
+            'pending_review', 'pending_validation' => 'pending_review',
+            default => 'incomplete',
+        };
+    }
+
+    private function resolveProviderAccessEnabled(Proveedor $provider, ?string $adminValidationStatus = null): bool
+    {
+        if ($provider->access_enabled !== null) {
+            return (bool) $provider->access_enabled;
+        }
+
+        return ($adminValidationStatus ?: $this->resolveAdminValidationStatus($provider)) === 'approved'
+            && strtolower(trim((string) $provider->approval_status)) === 'approved';
     }
 
     private function resolveSatValidationStatus(Proveedor $provider): string
@@ -731,6 +823,7 @@ class AdministradorControlador extends ControladorBase
         $documents = $provider->companyDocuments ?? collect();
         $approvedDocumentStatuses = ['approved', 'aprobado', 'aprobada', 'vigente', 'validado'];
         $activeAircraftStatuses = ['active', 'trial_active', 'approved', 'aprobada', 'aprobado'];
+        $companyIdentityComplete = filled($provider->company_name) && filled($provider->commercial_name) && filled($provider->legal_name);
         $contactComplete = filled($provider->company_phone) && filled($provider->company_email);
         $representativeComplete = filled($provider->representative_name) && filled($provider->representative_phone);
         $documentsApproved = $documents->isNotEmpty()
@@ -739,6 +832,12 @@ class AdministradorControlador extends ControladorBase
         $activeAircraft = ($provider->aircraft ?? collect())->filter(fn ($aircraft) => in_array(strtolower(trim((string) $aircraft->status)), $activeAircraftStatuses, true))->count();
 
         return [
+            [
+                'key' => 'company_identity',
+                'label' => 'Datos de empresa completos',
+                'complete' => $companyIdentityComplete,
+                'message' => 'Faltan datos de empresa completos.',
+            ],
             [
                 'key' => 'rfc_valid',
                 'label' => 'RFC valido',
