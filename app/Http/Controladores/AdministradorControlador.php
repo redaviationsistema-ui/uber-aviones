@@ -6,6 +6,7 @@ use App\Modelos\Aeronave;
 use App\Modelos\RegistroAuditoria;
 use App\Modelos\Comision;
 use App\Modelos\Demo;
+use App\Modelos\DocumentoEmpresa;
 use App\Modelos\SolicitudVuelo;
 use App\Modelos\Pago;
 use App\Modelos\Plan;
@@ -16,6 +17,7 @@ use App\Modelos\Suscripcion;
 use App\Modelos\ConfiguracionSistema;
 use App\Modelos\Usuario;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Storage;
 
 class AdministradorControlador extends ControladorBase
 {
@@ -179,33 +181,136 @@ class AdministradorControlador extends ControladorBase
 
     public function providers()
     {
-        return $this->ok(['providers' => Proveedor::with(['user', 'aircraft'])->paginate(25)]);
+        return $this->ok([
+            'providers' => Proveedor::with(['user', 'aircraft', 'companyDocuments'])
+                ->paginate(25)
+                ->through(fn (Proveedor $provider) => $this->serializeProvider($provider)),
+        ]);
     }
 
     public function showProveedor(Proveedor $provider)
     {
-        return $this->ok(['provider' => $provider->load(['user', 'aircraft'])]);
+        $provider->load(['user', 'aircraft', 'companyDocuments']);
+
+        return $this->ok([
+            'provider' => $this->serializeProvider($provider),
+            'company' => $this->serializeProvider($provider),
+            'documents' => $provider->companyDocuments
+                ->sortByDesc('id')
+                ->values()
+                ->map(fn (DocumentoEmpresa $document) => $this->serializeProviderDocument($document))
+                ->all(),
+        ]);
+    }
+
+    public function providerDocuments(Proveedor $provider)
+    {
+        $provider->loadMissing('companyDocuments');
+
+        return $this->ok([
+            'provider' => $this->serializeProvider($provider),
+            'documents' => $provider->companyDocuments
+                ->sortByDesc('id')
+                ->values()
+                ->map(fn (DocumentoEmpresa $document) => $this->serializeProviderDocument($document))
+                ->all(),
+        ]);
+    }
+
+    public function downloadProviderDocument(Proveedor $provider, DocumentoEmpresa $document)
+    {
+        abort_if($document->provider_id !== $provider->id, 404, 'Documento no encontrado para este proveedor.');
+
+        return $this->downloadCompanyDocumentResponse($document);
+    }
+
+    public function downloadCompanyDocumentByDocument(DocumentoEmpresa $document)
+    {
+        return $this->downloadCompanyDocumentResponse($document);
+    }
+
+    public function updateProviderDocument(Request $request, Proveedor $provider, DocumentoEmpresa $document)
+    {
+        abort_if($document->provider_id !== $provider->id, 404, 'Documento no encontrado para este proveedor.');
+
+        $data = $request->validate([
+            'status' => ['nullable', 'string', 'max:100'],
+            'validation_status' => ['nullable', 'string', 'max:100'],
+            'review_status' => ['nullable', 'string', 'max:100'],
+            'notes' => ['nullable', 'string', 'max:5000'],
+            'observation' => ['nullable', 'string', 'max:5000'],
+            'observacion' => ['nullable', 'string', 'max:5000'],
+        ]);
+
+        $nextStatus = $data['status']
+            ?? $data['validation_status']
+            ?? $data['review_status']
+            ?? $document->status
+            ?? 'pendiente';
+        $nextNotes = $data['notes'] ?? $data['observation'] ?? $data['observacion'] ?? $document->notes;
+
+        $document->update([
+            'status' => $nextStatus,
+            'notes' => $nextNotes,
+        ]);
+
+        if ($nextStatus === 'approved') {
+            $provider->update(['approval_status' => 'approved']);
+        } elseif ($nextStatus === 'rejected') {
+            $provider->update(['approval_status' => 'rejected']);
+        } elseif (in_array($nextStatus, ['pending', 'pendiente', 'pending_validation'], true)) {
+            $provider->update(['approval_status' => 'pending']);
+        }
+
+        return $this->ok([
+            'document' => $this->serializeProviderDocument($document->fresh()),
+            'provider' => $this->serializeProvider($provider->fresh(['user', 'aircraft', 'companyDocuments'])),
+        ]);
+    }
+
+    public function approveProviderDocument(Request $request, Proveedor $provider, DocumentoEmpresa $document)
+    {
+        $request->merge(['status' => 'approved']);
+
+        return $this->updateProviderDocument($request, $provider, $document);
+    }
+
+    public function rejectProviderDocument(Request $request, Proveedor $provider, DocumentoEmpresa $document)
+    {
+        $request->merge(['status' => 'rejected']);
+
+        return $this->updateProviderDocument($request, $provider, $document);
+    }
+
+    public function approveCompanyDocumentByDocument(Request $request, DocumentoEmpresa $document)
+    {
+        return $this->approveProviderDocument($request, $document->provider()->firstOrFail(), $document);
+    }
+
+    public function rejectCompanyDocumentByDocument(Request $request, DocumentoEmpresa $document)
+    {
+        return $this->rejectProviderDocument($request, $document->provider()->firstOrFail(), $document);
     }
 
     public function approveProveedor(Proveedor $provider)
     {
         $provider->update(['approval_status' => 'approved']);
 
-        return $this->ok(['provider' => $provider->fresh('user')]);
+        return $this->ok(['provider' => $this->serializeProvider($provider->fresh(['user', 'aircraft', 'companyDocuments']))]);
     }
 
     public function rejectProveedor(Proveedor $provider)
     {
         $provider->update(['approval_status' => 'rejected']);
 
-        return $this->ok(['provider' => $provider->fresh('user')]);
+        return $this->ok(['provider' => $this->serializeProvider($provider->fresh(['user', 'aircraft', 'companyDocuments']))]);
     }
 
     public function suspendProveedor(Proveedor $provider)
     {
         $provider->update(['approval_status' => 'suspended']);
 
-        return $this->ok(['provider' => $provider->fresh('user')]);
+        return $this->ok(['provider' => $this->serializeProvider($provider->fresh(['user', 'aircraft', 'companyDocuments']))]);
     }
 
     public function aircraft()
@@ -490,5 +595,81 @@ class AdministradorControlador extends ControladorBase
             'trial_consumed' => $freeQuotesUsed >= $freeQuoteLimit,
             'is_new_registration' => $freeQuotesUsed === 0 && ! $user->has_paid_access,
         ];
+    }
+
+    private function serializeProvider(Proveedor $provider): array
+    {
+        $provider->loadMissing(['user', 'aircraft', 'companyDocuments']);
+        $documents = $provider->companyDocuments
+            ->sortByDesc('id')
+            ->values()
+            ->map(fn (DocumentoEmpresa $document) => $this->serializeProviderDocument($document))
+            ->all();
+
+        return [
+            ...$provider->attributesToArray(),
+            'provider_id' => $provider->id,
+            'documents' => $documents,
+            'company_documents' => $documents,
+            'legal_documents' => $documents,
+            'documents_count' => count($documents),
+            'legal_documents_count' => count($documents),
+            'company_documents_count' => count($documents),
+            'user' => $provider->user,
+            'aircraft' => $provider->aircraft,
+        ];
+    }
+
+    private function serializeProviderDocument(DocumentoEmpresa $document): array
+    {
+        $downloadUrl = sprintf('/api/v1/admin/proveedores/%d/documentos/%d/descargar', $document->provider_id, $document->id);
+
+        return [
+            'id' => $document->id,
+            'provider_id' => $document->provider_id,
+            'document_name' => $document->document_name ?? 'Documento',
+            'name' => $document->document_name ?? 'Documento',
+            'original_name' => $document->original_name ?? $document->document_name ?? 'Documento',
+            'file_name' => $document->file_name ?? basename((string) ($document->storage_path ?: $document->document_url ?: $document->file_url ?: '')),
+            'path' => $document->storage_path,
+            'storage_path' => $document->storage_path,
+            'storage_disk' => $document->storage_disk,
+            'file_url' => $document->file_url,
+            'document_url' => $document->document_url,
+            'url' => $document->document_url ?: $document->file_url,
+            'download_url' => $downloadUrl,
+            'downloadUrl' => $downloadUrl,
+            'mime_type' => $document->mime_type,
+            'size' => (int) ($document->file_size_bytes ?? 0),
+            'file_size_bytes' => (int) ($document->file_size_bytes ?? 0),
+            'status' => $document->status ?? 'pendiente',
+            'notes' => $document->notes,
+            'expires_at' => optional($document->expires_at)?->toISOString(),
+            'created_at' => optional($document->created_at)?->toISOString(),
+            'updated_at' => optional($document->updated_at)?->toISOString(),
+        ];
+    }
+
+    private function downloadCompanyDocumentResponse(DocumentoEmpresa $document)
+    {
+        $disk = trim((string) ($document->storage_disk ?: 's3')) ?: 's3';
+        $path = trim((string) ($document->storage_path ?: ''));
+
+        if ($path !== '' && config("filesystems.disks.{$disk}") !== null) {
+            $storage = Storage::disk($disk);
+            abort_unless($storage->exists($path), 404, 'Archivo no encontrado en almacenamiento.');
+
+            return $storage->response(
+                $path,
+                $document->original_name ?: $document->document_name ?: basename($path),
+                ['Content-Type' => $document->mime_type ?: 'application/octet-stream'],
+                'inline'
+            );
+        }
+
+        $fallbackUrl = trim((string) ($document->document_url ?: $document->file_url ?: ''));
+        abort_if($fallbackUrl === '', 404, 'Documento sin URL disponible.');
+
+        return redirect()->away($fallbackUrl);
     }
 }

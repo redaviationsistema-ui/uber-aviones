@@ -19,11 +19,28 @@ Route::prefix('admin')->middleware(['auth.token', 'role:admin'])->group(function
     Route::post('/users/{user}/activate', [AdministradorControlador::class, 'activateUsuario']);
 
     Route::get('/clientes', [AdministradorControlador::class, 'clients']);
+    Route::get('/providers', [AdministradorControlador::class, 'providers']);
     Route::get('/proveedores', [AdministradorControlador::class, 'providers']);
+    Route::get('/providers/{provider}', [AdministradorControlador::class, 'showProveedor']);
+    Route::get('/providers/{provider}/detail', [AdministradorControlador::class, 'showProveedor']);
+    Route::get('/providers/{provider}/documents', [AdministradorControlador::class, 'providerDocuments']);
+    Route::get('/providers/{provider}/documents/{document}/download', [AdministradorControlador::class, 'downloadProviderDocument']);
+    Route::patch('/providers/{provider}/documents/{document}', [AdministradorControlador::class, 'updateProviderDocument']);
+    Route::post('/providers/{provider}/documents/{document}/approved', [AdministradorControlador::class, 'approveProviderDocument']);
+    Route::post('/providers/{provider}/documents/{document}/rejected', [AdministradorControlador::class, 'rejectProviderDocument']);
     Route::get('/proveedores/{provider}', [AdministradorControlador::class, 'showProveedor']);
+    Route::get('/proveedores/{provider}/detalle', [AdministradorControlador::class, 'showProveedor']);
+    Route::get('/proveedores/{provider}/documentos', [AdministradorControlador::class, 'providerDocuments']);
+    Route::get('/proveedores/{provider}/documentos/{document}/descargar', [AdministradorControlador::class, 'downloadProviderDocument']);
+    Route::patch('/proveedores/{provider}/documentos/{document}', [AdministradorControlador::class, 'updateProviderDocument']);
+    Route::post('/proveedores/{provider}/documentos/{document}/approved', [AdministradorControlador::class, 'approveProviderDocument']);
+    Route::post('/proveedores/{provider}/documentos/{document}/rejected', [AdministradorControlador::class, 'rejectProviderDocument']);
     Route::post('/proveedores/{provider}/aprobar', [AdministradorControlador::class, 'approveProveedor']);
     Route::post('/proveedores/{provider}/rechazar', [AdministradorControlador::class, 'rejectProveedor']);
     Route::post('/proveedores/{provider}/suspender', [AdministradorControlador::class, 'suspendProveedor']);
+    Route::get('/company-documents/{document}/download', [AdministradorControlador::class, 'downloadCompanyDocumentByDocument']);
+    Route::post('/company-documents/{document}/approved', [AdministradorControlador::class, 'approveCompanyDocumentByDocument']);
+    Route::post('/company-documents/{document}/rejected', [AdministradorControlador::class, 'rejectCompanyDocumentByDocument']);
     Route::get('/sobrecargos', [RedAviationAdminControlador::class, 'sobrecargos']);
     Route::put('/sobrecargos/{user}', [RedAviationAdminControlador::class, 'updateSobrecargo']);
     Route::get('/crew', [RedAviationAdminControlador::class, 'sobrecargos']);

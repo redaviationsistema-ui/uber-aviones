@@ -19,7 +19,9 @@ use App\Modelos\Usuario;
 use App\Servicios\ReintentoCoincidenciaSolicitudServicio;
 use App\Servicios\RedAviation\VisibilidadServicio;
 use Illuminate\Http\Request;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
@@ -199,14 +201,50 @@ class ProveedorControlador extends ControladorBase
 
     public function submitCompanyReview(Request $request)
     {
-        $provider = $request->user()->provider;
+        Log::info('INPUT', $request->all());
+        Log::info('FILES', $request->allFiles());
+
+        $user = $request->user()->loadMissing('provider', 'profile');
+        $provider = $user->provider;
         abort_if(! $provider, 404, 'Proveedor no encontrado.');
+
+        $data = $request->validate([
+            'file' => ['nullable', 'file', 'max:20480'],
+            'document' => ['nullable', 'file', 'max:20480'],
+            'legal_document' => ['nullable', 'file', 'max:20480'],
+            'documents' => ['nullable', 'array', 'max:10'],
+            'documents.*' => ['file', 'max:20480'],
+            'documents.*.*' => ['file', 'max:20480'],
+            'document_name' => ['nullable', 'string', 'max:150'],
+            'original_name' => ['nullable', 'string', 'max:255'],
+            'notes' => ['nullable', 'string', 'max:5000'],
+            'status' => ['nullable', 'string', 'max:100'],
+            'validation_status' => ['nullable', 'string', 'max:100'],
+            'review_status' => ['nullable', 'string', 'max:100'],
+        ]);
+
+        $document = $this->extractCompanyDocumentUploadFromRequest($request);
+        Log::info('COMPANY_REVIEW_HAS_FILE', [
+            'has_file' => $request->hasFile('file'),
+            'has_document' => $request->hasFile('document'),
+            'has_legal_document' => $request->hasFile('legal_document'),
+            'has_documents' => $request->hasFile('documents'),
+            'resolved_original_name' => $document?->getClientOriginalName(),
+        ]);
+
+        if ($document instanceof UploadedFile) {
+            $this->createCompanyDocumentRecord($provider, $document, [
+                'document_name' => $data['document_name'] ?? $data['original_name'] ?? $document->getClientOriginalName(),
+                'notes' => $data['notes'] ?? null,
+                'status' => 'pending',
+            ]);
+        }
 
         $provider->update(['approval_status' => 'pending']);
         $this->writeAudit($request, 'submit_review', 'provider_company', 'Proveedor enviado a revision.');
 
         return $this->ok([
-            'company' => $this->formatCompanyPayload($request->user()->fresh(['provider', 'profile'])),
+            'company' => $this->formatCompanyPayload($user->fresh(['provider.companyDocuments', 'profile'])),
             'message' => 'Empresa enviada a revision.',
         ]);
     }
@@ -222,34 +260,24 @@ class ProveedorControlador extends ControladorBase
             'file_url' => ['required_without_all:file,document_url', 'nullable', 'string', 'max:255'],
             'document_name' => ['nullable', 'string', 'max:150'],
             'document_url' => ['required_without_all:file,file_url', 'nullable', 'string'],
+            'notes' => ['nullable', 'string', 'max:5000'],
             'expires_at' => ['nullable', 'date'],
         ]);
 
-        if ($request->hasFile('file')) {
-            $missingVariables = $this->missingS3UploadConfigurationVariables();
-
-            abort_if(
-                $missingVariables !== [],
-                500,
-                'Falta configuracion de AWS S3 en el servidor. Variables faltantes o vacias: '.implode(', ', $missingVariables).'.'
-            );
-
-            $path = $request->file('file')->store('company-documents', 's3');
-            abort_if(! $path, 500, 'No se pudo subir el documento de empresa al almacenamiento S3.');
-
-            $documentUrl = Storage::disk('s3')->url($path);
-            $data['file_url'] = $documentUrl;
-            $data['document_url'] = $documentUrl;
-            $data['mime_type'] = $request->file('file')->getClientMimeType();
-            $data['file_size_bytes'] = $request->file('file')->getSize();
-            $data['document_name'] = $data['document_name'] ?? $request->file('file')->getClientOriginalName();
-        }
-
-        $data['file_url'] = $data['file_url'] ?? $data['document_url'];
-        $data['document_url'] = $data['document_url'] ?? $data['file_url'];
-        $data['status'] = 'pendiente';
-
-        $document = $provider->companyDocuments()->create($data);
+        $document = $request->hasFile('file')
+            ? $this->createCompanyDocumentRecord($provider, $request->file('file'), $data)
+            : $provider->companyDocuments()->create([
+                'document_name' => $data['document_name'] ?? basename((string) parse_url((string) ($data['document_url'] ?? $data['file_url'] ?? ''), PHP_URL_PATH)),
+                'original_name' => $data['document_name'] ?? basename((string) parse_url((string) ($data['document_url'] ?? $data['file_url'] ?? ''), PHP_URL_PATH)),
+                'file_name' => basename((string) parse_url((string) ($data['document_url'] ?? $data['file_url'] ?? ''), PHP_URL_PATH)),
+                'file_url' => $data['file_url'] ?? $data['document_url'],
+                'document_url' => $data['document_url'] ?? $data['file_url'],
+                'mime_type' => $data['mime_type'] ?? null,
+                'file_size_bytes' => $data['file_size_bytes'] ?? null,
+                'status' => 'pendiente',
+                'notes' => $data['notes'] ?? null,
+                'expires_at' => $data['expires_at'] ?? null,
+            ]);
 
         $this->writeAudit($request, 'upload', 'provider_company_document', 'Documento de empresa cargado.');
 
@@ -1116,14 +1144,7 @@ class ProveedorControlador extends ControladorBase
             ? $provider->companyDocuments
                 ->sortByDesc('id')
                 ->values()
-                ->map(fn (DocumentoEmpresa $document) => [
-                    'id' => $document->id,
-                    'name' => $document->document_name ?? 'Documento',
-                    'state' => $document->status ?? 'pendiente',
-                    'file_url' => $document->file_url,
-                    'document_url' => $document->document_url,
-                    'expires_at' => optional($document->expires_at)?->toISOString(),
-                ])
+                ->map(fn (DocumentoEmpresa $document) => $this->formatCompanyDocumentPayload($document))
                 ->all()
             : $legacyDocuments;
 
@@ -1157,7 +1178,106 @@ class ProveedorControlador extends ControladorBase
             'review_status' => $provider?->approval_status ?? 'pending',
             'admin_notes' => $provider?->notes,
             'documents' => $documents,
+            'company_documents' => $documents,
+            'legal_documents' => $documents,
+            'documents_count' => count($documents),
         ];
+    }
+
+    private function formatCompanyDocumentPayload(DocumentoEmpresa $document): array
+    {
+        $downloadUrl = sprintf('/api/v1/admin/proveedores/%d/documentos/%d/descargar', $document->provider_id, $document->id);
+
+        return [
+            'id' => $document->id,
+            'provider_id' => $document->provider_id,
+            'document_name' => $document->document_name ?? 'Documento',
+            'name' => $document->document_name ?? 'Documento',
+            'original_name' => $document->original_name ?? $document->document_name ?? 'Documento',
+            'file_name' => $document->file_name ?? basename((string) ($document->storage_path ?: $document->document_url ?: $document->file_url ?: '')),
+            'path' => $document->storage_path,
+            'storage_path' => $document->storage_path,
+            'storage_disk' => $document->storage_disk,
+            'file_url' => $document->file_url,
+            'document_url' => $document->document_url,
+            'url' => $document->document_url ?: $document->file_url,
+            'download_url' => $downloadUrl,
+            'downloadUrl' => $downloadUrl,
+            'mime_type' => $document->mime_type,
+            'size' => (int) ($document->file_size_bytes ?? 0),
+            'file_size_bytes' => (int) ($document->file_size_bytes ?? 0),
+            'status' => $document->status ?? 'pendiente',
+            'notes' => $document->notes,
+            'expires_at' => optional($document->expires_at)?->toISOString(),
+            'created_at' => optional($document->created_at)?->toISOString(),
+            'updated_at' => optional($document->updated_at)?->toISOString(),
+        ];
+    }
+
+    private function createCompanyDocumentRecord(Proveedor $provider, UploadedFile $file, array $data = []): DocumentoEmpresa
+    {
+        $missingVariables = $this->missingS3UploadConfigurationVariables();
+
+        abort_if(
+            $missingVariables !== [],
+            500,
+            'Falta configuracion de AWS S3 en el servidor. Variables faltantes o vacias: '.implode(', ', $missingVariables).'.'
+        );
+
+        $safeBaseName = Str::slug(pathinfo($file->getClientOriginalName(), PATHINFO_FILENAME), '_') ?: 'documento_empresa';
+        $extension = strtolower($file->getClientOriginalExtension() ?: $file->extension() ?: 'bin');
+        $path = $file->storeAs(
+            'provider/'.$provider->id.'/company-documents',
+            $safeBaseName.'_'.Str::lower(Str::random(8)).'.'.$extension,
+            's3'
+        );
+
+        abort_if(! $path, 500, 'No se pudo subir el documento de empresa al almacenamiento S3.');
+
+        $documentUrl = Storage::disk('s3')->url($path);
+
+        return $provider->companyDocuments()->create([
+            'document_name' => $data['document_name'] ?? $file->getClientOriginalName(),
+            'original_name' => $data['original_name'] ?? $file->getClientOriginalName(),
+            'file_name' => basename($path),
+            'file_url' => $documentUrl,
+            'document_url' => $documentUrl,
+            'storage_disk' => 's3',
+            'storage_path' => $path,
+            'mime_type' => $file->getClientMimeType() ?: $file->getMimeType(),
+            'file_size_bytes' => $file->getSize(),
+            'status' => $data['status'] ?? 'pendiente',
+            'notes' => $data['notes'] ?? null,
+            'expires_at' => $data['expires_at'] ?? null,
+        ]);
+    }
+
+    private function extractCompanyDocumentUploadFromRequest(Request $request): ?UploadedFile
+    {
+        foreach (['file', 'document', 'legal_document'] as $key) {
+            if ($request->hasFile($key)) {
+                $candidate = $request->file($key);
+                if ($candidate instanceof UploadedFile) {
+                    return $candidate;
+                }
+            }
+        }
+
+        $documents = $request->file('documents', []);
+        foreach ((array) $documents as $candidate) {
+            if ($candidate instanceof UploadedFile) {
+                return $candidate;
+            }
+            if (is_array($candidate)) {
+                foreach ($candidate as $nestedCandidate) {
+                    if ($nestedCandidate instanceof UploadedFile) {
+                        return $nestedCandidate;
+                    }
+                }
+            }
+        }
+
+        return null;
     }
 
     private function normalizeProviderWorkflowStatus(string $approvalStatus): string
