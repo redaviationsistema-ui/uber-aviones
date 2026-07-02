@@ -35,6 +35,16 @@ class Proveedor extends Model
         'margin_percent',
         'fixed_fee',
         'approval_status',
+        'admin_validation_status',
+        'sat_validation_status',
+        'admin_validation_notes',
+        'admin_review_submitted_at',
+        'admin_validated_by',
+        'admin_validated_at',
+        'admin_rejected_by',
+        'admin_rejected_at',
+        'admin_changes_requested_by',
+        'admin_changes_requested_at',
         'notes',
     ];
 
@@ -46,6 +56,10 @@ class Proveedor extends Model
             'fixed_fee' => 'decimal:2',
             'birth_date' => 'date',
             'document_expiration' => 'date',
+            'admin_review_submitted_at' => 'datetime',
+            'admin_validated_at' => 'datetime',
+            'admin_rejected_at' => 'datetime',
+            'admin_changes_requested_at' => 'datetime',
         ];
     }
 

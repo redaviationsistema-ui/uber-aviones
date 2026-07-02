@@ -19,6 +19,7 @@ use App\Modelos\Usuario;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Validation\ValidationException;
 
 class AdministradorControlador extends ControladorBase
 {
@@ -255,14 +256,6 @@ class AdministradorControlador extends ControladorBase
             'notes' => $nextNotes,
         ]));
 
-        if ($nextStatus === 'approved') {
-            $provider->update(['approval_status' => 'approved']);
-        } elseif ($nextStatus === 'rejected') {
-            $provider->update(['approval_status' => 'rejected']);
-        } elseif (in_array($nextStatus, ['pending', 'pendiente', 'pending_validation'], true)) {
-            $provider->update(['approval_status' => 'pending']);
-        }
-
         return $this->ok([
             'document' => $this->serializeProviderDocument($document->fresh()),
             'provider' => $this->serializeProvider($provider->fresh(['user', 'aircraft', 'companyDocuments'])),
@@ -293,25 +286,102 @@ class AdministradorControlador extends ControladorBase
         return $this->rejectProviderDocument($request, $document->provider()->firstOrFail(), $document);
     }
 
-    public function approveProveedor(Proveedor $provider)
+    public function validateProveedor(Request $request, Proveedor $provider)
     {
-        $provider->update(['approval_status' => 'approved']);
+        $checklist = $this->providerValidationChecklist($provider->fresh(['user.profile', 'aircraft', 'companyDocuments']));
+        $missing = collect($checklist)->where('complete', false)->pluck('message')->filter()->values()->all();
 
-        return $this->ok(['provider' => $this->serializeProvider($provider->fresh(['user', 'aircraft', 'companyDocuments']))]);
+        if ($missing !== []) {
+            throw ValidationException::withMessages([
+                'validation' => $missing,
+            ]);
+        }
+
+        $data = $request->validate([
+            'notes' => ['nullable', 'string', 'max:5000'],
+            'sat_validation_status' => ['nullable', 'string', 'max:50'],
+        ]);
+
+        $provider->update([
+            'admin_validation_status' => 'approved',
+            'approval_status' => 'approved',
+            'status' => 'approved',
+            'sat_validation_status' => $data['sat_validation_status'] ?? ($provider->sat_validation_status ?: 'approved'),
+            'admin_validation_notes' => $data['notes'] ?? $provider->admin_validation_notes,
+            'admin_validated_by' => $request->user()?->id,
+            'admin_validated_at' => now(),
+            'admin_rejected_by' => null,
+            'admin_rejected_at' => null,
+            'admin_changes_requested_by' => null,
+            'admin_changes_requested_at' => null,
+        ]);
+
+        return $this->ok([
+            'provider' => $this->serializeProvider($provider->fresh(['user.profile', 'aircraft', 'companyDocuments'])),
+        ]);
     }
 
-    public function rejectProveedor(Proveedor $provider)
+    public function requestProviderChanges(Request $request, Proveedor $provider)
     {
-        $provider->update(['approval_status' => 'rejected']);
+        $data = $request->validate([
+            'notes' => ['required', 'string', 'max:5000'],
+        ]);
 
-        return $this->ok(['provider' => $this->serializeProvider($provider->fresh(['user', 'aircraft', 'companyDocuments']))]);
+        $provider->update([
+            'admin_validation_status' => 'changes_required',
+            'approval_status' => 'pending',
+            'status' => 'changes_required',
+            'admin_validation_notes' => $data['notes'],
+            'admin_changes_requested_by' => $request->user()?->id,
+            'admin_changes_requested_at' => now(),
+            'admin_validated_by' => null,
+            'admin_validated_at' => null,
+            'admin_rejected_by' => null,
+            'admin_rejected_at' => null,
+        ]);
+
+        return $this->ok([
+            'provider' => $this->serializeProvider($provider->fresh(['user.profile', 'aircraft', 'companyDocuments'])),
+        ]);
     }
 
-    public function suspendProveedor(Proveedor $provider)
+    public function rejectProviderValidation(Request $request, Proveedor $provider)
     {
-        $provider->update(['approval_status' => 'suspended']);
+        $data = $request->validate([
+            'notes' => ['required', 'string', 'max:5000'],
+        ]);
 
-        return $this->ok(['provider' => $this->serializeProvider($provider->fresh(['user', 'aircraft', 'companyDocuments']))]);
+        $provider->update([
+            'admin_validation_status' => 'rejected',
+            'approval_status' => 'rejected',
+            'status' => 'rejected',
+            'admin_validation_notes' => $data['notes'],
+            'admin_rejected_by' => $request->user()?->id,
+            'admin_rejected_at' => now(),
+            'admin_validated_by' => null,
+            'admin_validated_at' => null,
+            'admin_changes_requested_by' => null,
+            'admin_changes_requested_at' => null,
+        ]);
+
+        return $this->ok([
+            'provider' => $this->serializeProvider($provider->fresh(['user.profile', 'aircraft', 'companyDocuments'])),
+        ]);
+    }
+
+    public function approveProveedor(Request $request, Proveedor $provider)
+    {
+        return $this->validateProveedor($request, $provider);
+    }
+
+    public function rejectProveedor(Request $request, Proveedor $provider)
+    {
+        return $this->rejectProviderValidation($request, $provider);
+    }
+
+    public function suspendProveedor(Request $request, Proveedor $provider)
+    {
+        return $this->requestProviderChanges($request, $provider);
     }
 
     public function aircraft()
@@ -600,16 +670,24 @@ class AdministradorControlador extends ControladorBase
 
     private function serializeProvider(Proveedor $provider): array
     {
-        $provider->loadMissing(['user', 'aircraft', 'companyDocuments']);
+        $provider->loadMissing(['user.profile', 'aircraft', 'companyDocuments']);
         $documents = $provider->companyDocuments
             ->sortByDesc('id')
             ->values()
             ->map(fn (DocumentoEmpresa $document) => $this->serializeProviderDocument($document))
             ->all();
+        $checklist = $this->providerValidationChecklist($provider);
+        $adminValidationStatus = $this->resolveAdminValidationStatus($provider);
 
         return [
             ...$provider->attributesToArray(),
             'provider_id' => $provider->id,
+            'admin_validation_status' => $adminValidationStatus,
+            'sat_validation_status' => $this->resolveSatValidationStatus($provider),
+            'admin_validation_notes' => $provider->admin_validation_notes ?: $provider->notes,
+            'access_enabled' => $provider->approval_status === 'approved' && $adminValidationStatus === 'approved',
+            'validation_requirements' => $checklist,
+            'can_validate' => collect($checklist)->every(fn (array $item) => (bool) ($item['complete'] ?? false)),
             'documents' => $documents,
             'company_documents' => $documents,
             'legal_documents' => $documents,
@@ -618,6 +696,91 @@ class AdministradorControlador extends ControladorBase
             'company_documents_count' => count($documents),
             'user' => $provider->user,
             'aircraft' => $provider->aircraft,
+        ];
+    }
+
+    private function resolveAdminValidationStatus(Proveedor $provider): string
+    {
+        $normalized = strtolower(trim((string) ($provider->admin_validation_status ?: '')));
+        if ($normalized !== '') {
+            return $normalized;
+        }
+
+        return match (strtolower(trim((string) $provider->approval_status))) {
+            'approved' => 'approved',
+            'rejected' => 'rejected',
+            'suspended' => 'changes_required',
+            default => ($provider->admin_review_submitted_at ? 'pending_review' : 'expediente_incompleto'),
+        };
+    }
+
+    private function resolveSatValidationStatus(Proveedor $provider): string
+    {
+        $profileTaxData = $provider->user?->profile?->tax_data ?? [];
+        $explicit = strtolower(trim((string) ($provider->sat_validation_status ?: ($profileTaxData['sat_validation_status'] ?? ''))));
+
+        if ($explicit !== '') {
+            return $explicit;
+        }
+
+        return filled($provider->rfc) ? 'approved' : 'pending';
+    }
+
+    private function providerValidationChecklist(Proveedor $provider): array
+    {
+        $documents = $provider->companyDocuments ?? collect();
+        $approvedDocumentStatuses = ['approved', 'aprobado', 'aprobada', 'vigente', 'validado'];
+        $activeAircraftStatuses = ['active', 'trial_active', 'approved', 'aprobada', 'aprobado'];
+        $contactComplete = filled($provider->company_phone) && filled($provider->company_email);
+        $representativeComplete = filled($provider->representative_name) && filled($provider->representative_phone);
+        $documentsApproved = $documents->isNotEmpty()
+            && $documents->every(fn (DocumentoEmpresa $document) => in_array(strtolower(trim((string) $document->status)), $approvedDocumentStatuses, true));
+        $satApproved = in_array($this->resolveSatValidationStatus($provider), ['approved', 'aprobado', 'validated', 'validado'], true);
+        $activeAircraft = ($provider->aircraft ?? collect())->filter(fn ($aircraft) => in_array(strtolower(trim((string) $aircraft->status)), $activeAircraftStatuses, true))->count();
+
+        return [
+            [
+                'key' => 'rfc_valid',
+                'label' => 'RFC valido',
+                'complete' => filled($provider->rfc),
+                'message' => 'Falta RFC valido del operador.',
+            ],
+            [
+                'key' => 'sat_validation',
+                'label' => 'Validacion SAT',
+                'complete' => $satApproved,
+                'message' => 'La validacion SAT sigue pendiente.',
+            ],
+            [
+                'key' => 'legal_documents_approved',
+                'label' => 'Documentacion legal aprobada',
+                'complete' => $documentsApproved,
+                'message' => 'La documentacion legal aun no esta aprobada.',
+            ],
+            [
+                'key' => 'base_operativa',
+                'label' => 'Base operativa definida',
+                'complete' => filled($provider->base_airport),
+                'message' => 'Falta base operativa definida.',
+            ],
+            [
+                'key' => 'aircraft_active',
+                'label' => 'Aeronave activa o aprobada',
+                'complete' => $activeAircraft > 0,
+                'message' => 'Se requiere al menos una aeronave activa o aprobada.',
+            ],
+            [
+                'key' => 'contact_complete',
+                'label' => 'Datos de contacto completos',
+                'complete' => $contactComplete,
+                'message' => 'Faltan datos de contacto completos.',
+            ],
+            [
+                'key' => 'legal_representative_complete',
+                'label' => 'Representante legal completo',
+                'complete' => filled($provider->representative_name),
+                'message' => 'Falta representante legal completo.',
+            ],
         ];
     }
 

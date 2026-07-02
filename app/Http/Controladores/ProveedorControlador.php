@@ -90,8 +90,8 @@ class ProveedorControlador extends ControladorBase
     public function profileStatus(Request $request)
     {
         $company = $this->formatCompanyPayload($request);
-        $approvalStatus = (string) ($company['status'] ?? 'pending');
-        $providerStatus = $this->normalizeProviderWorkflowStatus($approvalStatus);
+        $approvalStatus = (string) ($company['approval_status'] ?? $company['status'] ?? 'pending');
+        $providerStatus = (string) ($company['admin_validation_status'] ?? 'expediente_incompleto');
 
         return $this->ok([
             'provider_status' => $providerStatus,
@@ -241,8 +241,18 @@ class ProveedorControlador extends ControladorBase
             ]);
         }
 
-        $provider->update(['approval_status' => 'pending']);
-        $this->writeAudit($request, 'submit_review', 'provider_company', 'Proveedor enviado a revision.');
+        $provider->update([
+            'approval_status' => 'pending',
+            'status' => 'pending_review',
+            'admin_validation_status' => 'pending_review',
+            'admin_review_submitted_at' => now(),
+            'admin_validation_notes' => $data['notes'] ?? $provider->admin_validation_notes,
+            'admin_validated_by' => null,
+            'admin_validated_at' => null,
+            'admin_rejected_by' => null,
+            'admin_rejected_at' => null,
+        ]);
+        $this->writeAudit($request, 'submit_review', 'provider_company', 'Proveedor enviado a revision administrativa.');
 
         return $this->ok([
             'company' => $this->formatCompanyPayload($user->fresh(['provider.companyDocuments', 'profile'])),
@@ -1128,8 +1138,8 @@ class ProveedorControlador extends ControladorBase
     private function formatCompanyPayload(Request|\App\Modelos\Usuario $source): array
     {
         $user = $source instanceof Request
-            ? $source->user()->loadMissing('provider.companyDocuments', 'profile')
-            : $source->loadMissing('provider.companyDocuments', 'profile');
+            ? $source->user()->loadMissing('provider.companyDocuments', 'provider.aircraft', 'profile')
+            : $source->loadMissing('provider.companyDocuments', 'provider.aircraft', 'profile');
         $provider = $user->provider;
         $profile = $user->profile;
         $taxData = $profile?->tax_data ?? [];
@@ -1148,6 +1158,10 @@ class ProveedorControlador extends ControladorBase
                 ->map(fn (DocumentoEmpresa $document) => $this->formatCompanyDocumentPayload($document))
                 ->all()
             : $legacyDocuments;
+
+        $adminValidationStatus = $provider ? $this->resolveAdminValidationStatus($provider, $taxData) : 'expediente_incompleto';
+        $satValidationStatus = $provider ? $this->resolveSatValidationStatus($provider, $taxData) : (filled($taxData['rfc'] ?? null) ? 'approved' : 'pending');
+        $checklist = $provider ? $this->companyValidationChecklist($provider, $documents, $taxData) : [];
 
         return [
             'id' => $provider?->id,
@@ -1174,10 +1188,21 @@ class ProveedorControlador extends ControladorBase
             'base_airport' => $provider?->base_airport ?? $profile?->base_airport,
             'address' => $profile?->address,
             'legal_representative' => $provider?->representative_name ?? $taxData['legal_representative'] ?? null,
-            'status' => $provider?->status ?? $provider?->approval_status ?? 'pending',
+            'status' => $provider?->status ?? $adminValidationStatus,
+            'approval_status' => $provider?->approval_status ?? 'pending',
             'validation_status' => $provider?->approval_status ?? 'pending',
-            'review_status' => $provider?->approval_status ?? 'pending',
-            'admin_notes' => $provider?->notes,
+            'review_status' => $adminValidationStatus,
+            'admin_validation_status' => $adminValidationStatus,
+            'sat_validation_status' => $satValidationStatus,
+            'admin_notes' => $provider?->admin_validation_notes ?? $provider?->notes,
+            'admin_validation_notes' => $provider?->admin_validation_notes ?? $provider?->notes,
+            'admin_review_submitted_at' => optional($provider?->admin_review_submitted_at)?->toISOString(),
+            'admin_validated_at' => optional($provider?->admin_validated_at)?->toISOString(),
+            'admin_rejected_at' => optional($provider?->admin_rejected_at)?->toISOString(),
+            'admin_changes_requested_at' => optional($provider?->admin_changes_requested_at)?->toISOString(),
+            'access_enabled' => ($provider?->approval_status === 'approved') && $adminValidationStatus === 'approved',
+            'validation_requirements' => $checklist,
+            'can_validate' => collect($checklist)->every(fn (array $item) => (bool) ($item['complete'] ?? false)),
             'documents' => $documents,
             'company_documents' => $documents,
             'legal_documents' => $documents,
@@ -1302,6 +1327,86 @@ class ProveedorControlador extends ControladorBase
     private function normalizeProviderWorkflowStatus(string $approvalStatus): string
     {
         return $approvalStatus === 'pending' ? 'pending_validation' : $approvalStatus;
+    }
+
+    private function resolveAdminValidationStatus(Proveedor $provider, array $taxData = []): string
+    {
+        $normalized = strtolower(trim((string) ($provider->admin_validation_status ?: ($taxData['admin_validation_status'] ?? ''))));
+        if ($normalized !== '') {
+            return $normalized;
+        }
+
+        return match (strtolower(trim((string) $provider->approval_status))) {
+            'approved' => 'approved',
+            'rejected' => 'rejected',
+            'suspended' => 'changes_required',
+            default => ($provider->admin_review_submitted_at ? 'pending_review' : 'expediente_incompleto'),
+        };
+    }
+
+    private function resolveSatValidationStatus(Proveedor $provider, array $taxData = []): string
+    {
+        $normalized = strtolower(trim((string) ($provider->sat_validation_status ?: ($taxData['sat_validation_status'] ?? ''))));
+        if ($normalized !== '') {
+            return $normalized;
+        }
+
+        return filled($provider->rfc ?: ($taxData['rfc'] ?? null)) ? 'approved' : 'pending';
+    }
+
+    private function companyValidationChecklist(Proveedor $provider, array $documents, array $taxData = []): array
+    {
+        $approvedDocumentStatuses = ['approved', 'aprobado', 'aprobada', 'vigente', 'validado'];
+        $activeAircraftStatuses = ['active', 'trial_active', 'approved', 'aprobada', 'aprobado'];
+        $documentsApproved = $documents !== []
+            && collect($documents)->every(fn (array $document) => in_array(strtolower(trim((string) ($document['status'] ?? $document['state'] ?? ''))), $approvedDocumentStatuses, true));
+        $activeAircraft = $provider->aircraft->filter(fn ($aircraft) => in_array(strtolower(trim((string) $aircraft->status)), $activeAircraftStatuses, true))->count();
+        $satApproved = in_array($this->resolveSatValidationStatus($provider, $taxData), ['approved', 'aprobado', 'validated', 'validado'], true);
+
+        return [
+            [
+                'key' => 'rfc_valid',
+                'label' => 'RFC valido',
+                'complete' => filled($provider->rfc ?: ($taxData['rfc'] ?? null)),
+                'message' => 'Falta RFC valido del operador.',
+            ],
+            [
+                'key' => 'sat_validation',
+                'label' => 'Validacion SAT',
+                'complete' => $satApproved,
+                'message' => 'La validacion SAT sigue pendiente.',
+            ],
+            [
+                'key' => 'legal_documents_approved',
+                'label' => 'Documentacion legal aprobada',
+                'complete' => $documentsApproved,
+                'message' => 'La documentacion legal aun no esta aprobada.',
+            ],
+            [
+                'key' => 'base_operativa',
+                'label' => 'Base operativa definida',
+                'complete' => filled($provider->base_airport),
+                'message' => 'Falta base operativa definida.',
+            ],
+            [
+                'key' => 'aircraft_active',
+                'label' => 'Aeronave activa o aprobada',
+                'complete' => $activeAircraft > 0,
+                'message' => 'Se requiere al menos una aeronave activa o aprobada.',
+            ],
+            [
+                'key' => 'contact_complete',
+                'label' => 'Datos de contacto completos',
+                'complete' => filled($provider->company_phone) && filled($provider->company_email),
+                'message' => 'Faltan datos de contacto completos.',
+            ],
+            [
+                'key' => 'legal_representative_complete',
+                'label' => 'Representante legal completo',
+                'complete' => filled($provider->representative_name) && filled($provider->representative_phone),
+                'message' => 'Falta representante legal completo.',
+            ],
+        ];
     }
 
     private function formatOperationPayload(Operacion $operation): array

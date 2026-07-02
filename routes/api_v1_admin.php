@@ -35,6 +35,12 @@ Route::prefix('admin')->middleware(['auth.token', 'role:admin'])->group(function
     Route::patch('/proveedores/{provider}/documentos/{document}', [AdministradorControlador::class, 'updateProviderDocument']);
     Route::post('/proveedores/{provider}/documentos/{document}/approved', [AdministradorControlador::class, 'approveProviderDocument']);
     Route::post('/proveedores/{provider}/documentos/{document}/rejected', [AdministradorControlador::class, 'rejectProviderDocument']);
+    Route::post('/providers/{provider}/validate', [AdministradorControlador::class, 'validateProveedor']);
+    Route::post('/providers/{provider}/request-changes', [AdministradorControlador::class, 'requestProviderChanges']);
+    Route::post('/providers/{provider}/reject', [AdministradorControlador::class, 'rejectProviderValidation']);
+    Route::post('/proveedores/{provider}/validar', [AdministradorControlador::class, 'validateProveedor']);
+    Route::post('/proveedores/{provider}/solicitar-cambios', [AdministradorControlador::class, 'requestProviderChanges']);
+    Route::post('/proveedores/{provider}/cancelar-validacion', [AdministradorControlador::class, 'rejectProviderValidation']);
     Route::post('/proveedores/{provider}/aprobar', [AdministradorControlador::class, 'approveProveedor']);
     Route::post('/proveedores/{provider}/rechazar', [AdministradorControlador::class, 'rejectProveedor']);
     Route::post('/proveedores/{provider}/suspender', [AdministradorControlador::class, 'suspendProveedor']);
