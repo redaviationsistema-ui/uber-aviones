@@ -22,6 +22,7 @@ use Illuminate\Http\Request;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
@@ -266,7 +267,7 @@ class ProveedorControlador extends ControladorBase
 
         $document = $request->hasFile('file')
             ? $this->createCompanyDocumentRecord($provider, $request->file('file'), $data)
-            : $provider->companyDocuments()->create([
+            : $provider->companyDocuments()->create($this->filterCompanyDocumentPayload([
                 'document_name' => $data['document_name'] ?? basename((string) parse_url((string) ($data['document_url'] ?? $data['file_url'] ?? ''), PHP_URL_PATH)),
                 'original_name' => $data['document_name'] ?? basename((string) parse_url((string) ($data['document_url'] ?? $data['file_url'] ?? ''), PHP_URL_PATH)),
                 'file_name' => basename((string) parse_url((string) ($data['document_url'] ?? $data['file_url'] ?? ''), PHP_URL_PATH)),
@@ -277,7 +278,7 @@ class ProveedorControlador extends ControladorBase
                 'status' => 'pendiente',
                 'notes' => $data['notes'] ?? null,
                 'expires_at' => $data['expires_at'] ?? null,
-            ]);
+            ]));
 
         $this->writeAudit($request, 'upload', 'provider_company_document', 'Documento de empresa cargado.');
 
@@ -1236,7 +1237,7 @@ class ProveedorControlador extends ControladorBase
 
         $documentUrl = Storage::disk('s3')->url($path);
 
-        return $provider->companyDocuments()->create([
+        return $provider->companyDocuments()->create($this->filterCompanyDocumentPayload([
             'document_name' => $data['document_name'] ?? $file->getClientOriginalName(),
             'original_name' => $data['original_name'] ?? $file->getClientOriginalName(),
             'file_name' => basename($path),
@@ -1249,7 +1250,7 @@ class ProveedorControlador extends ControladorBase
             'status' => $data['status'] ?? 'pendiente',
             'notes' => $data['notes'] ?? null,
             'expires_at' => $data['expires_at'] ?? null,
-        ]);
+        ]));
     }
 
     private function extractCompanyDocumentUploadFromRequest(Request $request): ?UploadedFile
@@ -1278,6 +1279,24 @@ class ProveedorControlador extends ControladorBase
         }
 
         return null;
+    }
+
+    private function filterCompanyDocumentPayload(array $payload): array
+    {
+        return array_intersect_key($payload, array_flip($this->companyDocumentAvailableColumns()));
+    }
+
+    private function companyDocumentAvailableColumns(): array
+    {
+        static $columns = null;
+
+        if (is_array($columns)) {
+            return $columns;
+        }
+
+        $columns = Schema::getColumnListing('company_documents');
+
+        return $columns;
     }
 
     private function normalizeProviderWorkflowStatus(string $approvalStatus): string

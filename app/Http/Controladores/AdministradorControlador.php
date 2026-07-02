@@ -17,6 +17,7 @@ use App\Modelos\Suscripcion;
 use App\Modelos\ConfiguracionSistema;
 use App\Modelos\Usuario;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 
 class AdministradorControlador extends ControladorBase
@@ -249,10 +250,10 @@ class AdministradorControlador extends ControladorBase
             ?? 'pendiente';
         $nextNotes = $data['notes'] ?? $data['observation'] ?? $data['observacion'] ?? $document->notes;
 
-        $document->update([
+        $document->update($this->filterCompanyDocumentPayload([
             'status' => $nextStatus,
             'notes' => $nextNotes,
-        ]);
+        ]));
 
         if ($nextStatus === 'approved') {
             $provider->update(['approval_status' => 'approved']);
@@ -671,5 +672,23 @@ class AdministradorControlador extends ControladorBase
         abort_if($fallbackUrl === '', 404, 'Documento sin URL disponible.');
 
         return redirect()->away($fallbackUrl);
+    }
+
+    private function filterCompanyDocumentPayload(array $payload): array
+    {
+        return array_intersect_key($payload, array_flip($this->companyDocumentAvailableColumns()));
+    }
+
+    private function companyDocumentAvailableColumns(): array
+    {
+        static $columns = null;
+
+        if (is_array($columns)) {
+            return $columns;
+        }
+
+        $columns = Schema::getColumnListing('company_documents');
+
+        return $columns;
     }
 }
