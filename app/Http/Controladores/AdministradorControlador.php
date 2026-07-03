@@ -19,6 +19,7 @@ use App\Modelos\Usuario;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 
 class AdministradorControlador extends ControladorBase
@@ -281,6 +282,7 @@ class AdministradorControlador extends ControladorBase
             ?? $document->status
             ?? 'pendiente';
         $nextNotes = $data['notes'] ?? $data['observation'] ?? $data['observacion'] ?? $document->notes;
+        $documentMetadata = $this->companyDocumentMetadataForResponse($document);
 
         $document->update($this->filterCompanyDocumentPayload([
             'status' => $nextStatus,
@@ -311,9 +313,21 @@ class AdministradorControlador extends ControladorBase
                     'title' => in_array(strtolower(trim((string) $nextStatus)), ['approved', 'aprobado', 'validado'], true)
                         ? 'Documento legal validado'
                         : 'Documento legal rechazado',
-                    'description' => $document->document_name ?: $document->original_name ?: 'Documento de empresa',
+                    'description' => sprintf(
+                        '%s · %s%s',
+                        $documentMetadata['definition_label'] ?: ($document->document_name ?: $document->original_name ?: 'Documento de empresa'),
+                        $documentMetadata['section_label'] ?: 'Documentacion legal del operador',
+                        filled($documentMetadata['document_slot'] ?? null) ? ' · document_slot: '.$documentMetadata['document_slot'] : ''
+                    ),
                     'status' => $nextStatus,
                     'notes' => $nextNotes,
+                    'document_type' => $documentMetadata['document_type'],
+                    'document_category' => $documentMetadata['document_category'],
+                    'document_slot' => $documentMetadata['document_slot'],
+                    'document_section' => $documentMetadata['document_section'],
+                    'document_definition_key' => $documentMetadata['definition_key'],
+                    'document_definition_label' => $documentMetadata['definition_label'],
+                    'document_section_label' => $documentMetadata['section_label'],
                 ],
             ]
         );
@@ -1224,6 +1238,10 @@ class AdministradorControlador extends ControladorBase
         $title = $metadata['title'] ?? $this->humanizeProviderActivityTitle($entry, $eventType);
         $description = $metadata['description'] ?? ($entry->description ?: $title);
 
+        if (($metadata['document_definition_label'] ?? '') !== '' && ! str_contains($title, (string) $metadata['document_definition_label'])) {
+            $title .= ': '.$metadata['document_definition_label'];
+        }
+
         return [
             'id' => $entry->id,
             'event_type' => $eventType,
@@ -1271,6 +1289,7 @@ class AdministradorControlador extends ControladorBase
     private function serializeProviderDocument(DocumentoEmpresa $document): array
     {
         $downloadUrl = sprintf('/api/v1/admin/proveedores/%d/documentos/%d/descargar', $document->provider_id, $document->id);
+        $metadata = $this->companyDocumentMetadataForResponse($document);
 
         return [
             'id' => $document->id,
@@ -1295,6 +1314,15 @@ class AdministradorControlador extends ControladorBase
             'expires_at' => optional($document->expires_at)?->toISOString(),
             'created_at' => optional($document->created_at)?->toISOString(),
             'updated_at' => optional($document->updated_at)?->toISOString(),
+            'document_type' => $metadata['document_type'],
+            'document_category' => $metadata['document_category'],
+            'document_slot' => $metadata['document_slot'],
+            'document_section' => $metadata['document_section'],
+            'definition_key' => $metadata['definition_key'],
+            'definition_label' => $metadata['definition_label'],
+            'section_key' => $metadata['section_key'],
+            'section_label' => $metadata['section_label'],
+            'field_map' => $metadata['field_map'],
         ];
     }
 
@@ -1337,5 +1365,110 @@ class AdministradorControlador extends ControladorBase
         $columns = Schema::getColumnListing('company_documents');
 
         return $columns;
+    }
+
+    private function companyDocumentMetadataForResponse(DocumentoEmpresa $document): array
+    {
+        $definition = $this->resolveCompanyDocumentDefinitionFromCandidates([
+            $document->document_slot,
+            $document->document_type,
+            $document->document_category,
+            $document->document_name,
+            $document->original_name,
+            $document->file_name,
+        ]);
+
+        $documentType = trim((string) ($document->document_type ?: '')) ?: ($definition['id'] ?? '');
+        $documentCategory = trim((string) ($document->document_category ?: '')) ?: ($definition['id'] ?? '');
+        $documentSlot = trim((string) ($document->document_slot ?: '')) ?: ($definition['id'] ?? '');
+        $documentSection = trim((string) ($document->document_section ?: '')) ?: ($definition['section_key'] ?? '');
+
+        return [
+            'document_type' => $documentType,
+            'document_category' => $documentCategory,
+            'document_slot' => $documentSlot,
+            'document_section' => $documentSection,
+            'definition_key' => $definition['id'] ?? ($documentSlot ?: $documentType ?: $documentCategory),
+            'definition_label' => $definition['label'] ?? ($document->document_name ?: $document->original_name ?: 'Documento de empresa'),
+            'section_key' => $definition['section_key'] ?? ($documentSection ?: 'legal'),
+            'section_label' => $definition['section_label'] ?? 'Documentacion legal del operador',
+            'field_map' => [
+                ['column' => 'document_slot', 'value' => $documentSlot],
+                ['column' => 'document_type', 'value' => $documentType],
+                ['column' => 'document_category', 'value' => $documentCategory],
+                ['column' => 'document_section', 'value' => $documentSection],
+            ],
+        ];
+    }
+
+    private function resolveCompanyDocumentDefinitionFromCandidates(array $candidates): ?array
+    {
+        $catalog = $this->companyDocumentDefinitionCatalog();
+
+        foreach ($candidates as $candidate) {
+            $normalized = Str::of((string) $candidate)->trim()->lower()->replace(['-', '_'], ' ')->value();
+            if ($normalized === '') {
+                continue;
+            }
+
+            foreach ($catalog as $definition) {
+                foreach ($definition['matchers'] as $matcher) {
+                    $normalizedMatcher = Str::of((string) $matcher)->trim()->lower()->replace(['-', '_'], ' ')->value();
+                    if ($normalized === $normalizedMatcher || str_contains($normalized, $normalizedMatcher)) {
+                        return $definition;
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private function companyDocumentDefinitionCatalog(): array
+    {
+        return [
+            [
+                'id' => 'sat_certificate',
+                'label' => 'Constancia de situacion fiscal',
+                'section_key' => 'sat',
+                'section_label' => 'Validacion SAT / Constancia fiscal',
+                'matchers' => ['sat_certificate', 'constancia fiscal', 'constancia_sat', 'situacion fiscal', 'sat'],
+            ],
+            [
+                'id' => 'articles_of_incorporation',
+                'label' => 'Acta constitutiva',
+                'section_key' => 'legal',
+                'section_label' => 'Carga legal y respaldo',
+                'matchers' => ['articles_of_incorporation', 'acta_constitutiva', 'acta constitutiva'],
+            ],
+            [
+                'id' => 'legal_representative_power',
+                'label' => 'Poder del representante legal',
+                'section_key' => 'legal',
+                'section_label' => 'Carga legal y respaldo',
+                'matchers' => ['legal_representative_power', 'poder_representante', 'poder del representante', 'power'],
+            ],
+            [
+                'id' => 'legal_representative_id',
+                'label' => 'Identificacion oficial del representante',
+                'section_key' => 'legal',
+                'section_label' => 'Carga legal y respaldo',
+                'matchers' => ['legal_representative_id', 'identificacion_representante', 'identificacion oficial', 'ine', 'pasaporte'],
+            ],
+            [
+                'id' => 'tax_address_proof',
+                'label' => 'Comprobante de domicilio fiscal',
+                'section_key' => 'legal',
+                'section_label' => 'Carga legal y respaldo',
+                'matchers' => ['tax_address_proof', 'domicilio_fiscal', 'comprobante_domicilio', 'domicilio fiscal'],
+            ],
+            [
+                'id' => 'operational_permit',
+                'label' => 'Permiso operativo o documentacion aeronautica',
+                'section_key' => 'legal',
+                'section_label' => 'Carga legal y respaldo',
+                'matchers' => ['operational_permit', 'permiso_operativo', 'documentacion_aeronautica', 'permiso operativo'],
+            ],
+        ];
     }
 }

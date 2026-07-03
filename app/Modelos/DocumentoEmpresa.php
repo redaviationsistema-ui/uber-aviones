@@ -12,6 +12,10 @@ class DocumentoEmpresa extends Model
     protected $fillable = [
         'provider_id',
         'document_name',
+        'document_type',
+        'document_category',
+        'document_slot',
+        'document_section',
         'original_name',
         'file_name',
         'file_url',

@@ -247,6 +247,10 @@ class ProveedorControlador extends ControladorBase
             'documents.*' => ['file', 'max:20480'],
             'documents.*.*' => ['file', 'max:20480'],
             'document_name' => ['nullable', 'string', 'max:150'],
+            'document_type' => ['nullable', 'string', 'max:100'],
+            'document_category' => ['nullable', 'string', 'max:100'],
+            'document_slot' => ['nullable', 'string', 'max:100'],
+            'document_section' => ['nullable', 'string', 'max:100'],
             'original_name' => ['nullable', 'string', 'max:255'],
             'notes' => ['nullable', 'string', 'max:5000'],
             'status' => ['nullable', 'string', 'max:100'],
@@ -268,6 +272,7 @@ class ProveedorControlador extends ControladorBase
         if ($document instanceof UploadedFile) {
             $createdDocument = $this->createCompanyDocumentRecord($provider, $document, [
                 'document_name' => $data['document_name'] ?? $data['original_name'] ?? $document->getClientOriginalName(),
+                ...$this->normalizeCompanyDocumentMetadata($data),
                 'notes' => $data['notes'] ?? null,
                 'status' => 'pending',
             ]);
@@ -324,13 +329,20 @@ class ProveedorControlador extends ControladorBase
             'file_url' => ['required_without_all:file,document_url', 'nullable', 'string', 'max:255'],
             'document_name' => ['nullable', 'string', 'max:150'],
             'document_url' => ['required_without_all:file,file_url', 'nullable', 'string'],
+            'document_type' => ['nullable', 'string', 'max:100'],
+            'document_category' => ['nullable', 'string', 'max:100'],
+            'document_slot' => ['nullable', 'string', 'max:100'],
+            'document_section' => ['nullable', 'string', 'max:100'],
+            'replace_document_id' => ['nullable', 'integer'],
             'notes' => ['nullable', 'string', 'max:5000'],
             'expires_at' => ['nullable', 'date'],
         ]);
 
+        $existingDocument = $this->findCompanyDocumentTargetForWrite($provider, $data);
         $document = $request->hasFile('file')
-            ? $this->createCompanyDocumentRecord($provider, $request->file('file'), $data)
-            : $provider->companyDocuments()->create($this->filterCompanyDocumentPayload([
+            ? $this->createCompanyDocumentRecord($provider, $request->file('file'), $data, $existingDocument)
+            : $this->upsertCompanyDocumentRecord($provider, [
+                ...$this->normalizeCompanyDocumentMetadata($data),
                 'document_name' => $data['document_name'] ?? basename((string) parse_url((string) ($data['document_url'] ?? $data['file_url'] ?? ''), PHP_URL_PATH)),
                 'original_name' => $data['document_name'] ?? basename((string) parse_url((string) ($data['document_url'] ?? $data['file_url'] ?? ''), PHP_URL_PATH)),
                 'file_name' => basename((string) parse_url((string) ($data['document_url'] ?? $data['file_url'] ?? ''), PHP_URL_PATH)),
@@ -341,7 +353,8 @@ class ProveedorControlador extends ControladorBase
                 'status' => 'pendiente',
                 'notes' => $data['notes'] ?? null,
                 'expires_at' => $data['expires_at'] ?? null,
-            ]));
+            ], $existingDocument);
+        $metadata = $this->companyDocumentMetadataForResponse($document);
 
         $this->writeAudit($request, 'upload', 'provider_company_document', 'Documento de empresa cargado.', [
             'new_values' => [
@@ -349,12 +362,20 @@ class ProveedorControlador extends ControladorBase
                 'document_id' => $document->id,
                 'event_type' => 'document_uploaded',
                 'title' => 'Documento legal cargado',
-                'description' => $document->document_name ?? $document->original_name ?? 'Documento de empresa',
+                'description' => $this->buildCompanyDocumentAuditDescription($metadata, $document),
+                'document_name' => $document->document_name ?? $document->original_name ?? 'Documento de empresa',
+                'document_type' => $metadata['document_type'],
+                'document_category' => $metadata['document_category'],
+                'document_slot' => $metadata['document_slot'],
+                'document_section' => $metadata['document_section'],
+                'document_definition_key' => $metadata['definition_key'],
+                'document_definition_label' => $metadata['definition_label'],
+                'document_section_label' => $metadata['section_label'],
             ],
         ]);
 
         return $this->ok([
-            'document' => $document,
+            'document' => $this->formatCompanyDocumentPayload($document),
             'company' => $this->formatCompanyPayload($request->user()->fresh(['provider', 'profile'])),
             'url' => $document->document_url,
         ], 201);
@@ -1286,6 +1307,7 @@ class ProveedorControlador extends ControladorBase
     private function formatCompanyDocumentPayload(DocumentoEmpresa $document): array
     {
         $downloadUrl = sprintf('/api/v1/admin/proveedores/%d/documentos/%d/descargar', $document->provider_id, $document->id);
+        $metadata = $this->companyDocumentMetadataForResponse($document);
 
         return [
             'id' => $document->id,
@@ -1310,10 +1332,24 @@ class ProveedorControlador extends ControladorBase
             'expires_at' => optional($document->expires_at)?->toISOString(),
             'created_at' => optional($document->created_at)?->toISOString(),
             'updated_at' => optional($document->updated_at)?->toISOString(),
+            'document_type' => $metadata['document_type'],
+            'document_category' => $metadata['document_category'],
+            'document_slot' => $metadata['document_slot'],
+            'document_section' => $metadata['document_section'],
+            'definition_key' => $metadata['definition_key'],
+            'definition_label' => $metadata['definition_label'],
+            'section_key' => $metadata['section_key'],
+            'section_label' => $metadata['section_label'],
+            'field_map' => $metadata['field_map'],
         ];
     }
 
-    private function createCompanyDocumentRecord(Proveedor $provider, UploadedFile $file, array $data = []): DocumentoEmpresa
+    private function createCompanyDocumentRecord(
+        Proveedor $provider,
+        UploadedFile $file,
+        array $data = [],
+        ?DocumentoEmpresa $existingDocument = null
+    ): DocumentoEmpresa
     {
         $missingVariables = $this->missingS3UploadConfigurationVariables();
 
@@ -1335,7 +1371,12 @@ class ProveedorControlador extends ControladorBase
 
         $documentUrl = Storage::disk('s3')->url($path);
 
-        return $provider->companyDocuments()->create($this->filterCompanyDocumentPayload([
+        if ($existingDocument) {
+            $this->deleteCompanyDocumentStoredFile($existingDocument);
+        }
+
+        return $this->upsertCompanyDocumentRecord($provider, [
+            ...$this->normalizeCompanyDocumentMetadata($data),
             'document_name' => $data['document_name'] ?? $file->getClientOriginalName(),
             'original_name' => $data['original_name'] ?? $file->getClientOriginalName(),
             'file_name' => basename($path),
@@ -1348,7 +1389,7 @@ class ProveedorControlador extends ControladorBase
             'status' => $data['status'] ?? 'pendiente',
             'notes' => $data['notes'] ?? null,
             'expires_at' => $data['expires_at'] ?? null,
-        ]));
+        ], $existingDocument);
     }
 
     private function extractCompanyDocumentUploadFromRequest(Request $request): ?UploadedFile
@@ -1384,6 +1425,69 @@ class ProveedorControlador extends ControladorBase
         return array_intersect_key($payload, array_flip($this->companyDocumentAvailableColumns()));
     }
 
+    private function upsertCompanyDocumentRecord(
+        Proveedor $provider,
+        array $payload,
+        ?DocumentoEmpresa $existingDocument = null
+    ): DocumentoEmpresa {
+        $filteredPayload = $this->filterCompanyDocumentPayload($payload);
+
+        if ($existingDocument) {
+            $existingDocument->update($filteredPayload);
+
+            return $existingDocument->fresh();
+        }
+
+        return $provider->companyDocuments()->create($filteredPayload);
+    }
+
+    private function findCompanyDocumentTargetForWrite(Proveedor $provider, array $data): ?DocumentoEmpresa
+    {
+        $replaceDocumentId = (int) ($data['replace_document_id'] ?? 0);
+        if ($replaceDocumentId > 0) {
+            return $provider->companyDocuments()->whereKey($replaceDocumentId)->first();
+        }
+
+        $normalizedMetadata = $this->normalizeCompanyDocumentMetadata($data);
+        $documentSlot = $normalizedMetadata['document_slot'] ?? null;
+        if (! filled($documentSlot)) {
+            return null;
+        }
+
+        return $provider->companyDocuments()
+            ->where(function ($query) use ($documentSlot, $normalizedMetadata) {
+                $query->where('document_slot', $documentSlot);
+
+                if (filled($normalizedMetadata['document_type'] ?? null)) {
+                    $query->orWhere('document_type', $normalizedMetadata['document_type']);
+                }
+
+                if (filled($normalizedMetadata['document_category'] ?? null)) {
+                    $query->orWhere('document_category', $normalizedMetadata['document_category']);
+                }
+            })
+            ->latest('id')
+            ->first();
+    }
+
+    private function deleteCompanyDocumentStoredFile(?DocumentoEmpresa $document): void
+    {
+        if (! $document) {
+            return;
+        }
+
+        $disk = trim((string) ($document->storage_disk ?: ''));
+        $path = trim((string) ($document->storage_path ?: ''));
+        if ($disk === '' || $path === '' || config("filesystems.disks.{$disk}") === null) {
+            return;
+        }
+
+        $storage = Storage::disk($disk);
+        if ($storage->exists($path)) {
+            $storage->delete($path);
+        }
+    }
+
     private function companyDocumentAvailableColumns(): array
     {
         static $columns = null;
@@ -1395,6 +1499,143 @@ class ProveedorControlador extends ControladorBase
         $columns = Schema::getColumnListing('company_documents');
 
         return $columns;
+    }
+
+    private function normalizeCompanyDocumentMetadata(array $data): array
+    {
+        $definition = $this->resolveCompanyDocumentDefinitionFromCandidates([
+            $data['document_slot'] ?? null,
+            $data['document_type'] ?? null,
+            $data['document_category'] ?? null,
+            $data['document_name'] ?? null,
+            $data['original_name'] ?? null,
+        ]);
+
+        $documentType = trim((string) ($data['document_type'] ?? ''));
+        $documentCategory = trim((string) ($data['document_category'] ?? ''));
+        $documentSlot = trim((string) ($data['document_slot'] ?? ''));
+        $documentSection = trim((string) ($data['document_section'] ?? ''));
+
+        return [
+            'document_type' => $documentType !== '' ? $documentType : ($definition['id'] ?? null),
+            'document_category' => $documentCategory !== '' ? $documentCategory : ($definition['id'] ?? null),
+            'document_slot' => $documentSlot !== '' ? $documentSlot : ($definition['id'] ?? null),
+            'document_section' => $documentSection !== '' ? $documentSection : ($definition['section_key'] ?? null),
+        ];
+    }
+
+    private function companyDocumentMetadataForResponse(DocumentoEmpresa $document): array
+    {
+        $definition = $this->resolveCompanyDocumentDefinitionFromCandidates([
+            $document->document_slot,
+            $document->document_type,
+            $document->document_category,
+            $document->document_name,
+            $document->original_name,
+            $document->file_name,
+        ]);
+
+        $documentType = trim((string) ($document->document_type ?: '')) ?: ($definition['id'] ?? '');
+        $documentCategory = trim((string) ($document->document_category ?: '')) ?: ($definition['id'] ?? '');
+        $documentSlot = trim((string) ($document->document_slot ?: '')) ?: ($definition['id'] ?? '');
+        $documentSection = trim((string) ($document->document_section ?: '')) ?: ($definition['section_key'] ?? '');
+
+        return [
+            'document_type' => $documentType,
+            'document_category' => $documentCategory,
+            'document_slot' => $documentSlot,
+            'document_section' => $documentSection,
+            'definition_key' => $definition['id'] ?? ($documentSlot ?: $documentType ?: $documentCategory),
+            'definition_label' => $definition['label'] ?? ($document->document_name ?: $document->original_name ?: 'Documento de empresa'),
+            'section_key' => $definition['section_key'] ?? ($documentSection ?: 'legal'),
+            'section_label' => $definition['section_label'] ?? 'Documentacion legal del operador',
+            'field_map' => [
+                ['column' => 'document_slot', 'value' => $documentSlot],
+                ['column' => 'document_type', 'value' => $documentType],
+                ['column' => 'document_category', 'value' => $documentCategory],
+                ['column' => 'document_section', 'value' => $documentSection],
+            ],
+        ];
+    }
+
+    private function buildCompanyDocumentAuditDescription(array $metadata, DocumentoEmpresa $document): string
+    {
+        $label = $metadata['definition_label'] ?? $document->document_name ?? $document->original_name ?? 'Documento de empresa';
+        $section = $metadata['section_label'] ?? 'Documentacion legal del operador';
+        $slot = $metadata['document_slot'] ?? '';
+
+        return trim(sprintf('%s · %s%s', $label, $section, $slot !== '' ? " · document_slot: {$slot}" : ''));
+    }
+
+    private function resolveCompanyDocumentDefinitionFromCandidates(array $candidates): ?array
+    {
+        $catalog = $this->companyDocumentDefinitionCatalog();
+
+        foreach ($candidates as $candidate) {
+            $normalized = Str::of((string) $candidate)->trim()->lower()->replace(['-', '_'], ' ')->value();
+            if ($normalized === '') {
+                continue;
+            }
+
+            foreach ($catalog as $definition) {
+                foreach ($definition['matchers'] as $matcher) {
+                    $normalizedMatcher = Str::of((string) $matcher)->trim()->lower()->replace(['-', '_'], ' ')->value();
+                    if ($normalized === $normalizedMatcher || str_contains($normalized, $normalizedMatcher)) {
+                        return $definition;
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private function companyDocumentDefinitionCatalog(): array
+    {
+        return [
+            [
+                'id' => 'sat_certificate',
+                'label' => 'Constancia de situacion fiscal',
+                'section_key' => 'sat',
+                'section_label' => 'Validacion SAT / Constancia fiscal',
+                'matchers' => ['sat_certificate', 'constancia fiscal', 'constancia_sat', 'situacion fiscal', 'sat'],
+            ],
+            [
+                'id' => 'articles_of_incorporation',
+                'label' => 'Acta constitutiva',
+                'section_key' => 'legal',
+                'section_label' => 'Carga legal y respaldo',
+                'matchers' => ['articles_of_incorporation', 'acta_constitutiva', 'acta constitutiva'],
+            ],
+            [
+                'id' => 'legal_representative_power',
+                'label' => 'Poder del representante legal',
+                'section_key' => 'legal',
+                'section_label' => 'Carga legal y respaldo',
+                'matchers' => ['legal_representative_power', 'poder_representante', 'poder del representante', 'power'],
+            ],
+            [
+                'id' => 'legal_representative_id',
+                'label' => 'Identificacion oficial del representante',
+                'section_key' => 'legal',
+                'section_label' => 'Carga legal y respaldo',
+                'matchers' => ['legal_representative_id', 'identificacion_representante', 'identificacion oficial', 'ine', 'pasaporte'],
+            ],
+            [
+                'id' => 'tax_address_proof',
+                'label' => 'Comprobante de domicilio fiscal',
+                'section_key' => 'legal',
+                'section_label' => 'Carga legal y respaldo',
+                'matchers' => ['tax_address_proof', 'domicilio_fiscal', 'comprobante_domicilio', 'domicilio fiscal'],
+            ],
+            [
+                'id' => 'operational_permit',
+                'label' => 'Permiso operativo o documentacion aeronautica',
+                'section_key' => 'legal',
+                'section_label' => 'Carga legal y respaldo',
+                'matchers' => ['operational_permit', 'permiso_operativo', 'documentacion_aeronautica', 'permiso operativo'],
+            ],
+        ];
     }
 
     private function normalizeProviderWorkflowStatus(string $approvalStatus): string
