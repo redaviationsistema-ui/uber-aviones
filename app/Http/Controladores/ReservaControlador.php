@@ -950,8 +950,6 @@ class ReservaControlador extends ControladorBase
 
         $pricingRows = [
             ['label' => 'Costo total del servicio', 'amount' => $finalPriceValue],
-            ['label' => 'Depósito requerido', 'amount' => $depositValue],
-            ['label' => 'Saldo estimado', 'amount' => max($finalPriceValue - $depositValue, 0)],
         ];
 
         return [
