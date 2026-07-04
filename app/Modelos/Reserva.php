@@ -23,6 +23,7 @@ class Reserva extends Model
         'currency',
         'confirmed_at',
         'cancelled_at',
+        'cancellation_reason',
     ];
 
     protected function casts(): array
@@ -90,6 +91,11 @@ class Reserva extends Model
     public function contract(): HasOne
     {
         return $this->hasOne(ContratoReserva::class, 'reservation_id');
+    }
+
+    public function aircraftAvailabilityBlock(): HasOne
+    {
+        return $this->hasOne(AircraftAvailabilityBlock::class, 'reservation_id');
     }
 
     public function review(): HasOne

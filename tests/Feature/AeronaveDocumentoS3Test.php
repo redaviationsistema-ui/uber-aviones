@@ -27,14 +27,16 @@ class AeronaveDocumentoS3Test extends TestCase
             'status' => 'active',
         ]);
 
-        $user->provider()->create([
+        $provider = $user->ownedProvider()->create([
             'company_name' => 'Red Aviation Test',
             'commercial_name' => 'Red Aviation',
             'approval_status' => 'approved',
         ]);
 
+        $user->forceFill(['provider_id' => $provider->id])->saveQuietly();
+
         $aircraft = Aeronave::factory()->create([
-            'provider_id' => $user->provider->id,
+            'provider_id' => $provider->id,
         ]);
 
         $token = TokenApi::issue($user);
@@ -79,14 +81,16 @@ class AeronaveDocumentoS3Test extends TestCase
             'status' => 'active',
         ]);
 
-        $user->provider()->create([
+        $provider = $user->ownedProvider()->create([
             'company_name' => 'Red Aviation Pending',
             'commercial_name' => 'Red Aviation Pending',
             'approval_status' => 'pending',
         ]);
 
+        $user->forceFill(['provider_id' => $provider->id])->saveQuietly();
+
         $aircraft = Aeronave::factory()->create([
-            'provider_id' => $user->provider->id,
+            'provider_id' => $provider->id,
             'status' => 'blocked',
         ]);
 
@@ -129,14 +133,16 @@ class AeronaveDocumentoS3Test extends TestCase
             'status' => 'active',
         ]);
 
-        $user->provider()->create([
+        $provider = $user->ownedProvider()->create([
             'company_name' => 'Red Aviation Test',
             'commercial_name' => 'Red Aviation',
             'approval_status' => 'approved',
         ]);
 
+        $user->forceFill(['provider_id' => $provider->id])->saveQuietly();
+
         $aircraft = Aeronave::factory()->create([
-            'provider_id' => $user->provider->id,
+            'provider_id' => $provider->id,
         ]);
 
         $token = TokenApi::issue($user);

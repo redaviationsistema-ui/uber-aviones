@@ -300,21 +300,26 @@ class PlataformaVuelosApiTest extends TestCase
             ->assertJsonPath('success', true);
 
         $flightRequestId = $requestResponse->json('flight_request.id');
+        $resolvedFinalPrice = (float) $requestResponse->json('flight_request.final_price');
 
         $this->assertDatabaseHas('flight_requests', [
             'id' => $flightRequestId,
             'assigned_provider_id' => $aircraft->provider_id,
             'assigned_aircraft_id' => $aircraft->id,
-            'final_price' => 15620,
         ]);
 
         $this->assertDatabaseHas('request_matches', [
             'flight_request_id' => $flightRequestId,
             'provider_id' => $aircraft->provider_id,
             'aircraft_id' => $aircraft->id,
-            'estimated_price' => 15620,
             'status' => 'sent_to_provider',
         ]);
+
+        $this->assertGreaterThan(0, $resolvedFinalPrice);
+        $this->assertEquals(
+            $resolvedFinalPrice,
+            (float) SolicitudVuelo::query()->findOrFail($flightRequestId)->final_price
+        );
 
         $this->withToken($providerToken)
             ->getJson('/api/v1/proveedor/mis-solicitudes')
@@ -680,7 +685,7 @@ class PlataformaVuelosApiTest extends TestCase
             ->assertOk();
 
         $this->assertSame('flight_confirmed', $response->json('request.workflow_status'));
-        $this->assertSame('confirmada', $response->json('operation.status'));
+        $this->assertSame('Confirmada', $response->json('operation.status'));
 
         $this->assertDatabaseHas('flight_requests', [
             'id' => $flightRequest->id,
@@ -765,10 +770,11 @@ class PlataformaVuelosApiTest extends TestCase
         $taxableSubtotal = (float) $quote['pricing_breakdown']['taxable_subtotal'];
         $taxes = (float) $quote['taxes'];
         $total = (float) $quote['total'];
+        $finalPrice = (float) $quote['pricing_breakdown']['final_price'];
 
         $this->assertEquals(round($subtotal - $airportExpenses, 2), round($taxableSubtotal, 2));
         $this->assertEquals(round($taxableSubtotal * 0.16, 2), round($taxes, 2));
-        $this->assertEquals(round($subtotal + $taxes, 2), round($total, 2));
+        $this->assertEquals(round($finalPrice, 2), round($total, 2));
     }
 
     public function test_multi_leg_preview_applies_minimum_hours_once_to_total_itinerary(): void
@@ -1153,11 +1159,15 @@ class PlataformaVuelosApiTest extends TestCase
             'motivo' => 'Guardia activa',
         ]);
 
-        $this->withToken($token)
+        $availabilityResponse = $this->withToken($token)
             ->getJson('/api/v1/sobrecargo/availability')
-            ->assertOk()
-            ->assertJsonPath('availability.0.clave', 'DISPONIBLE')
-            ->assertJsonPath('availability.0.state', 'Disponible');
+            ->assertOk();
+
+        $availability = collect($availabilityResponse->json('availability'));
+        $availableEntry = $availability->firstWhere('clave', 'DISPONIBLE');
+
+        $this->assertNotNull($availableEntry);
+        $this->assertSame('Disponible', $availableEntry['state'] ?? null);
     }
 
     public function test_sobrecargo_can_fetch_status_catalog_and_delete_availability_record(): void

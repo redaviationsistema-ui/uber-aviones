@@ -10,6 +10,7 @@ use App\Modelos\SolicitudVuelo;
 use App\Modelos\Suscripcion;
 use App\Modelos\SuscripcionAeronave;
 use App\Modelos\Usuario;
+use App\Servicios\Aeronaves\AircraftAvailabilityService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Arr;
@@ -20,6 +21,13 @@ use Throwable;
 
 class StripeWebhookControlador extends ControladorBase
 {
+    private readonly AircraftAvailabilityService $aircraftAvailabilityService;
+
+    public function __construct(?AircraftAvailabilityService $aircraftAvailabilityService = null)
+    {
+        $this->aircraftAvailabilityService = $aircraftAvailabilityService ?? app(AircraftAvailabilityService::class);
+    }
+
     public function handle(Request $request)
     {
         $payload = $request->getContent();
@@ -68,7 +76,7 @@ class StripeWebhookControlador extends ControladorBase
                 'provider' => 'stripe',
                 'event_id' => $event->id,
                 'event_type' => $event->type,
-                'payload' => json_decode($payload, true),
+                'payload' => $payload,
                 'stripe_created_at_utc' => $stripeCreatedAtUtc,
                 'stripe_created_at_local' => $stripeCreatedAtLocal,
                 'status' => 'received',
@@ -93,6 +101,7 @@ class StripeWebhookControlador extends ControladorBase
                 'payment_intent.succeeded' => $this->handlePaymentIntentSucceeded($event->data->object),
                 'payment_intent.payment_failed' => $this->handlePaymentFailed($event->data->object),
                 'payment_intent.canceled' => $this->handlePaymentCanceled($event->data->object),
+                'charge.refunded' => $this->handleChargeRefunded($event->data->object),
                 'invoice.payment_succeeded', 'invoice.paid' => $this->handleInvoicePaid($event->data->object),
                 'invoice.payment_failed' => $this->handleInvoicePaymentFailed($event->data->object),
                 'customer.subscription.updated' => $this->handleCustomerSubscriptionUpdated($event->data->object),
@@ -218,6 +227,10 @@ class StripeWebhookControlador extends ControladorBase
                     'gateway_response' => json_decode(json_encode($session), true),
                 ],
             );
+
+            if ($reservation) {
+                $this->aircraftAvailabilityService->blockAircraftForPaidReservation($reservation->fresh(['flightRequest.legs', 'legs']));
+            }
         });
 
         Log::info('Stripe checkout.session.completed actualizo reserva.', [
@@ -383,6 +396,10 @@ class StripeWebhookControlador extends ControladorBase
                     'gateway_response' => json_decode(json_encode($paymentIntent), true),
                 ],
             );
+
+            if ($reservation) {
+                $this->aircraftAvailabilityService->blockAircraftForPaidReservation($reservation->fresh(['flightRequest.legs', 'legs']));
+            }
         });
 
         Log::info('Stripe payment_intent.succeeded actualizo reserva.', [
@@ -469,6 +486,23 @@ class StripeWebhookControlador extends ControladorBase
             status: 'cancelled',
             paymentStatus: 'cancelled',
             reason: 'PaymentIntent cancelado.',
+        );
+    }
+
+    private function handleChargeRefunded(object $charge): void
+    {
+        $metadata = $this->extractMetadata($charge);
+        if (($metadata['billing_context'] ?? null) === 'client_access') {
+            return;
+        }
+
+        $this->markFlightRequestPaymentFailure(
+            checkoutSessionId: '',
+            paymentIntentId: (string) ($charge->payment_intent ?? ''),
+            flightRequestId: (int) ($metadata['flight_request_id'] ?? 0),
+            status: 'refunded',
+            paymentStatus: 'refunded',
+            reason: 'Pago reembolsado en Stripe.',
         );
     }
 
@@ -1471,12 +1505,31 @@ class StripeWebhookControlador extends ControladorBase
         }
 
         if ($flightRequest) {
+            $currentRequestStatus = strtolower(trim((string) ($flightRequest->status ?? '')));
+            $currentWorkflowStatus = strtolower(trim((string) ($flightRequest->workflow_status ?? '')));
+
             $flightRequest->update([
                 'payment_status' => $paymentStatus,
                 'stripe_payment_intent_id' => $paymentIntentId ?: $flightRequest->stripe_payment_intent_id,
-                'workflow_status' => 'pago pendiente',
-                'status' => 'reserved',
+                'workflow_status' => in_array($currentWorkflowStatus, ['cancelled', 'cancelada', 'completed', 'finalizada'], true)
+                    ? $flightRequest->workflow_status
+                    : 'pago pendiente',
+                'status' => in_array($currentRequestStatus, ['cancelled', 'cancelada', 'completed', 'finalizada'], true)
+                    ? $flightRequest->status
+                    : 'reserved',
             ]);
+
+            $reservation = $flightRequest->reservation()->latest('id')->first();
+            if ($reservation && in_array($paymentStatus, ['cancelled', 'failed', 'refunded'], true)) {
+                $currentReservationStatus = strtolower(trim((string) ($reservation->status ?? '')));
+                if (! in_array($currentReservationStatus, ['cancelled', 'canceled', 'completed', 'finalizada'], true)) {
+                    $reservation->update([
+                        'status' => 'pending_payment',
+                    ]);
+                }
+
+                $this->aircraftAvailabilityService->releaseReservationBlock($reservation->fresh(['flightRequest', 'latestPayment']));
+            }
         }
     }
 }

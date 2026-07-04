@@ -4,6 +4,7 @@ namespace App\Http\Controladores\RedAviation;
 
 use App\Http\Controladores\ControladorBase;
 use App\Modelos\AccessPayment;
+use App\Modelos\AircraftAvailabilityBlock;
 use App\Modelos\BanderaAntiBroker;
 use App\Modelos\ContratoReserva;
 use App\Modelos\Demo;
@@ -12,12 +13,15 @@ use App\Modelos\Proveedor;
 use App\Modelos\Rol;
 use App\Modelos\Aeronave;
 use App\Modelos\Pago;
+use App\Modelos\Reserva;
 use App\Modelos\CatalogoDisponibilidadEstatus;
 use App\Modelos\SolicitudVuelo;
 use App\Modelos\SobrecargoDisponibilidad;
 use App\Modelos\Suscripcion;
 use App\Modelos\SuscripcionAeronave;
 use App\Modelos\Usuario;
+use App\Servicios\Aeronaves\AircraftAvailabilityService;
+use App\Servicios\Operaciones\ReservationLifecycleService;
 use App\Servicios\RedAviation\KpiSaasServicio;
 use App\Servicios\RedAviation\VisibilidadServicio;
 use Carbon\Carbon;
@@ -39,10 +43,13 @@ use Shuchkin\SimpleXLS;
 use Shuchkin\SimpleXLSX;
 use Shuchkin\SimpleXLSXGen;
 use Symfony\Component\HttpFoundation\StreamedResponse;
+use RuntimeException;
 
 class AdminControlador extends ControladorBase
 {
     public function __construct(
+        private readonly AircraftAvailabilityService $aircraftAvailabilityService,
+        private readonly ReservationLifecycleService $reservationLifecycleService,
         private readonly KpiSaasServicio $kpiSaasServicio,
         private readonly VisibilidadServicio $visibilidadServicio,
     )
@@ -52,6 +59,288 @@ class AdminControlador extends ControladorBase
     public function dashboard()
     {
         return $this->ok(['kpis' => $this->kpiSaasServicio->resumen()]);
+    }
+
+    public function aircraftCalendar(Request $request)
+    {
+        $data = $request->validate([
+            'start_date' => ['required', 'date'],
+            'end_date' => ['required', 'date', 'after_or_equal:start_date'],
+            'company_id' => ['nullable', 'integer', 'exists:providers,id'],
+            'aircraft_id' => ['nullable', 'integer', 'exists:aircraft,id'],
+        ]);
+
+        $from = Carbon::parse($data['start_date'])->startOfDay();
+        $to = Carbon::parse($data['end_date'])->endOfDay();
+        $companyId = isset($data['company_id']) ? (int) $data['company_id'] : null;
+        $aircraftId = isset($data['aircraft_id']) ? (int) $data['aircraft_id'] : null;
+
+        $aircraftCollection = Aeronave::query()
+            ->select([
+                'aircraft.id',
+                'aircraft.provider_id',
+                'aircraft.model',
+                'aircraft.registration',
+                'aircraft.category',
+                'aircraft.capacity',
+                'aircraft.base_airport',
+                'aircraft.status',
+            ])
+            ->with(['provider:id,company_name,commercial_name'])
+            ->when($companyId, fn ($query) => $query->where('provider_id', $companyId))
+            ->when($aircraftId, fn ($query) => $query->whereKey($aircraftId))
+            ->orderBy('provider_id')
+            ->orderBy('registration')
+            ->orderBy('model')
+            ->get();
+
+        $aircraftIds = $aircraftCollection->pluck('id')->filter()->values();
+
+        if ($aircraftIds->isEmpty()) {
+            return $this->ok([
+                'calendar' => [],
+                'aircraft' => [],
+                'companies' => [],
+                'filters' => [
+                    'start_date' => $from->toDateString(),
+                    'end_date' => $to->toDateString(),
+                    'company_id' => $companyId,
+                    'aircraft_id' => $aircraftId,
+                ],
+                'summary' => [
+                    'total_aircraft' => 0,
+                    'available_aircraft' => 0,
+                    'occupied_aircraft' => 0,
+                    'maintenance_aircraft' => 0,
+                    'upcoming_flights_today' => 0,
+                    'flights_by_company' => [],
+                ],
+            ]);
+        }
+
+        $blocks = AircraftAvailabilityBlock::query()
+            ->with([
+                'aircraft:id,provider_id,model,registration,category,status',
+                'aircraft.provider:id,company_name,commercial_name',
+                'reservation:id,client_id,provider_id,aircraft_id,flight_request_id,reservation_code,status,confirmed_at,cancelled_at',
+                'reservation.client:id,name',
+                'reservation.flightRequest:id,origin,destination,departure_datetime,return_datetime,payment_status,status',
+                'reservation.legs:id,reservation_id,origin,destination,departure_datetime,arrival_datetime',
+                'reservation.latestPayment',
+            ])
+            ->whereIn('aircraft_id', $aircraftIds)
+            ->where('start_datetime', '<', $to)
+            ->where('end_datetime', '>', $from)
+            ->orderBy('start_datetime')
+            ->get();
+
+        $events = $blocks
+            ->map(fn (AircraftAvailabilityBlock $block) => $this->formatAircraftCalendarEvent($block))
+            ->filter()
+            ->values();
+
+        $aircraftPayload = $aircraftCollection
+            ->map(fn (Aeronave $aircraft) => [
+                'id' => $aircraft->id,
+                'company_id' => $aircraft->provider_id,
+                'company_name' => $aircraft->provider?->commercial_name ?: $aircraft->provider?->company_name ?: 'Operador sin nombre',
+                'aircraft_name' => $this->resolveAircraftDisplayName($aircraft),
+                'registration' => (string) ($aircraft->registration ?? ''),
+                'model' => (string) ($aircraft->model ?? ''),
+                'category' => (string) ($aircraft->category ?? ''),
+                'status' => (string) ($aircraft->status ?? ''),
+                'base_airport' => (string) ($aircraft->base_airport ?? ''),
+            ])
+            ->values();
+
+        $companies = $aircraftCollection
+            ->map(function (Aeronave $aircraft) {
+                return [
+                    'id' => $aircraft->provider_id,
+                    'name' => $aircraft->provider?->commercial_name ?: $aircraft->provider?->company_name ?: 'Operador sin nombre',
+                ];
+            })
+            ->filter(fn (array $company) => ! empty($company['id']))
+            ->unique('id')
+            ->sortBy('name')
+            ->values();
+
+        $activeEvents = $events->filter(fn (array $event) => ($event['block_status'] ?? '') === 'active');
+        $occupiedAircraftIds = $activeEvents->pluck('aircraft_id')->unique()->values();
+        $maintenanceAircraftIds = $activeEvents
+            ->filter(fn (array $event) => in_array($event['status'], ['maintenance', 'out_of_service'], true))
+            ->pluck('aircraft_id')
+            ->unique()
+            ->values();
+        $today = now()->toDateString();
+
+        return $this->ok([
+            'calendar' => $events,
+            'aircraft' => $aircraftPayload,
+            'companies' => $companies,
+            'filters' => [
+                'start_date' => $from->toDateString(),
+                'end_date' => $to->toDateString(),
+                'company_id' => $companyId,
+                'aircraft_id' => $aircraftId,
+            ],
+            'summary' => [
+                'total_aircraft' => $aircraftCollection->count(),
+                'available_aircraft' => max($aircraftCollection->count() - $occupiedAircraftIds->count(), 0),
+                'occupied_aircraft' => $occupiedAircraftIds->count(),
+                'maintenance_aircraft' => $maintenanceAircraftIds->count(),
+                'upcoming_flights_today' => $events
+                    ->filter(fn (array $event) => ($event['start_date'] ?? '') === $today)
+                    ->count(),
+                'flights_by_company' => $events
+                    ->groupBy('company_id')
+                    ->map(function ($companyEvents, $providerId) {
+                        $first = collect($companyEvents)->first();
+
+                        return [
+                            'company_id' => $providerId ? (int) $providerId : null,
+                            'company_name' => $first['company_name'] ?? 'Operador sin nombre',
+                            'total' => count($companyEvents),
+                        ];
+                    })
+                    ->values(),
+            ],
+        ]);
+    }
+
+    public function operationsDashboard(Request $request)
+    {
+        $data = $request->validate([
+            'company_id' => ['nullable', 'integer', 'exists:providers,id'],
+        ]);
+
+        return $this->ok([
+            'dashboard' => $this->reservationLifecycleService->operationsDashboard(
+                isset($data['company_id']) ? (int) $data['company_id'] : null
+            ),
+        ]);
+    }
+
+    public function operationsHistory(Request $request)
+    {
+        $data = $request->validate([
+            'per_page' => ['nullable', 'integer', 'min:1', 'max:100'],
+        ]);
+
+        return $this->ok([
+            'history' => $this->reservationLifecycleService->operationsHistory((int) ($data['per_page'] ?? 30)),
+        ]);
+    }
+
+    public function operationsNotifications(Request $request)
+    {
+        $data = $request->validate([
+            'per_page' => ['nullable', 'integer', 'min:1', 'max:100'],
+        ]);
+
+        return $this->ok([
+            'notifications' => $this->reservationLifecycleService->adminNotifications((int) ($data['per_page'] ?? 20)),
+        ]);
+    }
+
+    public function rescheduleReservation(Request $request, Reserva $reservation)
+    {
+        $data = $request->validate([
+            'provider_id' => ['nullable', 'integer', 'exists:providers,id'],
+            'aircraft_id' => ['required', 'integer', 'exists:aircraft,id'],
+            'assigned_aircraft_model' => ['nullable', 'string', 'max:255'],
+            'aircraft_model' => ['nullable', 'string', 'max:255'],
+            'origin' => ['required_without:legs', 'nullable', 'string', 'max:12'],
+            'destination' => ['required_without:legs', 'nullable', 'string', 'max:12'],
+            'departure_datetime' => ['required_without:legs', 'nullable', 'date'],
+            'return_datetime' => ['nullable', 'date', 'after:departure_datetime'],
+            'legs' => ['nullable', 'array', 'min:1'],
+            'legs.*.origin' => ['required', 'string', 'max:12'],
+            'legs.*.destination' => ['required', 'string', 'max:12'],
+            'legs.*.departure_datetime' => ['required', 'date'],
+            'legs.*.arrival_datetime' => ['required', 'date', 'after:legs.*.departure_datetime'],
+        ]);
+
+        try {
+            $reservation = $this->reservationLifecycleService->rescheduleReservation(
+                $reservation,
+                $data,
+                $request->user()
+            );
+        } catch (RuntimeException $exception) {
+            return response()->json([
+                'success' => false,
+                'code' => 'AIRCRAFT_NOT_AVAILABLE',
+                'message' => $exception->getMessage(),
+            ], 409);
+        }
+
+        return $this->ok([
+            'reservation' => $reservation,
+        ]);
+    }
+
+    public function cancelReservation(Request $request, Reserva $reservation)
+    {
+        $data = $request->validate([
+            'reason' => ['nullable', 'string', 'max:1000'],
+        ]);
+
+        $reservation = $this->reservationLifecycleService->cancelReservation(
+            $reservation,
+            (string) ($data['reason'] ?? ''),
+            $request->user()
+        );
+
+        return $this->ok([
+            'reservation' => $reservation,
+        ]);
+    }
+
+    public function createAircraftAvailabilityBlock(Request $request)
+    {
+        $data = $request->validate([
+            'aircraft_id' => ['required', 'integer', 'exists:aircraft,id'],
+            'start_datetime' => ['required', 'date'],
+            'end_datetime' => ['required', 'date', 'after:start_datetime'],
+            'block_type' => ['nullable', Rule::in(['maintenance', 'inspection', 'out_of_service', 'manual_block'])],
+            'reason' => ['nullable', 'string', 'max:1000'],
+        ]);
+
+        try {
+            $block = $this->reservationLifecycleService->createManualAircraftBlock(
+                Aeronave::query()->findOrFail($data['aircraft_id']),
+                $data,
+                $request->user()
+            );
+        } catch (RuntimeException $exception) {
+            return response()->json([
+                'success' => false,
+                'code' => 'AIRCRAFT_NOT_AVAILABLE',
+                'message' => $exception->getMessage(),
+            ], 409);
+        }
+
+        return $this->ok([
+            'block' => $block,
+        ], 201);
+    }
+
+    public function releaseAircraftAvailabilityBlock(Request $request, AircraftAvailabilityBlock $block)
+    {
+        $data = $request->validate([
+            'reason' => ['nullable', 'string', 'max:1000'],
+        ]);
+
+        $released = $this->reservationLifecycleService->releaseAircraftBlock(
+            $block,
+            (string) ($data['reason'] ?? ''),
+            $request->user()
+        );
+
+        return $this->ok([
+            'block' => $released,
+        ]);
     }
 
     public function users()
@@ -1504,6 +1793,30 @@ class AdminControlador extends ControladorBase
 
         $aircraft = Aeronave::find($data['aircraft_id']);
         $visibilityPayload = $flightRequest->visibility_payload ?? [];
+        $reservation = Reserva::query()
+            ->where('flight_request_id', $flightRequest->id)
+            ->latest('id')
+            ->first();
+
+        if ($reservation) {
+            [$requestedStart, $requestedEnd] = $this->aircraftAvailabilityService->resolveWindowFromPayload([
+                'departure_datetime' => $flightRequest->departure_datetime,
+                'return_datetime' => $flightRequest->return_datetime,
+                'legs' => $flightRequest->legs()->get(['departure_datetime', 'arrival_datetime'])->map(
+                    fn ($leg) => [
+                        'departure_datetime' => $leg->departure_datetime,
+                        'arrival_datetime' => $leg->arrival_datetime,
+                    ]
+                )->values()->all(),
+            ]);
+
+            $this->aircraftAvailabilityService->ensureAircraftAvailable(
+                (int) $data['aircraft_id'],
+                $requestedStart,
+                $requestedEnd,
+                (int) $reservation->id,
+            );
+        }
 
         $flightRequest->update([
             'workflow_status' => $nextWorkflowStatus,
@@ -1521,6 +1834,23 @@ class AdminControlador extends ControladorBase
                 'operational_ready' => (bool) ($visibilityPayload['operational_ready'] ?? false),
             ],
         ]);
+
+        if ($reservation) {
+            $reservation->update([
+                'provider_id' => $data['provider_id'],
+                'aircraft_id' => $data['aircraft_id'],
+            ]);
+
+            $resolvedPaymentStatus = Str::lower(trim((string) ($flightRequest->payment_status ?: $reservation->latestPayment?->status ?: '')));
+            if ($resolvedPaymentStatus === 'paid') {
+                $this->aircraftAvailabilityService->blockAircraftForPaidReservation($reservation->fresh(['flightRequest.legs', 'legs']));
+            } else {
+                $this->aircraftAvailabilityService->releaseReservationBlock(
+                    $reservation->fresh(['flightRequest', 'latestPayment']),
+                    'Bloqueo anterior liberado por cambio administrativo de aeronave.'
+                );
+            }
+        }
 
         return $this->ok(['operation' => $operacion->load('timeline')]);
     }
@@ -1664,6 +1994,22 @@ class AdminControlador extends ControladorBase
 
                 $contractStatus ??= $reservation->contract?->status;
                 $paymentStatus ??= $reservation->latestPayment?->status ?? $reservation->status;
+
+                $normalizedResolvedPaymentStatus = Str::lower(trim((string) $paymentStatus));
+                $normalizedReservationStatus = Str::lower(trim((string) $reservation->status));
+                $normalizedRequestStatus = Str::lower(trim((string) $flightRequest->status));
+                $normalizedWorkflowStatus = Str::lower(trim((string) ($requestedWorkflowStatus ?? '')));
+
+                if ($normalizedResolvedPaymentStatus === 'paid') {
+                    $this->aircraftAvailabilityService->blockAircraftForPaidReservation($reservation->fresh(['flightRequest.legs', 'legs']));
+                } elseif (
+                    in_array($normalizedResolvedPaymentStatus, ['cancelled', 'failed', 'refunded'], true)
+                    || in_array($normalizedReservationStatus, ['cancelled', 'canceled'], true)
+                    || in_array($normalizedRequestStatus, ['cancelled', 'cancelada'], true)
+                    || in_array($normalizedWorkflowStatus, ['cancelled', 'cancelada'], true)
+                ) {
+                    $this->aircraftAvailabilityService->releaseReservationBlock($reservation->fresh(['flightRequest', 'latestPayment']));
+                }
             }
 
             if ($operation && $requestedWorkflowStatus) {
@@ -2729,5 +3075,141 @@ class AdminControlador extends ControladorBase
         ] : null;
 
         return $summary;
+    }
+
+    private function formatAircraftCalendarEvent(AircraftAvailabilityBlock $block): ?array
+    {
+        $reservation = $block->reservation;
+        $aircraft = $block->aircraft;
+        if (! $aircraft) {
+            return null;
+        }
+
+        $provider = $aircraft?->provider;
+        $flightRequest = $reservation?->flightRequest;
+        $firstLeg = $reservation?->legs?->sortBy('departure_datetime')->first();
+        $lastLeg = $reservation?->legs?->sortByDesc('arrival_datetime')->first();
+
+        $origin = $firstLeg?->origin ?: $flightRequest?->origin ?: '';
+        $destination = $lastLeg?->destination ?: $flightRequest?->destination ?: '';
+        $eventStatus = $this->resolveAircraftCalendarEventStatus($block);
+        $reason = trim((string) ($block->reason ?: $this->resolveAircraftCalendarReason($block, $eventStatus)));
+
+        return [
+            'id' => $block->id,
+            'aircraft_id' => $block->aircraft_id,
+            'aircraft_name' => $this->resolveAircraftDisplayName($aircraft),
+            'registration' => (string) ($aircraft?->registration ?? ''),
+            'model' => (string) ($aircraft?->model ?? ''),
+            'company_id' => $provider?->id,
+            'company_name' => $provider?->commercial_name ?: $provider?->company_name ?: 'Operador sin nombre',
+            'reservation_id' => $reservation?->id,
+            'reservation_code' => (string) ($reservation?->reservation_code ?? ''),
+            'flight_request_id' => $reservation?->flight_request_id,
+            'client_name' => (string) ($reservation?->client?->name ?? ''),
+            'origin' => (string) $origin,
+            'destination' => (string) $destination,
+            'start' => optional($block->start_datetime)?->toIso8601String(),
+            'end' => optional($block->end_datetime)?->toIso8601String(),
+            'start_date' => optional($block->start_datetime)?->toDateString(),
+            'end_date' => optional($block->end_datetime)?->toDateString(),
+            'status' => $eventStatus,
+            'block_status' => (string) ($block->status ?? ''),
+            'payment_status' => (string) ($flightRequest?->payment_status ?: $reservation?->latestPayment?->status ?: ''),
+            'reservation_status' => (string) ($reservation?->status ?? ''),
+            'reason' => $reason,
+            'color' => $this->resolveAircraftCalendarEventColor($eventStatus),
+        ];
+    }
+
+    private function resolveAircraftCalendarEventStatus(AircraftAvailabilityBlock $block): string
+    {
+        $reason = Str::lower(trim((string) ($block->reason ?? '')));
+        $blockStatus = Str::lower(trim((string) ($block->status ?? '')));
+        $blockType = Str::lower(trim((string) ($block->block_type ?? '')));
+        $reservation = $block->reservation;
+        $aircraftStatus = Str::lower(trim((string) ($block->aircraft?->status ?? '')));
+        $paymentStatus = Str::lower(trim((string) ($reservation?->flightRequest?->payment_status ?: $reservation?->latestPayment?->status ?: '')));
+
+        if (in_array($aircraftStatus, ['out_of_service', 'fuera_de_servicio', 'suspended', 'suspendida', 'blocked', 'bloqueada'], true)) {
+            return 'out_of_service';
+        }
+
+        if ($blockType === 'out_of_service') {
+            return 'out_of_service';
+        }
+
+        if (in_array($blockType, ['maintenance', 'inspection'], true)) {
+            return 'maintenance';
+        }
+
+        if ($blockType === 'manual_block') {
+            return 'manual_block';
+        }
+
+        if (str_contains($reason, 'mantenimiento') || str_contains($reason, 'maintenance')) {
+            return 'maintenance';
+        }
+
+        if ($reservation && $block->start_datetime && $block->end_datetime && now()->between($block->start_datetime, $block->end_datetime)) {
+            return 'in_flight';
+        }
+
+        if ($paymentStatus === 'paid') {
+            return 'paid';
+        }
+
+        if (in_array($paymentStatus, ['pending', 'processing', 'pending_manual_payment', 'pending_manual_validation'], true)) {
+            return 'pending_payment';
+        }
+
+        if ($blockStatus === 'cancelled') {
+            return 'cancelled';
+        }
+
+        if ($blockStatus === 'released') {
+            return 'released';
+        }
+
+        return $reservation ? 'reserved' : 'manual_block';
+    }
+
+    private function resolveAircraftCalendarReason(AircraftAvailabilityBlock $block, string $eventStatus): string
+    {
+        return match ($eventStatus) {
+            'paid' => 'Reserva pagada',
+            'pending_payment' => 'Pago pendiente',
+            'in_flight' => 'Vuelo en curso',
+            'maintenance' => 'Mantenimiento',
+            'out_of_service' => 'Aeronave fuera de servicio',
+            'released' => 'Bloqueo liberado',
+            'cancelled' => 'Bloqueo cancelado',
+            default => $block->reservation_id ? 'Reserva bloqueada' : 'Bloqueo manual',
+        };
+    }
+
+    private function resolveAircraftCalendarEventColor(string $eventStatus): string
+    {
+        return match ($eventStatus) {
+            'paid' => '#22c55e',
+            'pending_payment' => '#eab308',
+            'in_flight' => '#3b82f6',
+            'maintenance' => '#f97316',
+            'out_of_service' => '#ef4444',
+            'released', 'cancelled', 'manual_block', 'reserved' => '#9ca3af',
+            default => '#9ca3af',
+        };
+    }
+
+    private function resolveAircraftDisplayName(?Aeronave $aircraft): string
+    {
+        if (! $aircraft) {
+            return 'Aeronave sin nombre';
+        }
+
+        $registration = trim((string) ($aircraft->registration ?? ''));
+        $model = trim((string) ($aircraft->model ?? ''));
+
+        return trim(implode(' · ', array_filter([$registration, $model]))) ?: ($model !== '' ? $model : 'Aeronave sin nombre');
     }
 }

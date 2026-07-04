@@ -37,6 +37,11 @@ class Aeronave extends Model
 
     use HasFactory;
 
+    protected static function newFactory()
+    {
+        return \Database\Factories\AeronaveFactory::new();
+    }
+
     protected $fillable = [
         'provider_id',
         'model',
@@ -129,6 +134,11 @@ class Aeronave extends Model
     public function availability(): HasMany
     {
         return $this->hasMany(DisponibilidadAeronave::class, 'aircraft_id');
+    }
+
+    public function availabilityBlocks(): HasMany
+    {
+        return $this->hasMany(AircraftAvailabilityBlock::class, 'aircraft_id');
     }
 
     public function images(): HasMany

@@ -9,10 +9,15 @@ use App\Enumeraciones\EstadoSolicitudVuelo;
 use App\Enumeraciones\EstadoWorkflowSolicitud;
 use App\Modelos\Aeronave;
 use App\Modelos\SolicitudVuelo;
+use App\Servicios\Aeronaves\AircraftAvailabilityService;
 use Carbon\Carbon;
 
 class ReintentoCoincidenciaSolicitudServicio
 {
+    public function __construct(private readonly AircraftAvailabilityService $aircraftAvailabilityService)
+    {
+    }
+
     public function manejarRechazo(SolicitudVuelo $flightRequest): array
     {
         $flightRequest->loadMissing('matches');
@@ -130,6 +135,7 @@ class ReintentoCoincidenciaSolicitudServicio
             ->where('status', EstadoAeronave::Active->value)
             ->where('capacity', '>=', $flightRequest->passengers)
             ->whereHas('provider', fn ($scope) => $scope->where('approval_status', EstadoProveedor::Approved->value))
+            ->tap(fn ($scope) => $this->aircraftAvailabilityService->excludeConflictingAircraft($scope, $start, $end))
             ->whereDoesntHave('availability', function ($scope) use ($start, $end) {
                 $scope->whereIn('status', [
                     EstadoDisponibilidad::Occupied->value,

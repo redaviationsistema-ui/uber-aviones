@@ -14,12 +14,14 @@ use App\Modelos\ReglaPrecioCategoria;
 use App\Modelos\SolicitudVuelo;
 use App\Modelos\TokenApi;
 use App\Modelos\Usuario;
+use App\Servicios\Aeronaves\AircraftAvailabilityService;
 use App\Servicios\Billing\BillingPlanServicio;
 use App\Servicios\Pagos\PaymentFeeCalculationServicio;
 use App\Servicios\RedAviation\MatchingRedAviationServicio;
 use App\Servicios\RedAviation\VisibilidadServicio;
 use Carbon\Carbon;
 use Illuminate\Database\QueryException;
+use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
@@ -114,6 +116,7 @@ class ClienteControlador extends ControladorBase
     ];
 
     public function __construct(
+        private readonly AircraftAvailabilityService $aircraftAvailabilityService,
         private readonly BillingPlanServicio $billingPlanServicio,
         private readonly MatchingRedAviationServicio $matchingServicio,
         private readonly VisibilidadServicio $visibilidadServicio,
@@ -193,6 +196,8 @@ class ClienteControlador extends ControladorBase
             $routePricingAvailable = true;
         }
 
+        [$requestedStart, $requestedEnd] = $this->aircraftAvailabilityService->resolveWindowFromPayload($data);
+
         $aircraft = Aeronave::query()
             ->select([
                 'id',
@@ -219,6 +224,7 @@ class ClienteControlador extends ControladorBase
             ])
             ->whereIn('status', ['active', 'trial_active', 'aprobada', 'available', 'disponible'])
             ->when($passengers > 0, fn ($query) => $query->where('capacity', '>=', $passengers))
+            ->tap(fn ($query) => $this->aircraftAvailabilityService->excludeConflictingAircraft($query, $requestedStart, $requestedEnd))
             ->when($origin !== '', function ($query) use ($origin) {
                 $query->orderByRaw(
                     'case when upper(coalesce(base_airport, \'\')) = ? then 0 else 1 end',
@@ -353,6 +359,10 @@ class ClienteControlador extends ControladorBase
         }
 
         $maxLegDistanceKm = (float) collect($legs)->max('distance_km');
+        [$requestedStart, $requestedEnd] = $this->aircraftAvailabilityService->resolveWindowFromPayload([
+            ...$data,
+            'legs' => $legs,
+        ]);
         $quotes = Aeronave::query()
             ->select([
                 'id',
@@ -384,6 +394,7 @@ class ClienteControlador extends ControladorBase
                 $query->whereNull('range_km')
                     ->orWhere('range_km', '>=', $maxLegDistanceKm);
             })
+            ->tap(fn ($query) => $this->aircraftAvailabilityService->excludeConflictingAircraft($query, $requestedStart, $requestedEnd))
             ->when(! empty($data['origin']), function ($query) use ($data) {
                 $origin = strtoupper(trim((string) $data['origin']));
                 $query->orderByRaw(
@@ -523,10 +534,15 @@ class ClienteControlador extends ControladorBase
     {
         $user = $request->user()->fresh();
         $commercialGate = $this->resolveCommercialAccessGate($user);
-        if (! $commercialGate['allowed']) {
+        $hasActiveCommercialAccess = $user->hasRole(Usuario::ROLE_ADMIN)
+            || ((bool) $user->has_paid_access && $user->access_status === 'active')
+            || (bool) $user->activeSuscripcion
+            || ($user->demo?->status === 'active' && $user->demo?->expires_at?->isFuture());
+
+        if (! $commercialGate['allowed'] || ! $hasActiveCommercialAccess) {
             return response()->json([
                 'success' => false,
-                'message' => 'Necesitas activar tu acceso comercial para crear mas solicitudes.',
+                'message' => 'Necesitas demo activa o suscripcion vigente.',
                 'access' => $user->accessStatus(),
                 'billing_plan' => $commercialGate['plan'],
             ], 402);
@@ -827,6 +843,8 @@ class ClienteControlador extends ControladorBase
             return;
         }
 
+        $this->ensureAircraftIsAvailableForFlightRequest($selectedMatch->aircraft->id, $solicitud, $data);
+
         $serverPricing = $this->resolveServerPricingForSelectedAircraft($selectedMatch->aircraft, $solicitud, $data);
         $resolvedSelectedPrice = (float) ($serverPricing['total_amount'] ?? 0);
         $selectedMatch->update([
@@ -854,6 +872,28 @@ class ClienteControlador extends ControladorBase
                 'selected_card_price' => $resolvedSelectedPrice > 0 ? $resolvedSelectedPrice : null,
             ],
         ]);
+    }
+
+    private function ensureAircraftIsAvailableForFlightRequest(int $aircraftId, SolicitudVuelo $solicitud, array $requestData = []): void
+    {
+        [$requestedStart, $requestedEnd] = $this->aircraftAvailabilityService->resolveWindowFromPayload([
+            'departure_datetime' => optional($solicitud->departure_datetime)->toDateTimeString() ?? ($requestData['departure_datetime'] ?? null),
+            'return_datetime' => optional($solicitud->return_datetime)->toDateTimeString() ?? ($requestData['return_datetime'] ?? null),
+            'legs' => $solicitud->legs->map(fn ($leg) => [
+                'departure_datetime' => $leg->departure_datetime,
+                'arrival_datetime' => $leg->arrival_datetime,
+            ])->values()->all(),
+        ]);
+
+        if (! $this->aircraftAvailabilityService->aircraftHasConflict($aircraftId, $requestedStart, $requestedEnd)) {
+            return;
+        }
+
+        throw new HttpResponseException(response()->json([
+            'success' => false,
+            'code' => 'AIRCRAFT_NOT_AVAILABLE',
+            'message' => 'Esta aeronave ya no está disponible para el horario seleccionado.',
+        ], 409));
     }
 
     public function indexFlightRequests(Request $request)
@@ -1015,6 +1055,8 @@ class ClienteControlador extends ControladorBase
                 'failure_reason' => null,
                 'updated_at' => now(),
             ])->save();
+
+            $this->aircraftAvailabilityService->blockAircraftForPaidReservation($reservation->fresh(['flightRequest.legs', 'legs']));
         });
 
         return $flightRequest->fresh([
@@ -1234,6 +1276,20 @@ class ClienteControlador extends ControladorBase
         }
 
         if ($definitions !== []) {
+            $firstDefinition = $definitions[0] ?? null;
+            if (
+                $origin !== ''
+                && $destination !== ''
+                && $firstDefinition
+                && ! ($firstDefinition['origin'] === $origin && $firstDefinition['destination'] === $destination)
+            ) {
+                array_unshift($definitions, [
+                    'origin' => $origin,
+                    'destination' => $destination,
+                    'departure_datetime' => $data['departure_datetime'] ?? null,
+                ]);
+            }
+
             return $definitions;
         }
 
@@ -1687,7 +1743,8 @@ class ClienteControlador extends ControladorBase
         $minimumAdjustment = max($subtotalBeforeMargin - $subtotalOperative, 0.0);
         $marginAmount = $subtotalBeforeMargin * $marginRate;
         $subtotal = $subtotalBeforeMargin + $marginAmount;
-        $taxableSubtotal = $subtotal;
+        $nonTaxableExpenses = $expenseFee;
+        $taxableSubtotal = max($subtotal - $nonTaxableExpenses, 0.0);
         $taxRate = $this->shouldIncludeIva($requestData) ? self::DEFAULT_IVA_RATE : 0.0;
         $iva = $taxableSubtotal * $taxRate;
         $total = $subtotal + $iva;
@@ -1810,7 +1867,7 @@ class ClienteControlador extends ControladorBase
             'operator_subtotal' => $subtotalBeforeMargin,
             'subtotal_operativo' => $subtotalOperative,
             'taxable_subtotal' => $taxableSubtotal,
-            'non_taxable_expenses' => 0.0,
+            'non_taxable_expenses' => $nonTaxableExpenses,
             'subtotal_before_margin' => $subtotalBeforeMargin,
             'base_price' => $flightBase,
             'base_price_formula' => [
@@ -1829,7 +1886,7 @@ class ClienteControlador extends ControladorBase
                 'margin_amount' => round($marginAmount, 2),
                 'subtotal_before_margin' => round($subtotalBeforeMargin, 2),
                 'taxable_subtotal' => round($taxableSubtotal, 2),
-                'non_taxable_expenses' => 0,
+                'non_taxable_expenses' => round($nonTaxableExpenses, 2),
                 'expression' => sprintf(
                     'base %.2f + repo %.2f + return %.2f + overnight %.2f + airport %.2f => %.2f; taxable %.2f; margen %.2f%% => %.2f',
                     round($flightBase, 2),
@@ -2894,5 +2951,3 @@ class ClienteControlador extends ControladorBase
         return $minimumRoutePrice > 0 ? $minimumRoutePrice : 3000.0;
     }
 }
-
-

@@ -8,11 +8,16 @@ use App\Modelos\Notificacion;
 use App\Modelos\Operacion;
 use App\Modelos\Pago;
 use App\Modelos\Reserva;
+use App\Servicios\Aeronaves\AircraftAvailabilityService;
 use JsonException;
 use Illuminate\Http\Request;
 
 class PagoControlador extends ControladorBase
 {
+    public function __construct(private readonly AircraftAvailabilityService $aircraftAvailabilityService)
+    {
+    }
+
     public function index(Request $request)
     {
         return $this->ok([
@@ -81,9 +86,11 @@ class PagoControlador extends ControladorBase
 
         if ($payment->status === 'paid') {
             $reservation->update(['status' => 'confirmed', 'confirmed_at' => now()]);
+            $this->aircraftAvailabilityService->blockAircraftForPaidReservation($reservation->fresh(['flightRequest.legs', 'legs']));
             $this->notifyAssignedCrew($reservation);
-        } elseif ($payment->status === 'failed') {
+        } elseif (in_array($payment->status, ['failed', 'refunded'], true)) {
             $reservation->update(['status' => 'pending_payment']);
+            $this->aircraftAvailabilityService->releaseReservationBlock($reservation->fresh(['flightRequest', 'latestPayment']));
         }
 
         return $this->ok(['payment' => $payment->fresh(), 'reservation' => $reservation->fresh(['payments', 'contract'])], 201);
@@ -109,6 +116,7 @@ class PagoControlador extends ControladorBase
         ]);
 
         $reservation->update(['status' => 'pending_payment']);
+        $this->aircraftAvailabilityService->releaseReservationBlock($reservation->fresh(['flightRequest', 'latestPayment']));
 
         return $this->ok([
             'payment' => $payment->fresh(),

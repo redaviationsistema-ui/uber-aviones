@@ -16,6 +16,7 @@ use App\Modelos\Proveedor;
 use App\Modelos\RegistroAuditoria;
 use App\Modelos\Reserva;
 use App\Modelos\Usuario;
+use App\Servicios\Aeronaves\AircraftAvailabilityService;
 use App\Servicios\ReintentoCoincidenciaSolicitudServicio;
 use App\Servicios\RedAviation\VisibilidadServicio;
 use Illuminate\Http\Request;
@@ -928,6 +929,43 @@ class ProveedorControlador extends ControladorBase
                 ]);
             }
 
+            $releaseAircraftId = (int) ($release['aircraft_id'] ?? 0);
+            if ($reservation && $releaseAircraftId > 0) {
+                $availabilityService = app(AircraftAvailabilityService::class);
+                [$requestedStart, $requestedEnd] = $availabilityService->resolveWindowFromPayload([
+                    'departure_datetime' => $flightRequest->departure_datetime,
+                    'return_datetime' => $flightRequest->return_datetime,
+                    'legs' => $flightRequest->legs()->get(['departure_datetime', 'arrival_datetime'])->map(
+                        fn ($leg) => [
+                            'departure_datetime' => $leg->departure_datetime,
+                            'arrival_datetime' => $leg->arrival_datetime,
+                        ]
+                    )->values()->all(),
+                ]);
+
+                $availabilityService->ensureAircraftAvailable(
+                    $releaseAircraftId,
+                    $requestedStart,
+                    $requestedEnd,
+                    (int) $reservation->id,
+                );
+
+                $reservation->update([
+                    'provider_id' => $providerId,
+                    'aircraft_id' => $releaseAircraftId,
+                ]);
+
+                $resolvedPaymentStatus = Str::lower(trim((string) ($flightRequest->payment_status ?: $reservation->latestPayment?->status ?: '')));
+                if ($resolvedPaymentStatus === 'paid') {
+                    $availabilityService->blockAircraftForPaidReservation($reservation->fresh(['flightRequest.legs', 'legs']));
+                } else {
+                    $availabilityService->releaseReservationBlock(
+                        $reservation->fresh(['flightRequest', 'latestPayment']),
+                        'Bloqueo anterior liberado por cambio operativo de aeronave.'
+                    );
+                }
+            }
+
             $operation = Operacion::query()
                 ->where('flight_request_id', $flightRequest->id)
                 ->where('provider_id', $providerId)
@@ -1646,12 +1684,26 @@ class ProveedorControlador extends ControladorBase
     private function resolveAdminValidationStatus(Proveedor $provider, array $taxData = []): string
     {
         $normalized = strtolower(trim((string) ($provider->admin_validation_status ?: ($taxData['admin_validation_status'] ?? ''))));
+        $approvalStatus = strtolower(trim((string) $provider->approval_status));
+
         if ($normalized !== '') {
-            if ($normalized === 'expediente_incompleto') return 'draft';
+            if ($normalized === 'expediente_incompleto') {
+                $normalized = 'draft';
+            }
+
+            if (in_array($normalized, ['draft', 'pending_validation', 'pending_review', 'incomplete'], true)) {
+                return match ($approvalStatus) {
+                    'approved' => 'approved',
+                    'rejected' => 'rejected',
+                    'suspended' => 'changes_required',
+                    default => $normalized,
+                };
+            }
+
             return $normalized;
         }
 
-        return match (strtolower(trim((string) $provider->approval_status))) {
+        return match ($approvalStatus) {
             'approved' => 'approved',
             'rejected' => 'rejected',
             'suspended' => 'changes_required',
@@ -1677,12 +1729,18 @@ class ProveedorControlador extends ControladorBase
 
     private function resolveProviderAccessEnabled(Proveedor $provider, ?string $adminValidationStatus = null): bool
     {
+        $approvalStatus = strtolower(trim((string) $provider->approval_status));
+        $resolvedAdminStatus = $adminValidationStatus ?: $this->resolveAdminValidationStatus($provider);
+
+        if ($approvalStatus === 'approved' && $resolvedAdminStatus === 'approved') {
+            return true;
+        }
+
         if ($provider->access_enabled !== null) {
             return (bool) $provider->access_enabled;
         }
 
-        return ($adminValidationStatus ?: $this->resolveAdminValidationStatus($provider)) === 'approved'
-            && strtolower(trim((string) $provider->approval_status)) === 'approved';
+        return false;
     }
 
     private function resolveSatValidationStatus(Proveedor $provider, array $taxData = []): string

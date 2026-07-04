@@ -13,6 +13,11 @@ class Cotizacion extends Model
 
     use HasFactory;
 
+    protected static function newFactory()
+    {
+        return \Database\Factories\CotizacionFactory::new();
+    }
+
     protected $fillable = [
         'flight_request_id',
         'aircraft_id',

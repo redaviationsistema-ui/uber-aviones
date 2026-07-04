@@ -6,9 +6,11 @@ use App\Enumeraciones\EstadoSolicitudVuelo;
 use App\Modelos\Pago;
 use App\Modelos\Reserva;
 use App\Modelos\SolicitudVuelo;
+use App\Servicios\Aeronaves\AircraftAvailabilityService;
 use Illuminate\Http\RedirectResponse;
 use App\Servicios\Pagos\PaymentFeeCalculationServicio;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -20,8 +22,10 @@ use Throwable;
 
 class StripePagoControlador extends ControladorBase
 {
-    public function __construct(private readonly PaymentFeeCalculationServicio $paymentFeeCalculationServicio)
-    {
+    public function __construct(
+        private readonly AircraftAvailabilityService $aircraftAvailabilityService,
+        private readonly PaymentFeeCalculationServicio $paymentFeeCalculationServicio,
+    ) {
     }
 
     public function confirmFlightRequestPayment(Request $request)
@@ -164,8 +168,8 @@ class StripePagoControlador extends ControladorBase
         $data = $request->validate([
             'flight_request_id' => ['required', 'exists:flight_requests,id'],
             'contact_email' => ['nullable', 'email'],
-            'success_url' => ['nullable', 'url'],
-            'cancel_url' => ['nullable', 'url'],
+            'success_url' => ['nullable', 'string', 'max:2048'],
+            'cancel_url' => ['nullable', 'string', 'max:2048'],
         ]);
 
         $flightRequest = SolicitudVuelo::with(['quotes', 'reservation'])->findOrFail($data['flight_request_id']);
@@ -186,8 +190,12 @@ class StripePagoControlador extends ControladorBase
 
         Stripe::setApiKey((string) config('services.stripe.secret'));
 
-        $successUrl = $data['success_url'] ?? rtrim((string) config('services.stripe.frontend_url'), '/')."/cliente/reserva-confirmada/{$flightRequest->id}?checkout=success";
-        $cancelUrl = $data['cancel_url'] ?? rtrim((string) config('services.stripe.frontend_url'), '/')."/cliente/pago/{$flightRequest->id}?checkout=cancelled";
+        $successUrl = $data['success_url'] ?? rtrim((string) config('services.stripe.frontend_url'), '/')."/cliente/reserva-confirmada/{$flightRequest->id}?checkout=success&session_id={CHECKOUT_SESSION_ID}";
+        $cancelUrl = $data['cancel_url'] ?? rtrim((string) config('services.stripe.frontend_url'), '/')."/cliente/pago/{$flightRequest->id}?checkout=cancelled&session_id={CHECKOUT_SESSION_ID}";
+        $validatedSuccessUrl = str_replace('{CHECKOUT_SESSION_ID}', 'checkout_session_id', (string) $successUrl);
+        $validatedCancelUrl = str_replace('{CHECKOUT_SESSION_ID}', 'checkout_session_id', (string) $cancelUrl);
+        abort_unless(filter_var($validatedSuccessUrl, FILTER_VALIDATE_URL), 422, 'The success url field must be a valid URL.');
+        abort_unless(filter_var($validatedCancelUrl, FILTER_VALIDATE_URL), 422, 'The cancel url field must be a valid URL.');
 
         $session = Session::create([
             'mode' => 'payment',
@@ -833,6 +841,7 @@ class StripePagoControlador extends ControladorBase
     {
         $existing = $flightRequest->reservation()->latest('id')->first();
         if ($existing) {
+            $this->ensureReservationAircraftAvailability((int) $existing->aircraft_id, $flightRequest);
             return $existing;
         }
 
@@ -847,6 +856,7 @@ class StripePagoControlador extends ControladorBase
 
         abort_if(! $providerId || ! $aircraftId, 409, 'La solicitud aun no tiene proveedor y aeronave confirmados.');
         abort_if($amount <= 0, 422, 'La solicitud no tiene un monto valido para crear la reserva.');
+        $this->ensureReservationAircraftAvailability((int) $aircraftId, $flightRequest);
 
         return Reserva::create([
             'client_id' => $userId,
@@ -965,6 +975,8 @@ class StripePagoControlador extends ControladorBase
                     'failure_reason' => 'Reemplazado por pago Stripe confirmado.',
                     'updated_at' => now(),
                 ]);
+
+            $this->aircraftAvailabilityService->blockAircraftForPaidReservation($reservation->fresh(['flightRequest.legs', 'legs']));
         });
 
         $reservation->refresh()->load(['contract', 'payments', 'flightRequest']);
@@ -1147,7 +1159,39 @@ class StripePagoControlador extends ControladorBase
                     'status' => 'pending_payment',
                 ]);
             }
+
+            if ($reservation) {
+                $this->aircraftAvailabilityService->releaseReservationBlock($reservation->fresh(['flightRequest', 'latestPayment']));
+            }
         });
+    }
+
+    private function ensureReservationAircraftAvailability(int $aircraftId, ?SolicitudVuelo $flightRequest): void
+    {
+        if ($aircraftId <= 0 || ! $flightRequest) {
+            return;
+        }
+
+        [$requestedStart, $requestedEnd] = $this->aircraftAvailabilityService->resolveWindowFromPayload([
+            'departure_datetime' => $flightRequest->departure_datetime,
+            'return_datetime' => $flightRequest->return_datetime,
+            'legs' => $flightRequest->legs()->get(['departure_datetime', 'arrival_datetime'])->map(
+                fn ($leg) => [
+                    'departure_datetime' => $leg->departure_datetime,
+                    'arrival_datetime' => $leg->arrival_datetime,
+                ]
+            )->values()->all(),
+        ]);
+
+        if (! $this->aircraftAvailabilityService->aircraftHasConflict($aircraftId, $requestedStart, $requestedEnd)) {
+            return;
+        }
+
+        throw new HttpResponseException(response()->json([
+            'success' => false,
+            'code' => 'AIRCRAFT_NOT_AVAILABLE',
+            'message' => 'Esta aeronave ya no está disponible para el horario seleccionado.',
+        ], 409));
     }
 
     private function ensureStripeIsConfigured(): ?JsonResponse

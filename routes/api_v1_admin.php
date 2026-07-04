@@ -59,6 +59,14 @@ Route::prefix('admin')->middleware(['auth.token', 'role:admin'])->group(function
     Route::put('/crew/{user}', [RedAviationAdminControlador::class, 'updateSobrecargo']);
 
     Route::get('/aeronaves', [AdministradorControlador::class, 'aircraft']);
+    Route::get('/aircraft-calendar', [RedAviationAdminControlador::class, 'aircraftCalendar']);
+    Route::get('/operations/dashboard', [RedAviationAdminControlador::class, 'operationsDashboard']);
+    Route::get('/operations/history', [RedAviationAdminControlador::class, 'operationsHistory']);
+    Route::get('/operations/notifications', [RedAviationAdminControlador::class, 'operationsNotifications']);
+    Route::put('/reservations/{reservation}/reschedule', [RedAviationAdminControlador::class, 'rescheduleReservation']);
+    Route::post('/reservations/{reservation}/cancel', [RedAviationAdminControlador::class, 'cancelReservation']);
+    Route::post('/operations/aircraft-blocks', [RedAviationAdminControlador::class, 'createAircraftAvailabilityBlock']);
+    Route::post('/operations/aircraft-blocks/{block}/release', [RedAviationAdminControlador::class, 'releaseAircraftAvailabilityBlock']);
     Route::get('/aeronaves/{aircraft}', [AdministradorControlador::class, 'showAeronave']);
     Route::get('/aircraft-documents/{document}/download', [AeronaveControlador::class, 'downloadAdminDocument']);
     Route::get('/aeronaves/documentos/{document}/descargar', [AeronaveControlador::class, 'downloadAdminDocument']);

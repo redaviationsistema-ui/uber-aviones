@@ -158,6 +158,14 @@ Route::middleware(['auth.token'])->group(function () {
         Route::get('/client-access-payments', [AdminControlador::class, 'clientAccessPayments']);
         Route::get('/subscription-payments', [AdminControlador::class, 'subscriptionPayments']);
         Route::get('/fleet/aircraft', [AdminControlador::class, 'aircraftFleet']);
+        Route::get('/aircraft-calendar', [AdminControlador::class, 'aircraftCalendar']);
+        Route::get('/operations/dashboard', [AdminControlador::class, 'operationsDashboard']);
+        Route::get('/operations/history', [AdminControlador::class, 'operationsHistory']);
+        Route::get('/operations/notifications', [AdminControlador::class, 'operationsNotifications']);
+        Route::put('/reservations/{reservation}/reschedule', [AdminControlador::class, 'rescheduleReservation']);
+        Route::post('/reservations/{reservation}/cancel', [AdminControlador::class, 'cancelReservation']);
+        Route::post('/operations/aircraft-blocks', [AdminControlador::class, 'createAircraftAvailabilityBlock']);
+        Route::post('/operations/aircraft-blocks/{block}/release', [AdminControlador::class, 'releaseAircraftAvailabilityBlock']);
         Route::get('/fleet/aircraft-subscriptions', [AdminControlador::class, 'aircraftSubscriptionsPerFleet']);
         Route::get('/kpis', [AdminControlador::class, 'kpis']);
         Route::get('/anti-broker-flags', [AdminControlador::class, 'antiBrokerFlags']);

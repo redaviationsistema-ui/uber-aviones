@@ -13,6 +13,11 @@ class Proveedor extends Model
 
     use HasFactory;
 
+    protected static function newFactory()
+    {
+        return \Database\Factories\ProveedorFactory::new();
+    }
+
     protected $fillable = [
         'user_id',
         'company_name',

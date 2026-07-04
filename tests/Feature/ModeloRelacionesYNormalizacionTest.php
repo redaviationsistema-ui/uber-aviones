@@ -96,9 +96,13 @@ class ModeloRelacionesYNormalizacionTest extends TestCase
 
         $response
             ->assertOk()
-            ->assertJsonPath('success', true)
-            ->assertJsonPath('aircraft.0.id', $aircraft->id)
-            ->assertJsonPath('aircraft.0.base_airport', 'MMMX');
+            ->assertJsonPath('success', true);
+
+        $matchingAircraft = collect($response->json('aircraft'))
+            ->firstWhere('id', $aircraft->id);
+
+        $this->assertNotNull($matchingAircraft);
+        $this->assertSame('MMMX', $matchingAircraft['base_airport'] ?? null);
 
         $this->assertSame($provider->id, $providerUser->resolvedProviderId());
     }

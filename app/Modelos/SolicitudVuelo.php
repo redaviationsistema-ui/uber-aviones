@@ -32,6 +32,11 @@ class SolicitudVuelo extends Model
 
     use HasFactory;
 
+    protected static function newFactory()
+    {
+        return \Database\Factories\SolicitudVueloFactory::new();
+    }
+
     protected $fillable = [
         'client_id',
         'assigned_provider_id',

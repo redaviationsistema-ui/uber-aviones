@@ -8,11 +8,13 @@ use App\Modelos\Comision;
 use App\Modelos\Cotizacion;
 use App\Modelos\Reserva;
 use App\Modelos\SolicitudVuelo;
+use App\Servicios\Aeronaves\AircraftAvailabilityService;
 use App\Servicios\Contratos\ContratoPdfServicio;
 use App\Servicios\Contratos\ContratoReservaServicio;
 use App\Servicios\Contratos\DocuSignServicio;
 use Barryvdh\DomPDF\Facade\Pdf;
 use JsonException;
+use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -23,6 +25,10 @@ use Throwable;
 
 class ReservaControlador extends ControladorBase
 {
+    public function __construct(private readonly AircraftAvailabilityService $aircraftAvailabilityService)
+    {
+    }
+
     public function index(Request $request)
     {
         $query = Reserva::with([
@@ -150,6 +156,11 @@ class ReservaControlador extends ControladorBase
 
                 abort_if($amount <= 0, 422, 'La solicitud no tiene un monto valido para crear la reserva.');
 
+                $this->ensureReservationAircraftAvailability(
+                    (int) ($acceptedQuote?->aircraft_id ?? $flightRequest->assigned_aircraft_id),
+                    $flightRequest
+                );
+
                 $reservation = Reserva::create([
                     'client_id' => $request->user()->id,
                     'provider_id' => $acceptedQuote?->provider_id ?? $flightRequest->assigned_provider_id,
@@ -162,6 +173,8 @@ class ReservaControlador extends ControladorBase
                     'currency' => $acceptedQuote?->currency ?? $flightRequest->currency ?? 'USD',
                 ]);
             }
+
+            $this->ensureReservationAircraftAvailability((int) $reservation->aircraft_id, $flightRequest);
 
             $flightRequest->update([
                 'status' => 'reserved',
@@ -225,6 +238,8 @@ class ReservaControlador extends ControladorBase
                 'failure_reason' => null,
                 'updated_at' => now(),
             ])->save();
+
+            $this->aircraftAvailabilityService->blockAircraftForPaidReservation($reservation->fresh(['flightRequest.legs', 'legs']));
         });
 
         return $reservation->fresh(['quote', 'aircraft', 'provider.user', 'flightRequest', 'payments']);
@@ -243,6 +258,34 @@ class ReservaControlador extends ControladorBase
         $reservation->setAttribute('stripe_payment_intent_id', $flightRequest?->stripe_payment_intent_id ?: $latestPayment?->stripe_payment_intent_id);
 
         return $reservation;
+    }
+
+    private function ensureReservationAircraftAvailability(int $aircraftId, ?SolicitudVuelo $flightRequest): void
+    {
+        if ($aircraftId <= 0 || ! $flightRequest) {
+            return;
+        }
+
+        [$requestedStart, $requestedEnd] = $this->aircraftAvailabilityService->resolveWindowFromPayload([
+            'departure_datetime' => $flightRequest->departure_datetime,
+            'return_datetime' => $flightRequest->return_datetime,
+            'legs' => $flightRequest->legs()->get(['departure_datetime', 'arrival_datetime'])->map(
+                fn ($leg) => [
+                    'departure_datetime' => $leg->departure_datetime,
+                    'arrival_datetime' => $leg->arrival_datetime,
+                ]
+            )->values()->all(),
+        ]);
+
+        if (! $this->aircraftAvailabilityService->aircraftHasConflict($aircraftId, $requestedStart, $requestedEnd)) {
+            return;
+        }
+
+        throw new HttpResponseException(response()->json([
+            'success' => false,
+            'code' => 'AIRCRAFT_NOT_AVAILABLE',
+            'message' => 'Esta aeronave ya no está disponible para el horario seleccionado.',
+        ], 409));
     }
 
     public function showContract(Request $request, mixed $reservation, DocuSignServicio $docuSignServicio)

@@ -1274,6 +1274,13 @@ class AeronaveControlador extends ControladorBase
 
     private function resolveStoredFileUrl(string $disk, string $path): string
     {
+        if ($disk === 's3') {
+            $configuredUrl = rtrim((string) config('filesystems.disks.s3.url'), '/');
+            if ($configuredUrl !== '') {
+                return $configuredUrl.'/'.ltrim($path, '/');
+            }
+        }
+
         $url = Storage::disk($disk)->url($path);
 
         if ($disk !== 'public' || preg_match('/^(https?:)?\/\//i', $url)) {
@@ -1287,6 +1294,13 @@ class AeronaveControlador extends ControladorBase
     {
         if (! $path) {
             return '';
+        }
+
+        if ($disk === 's3') {
+            $configuredUrl = rtrim((string) config('filesystems.disks.s3.url'), '/');
+            if ($configuredUrl !== '') {
+                return $configuredUrl.'/'.ltrim($path, '/');
+            }
         }
 
         $url = Storage::disk($disk)->url($path);
