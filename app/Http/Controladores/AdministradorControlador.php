@@ -184,16 +184,25 @@ class AdministradorControlador extends ControladorBase
 
     public function providers()
     {
+        $providers = Proveedor::query()
+            ->with(['user.profile'])
+            ->withCount([
+                'aircraft',
+                'companyDocuments',
+                'aircraft as active_aircraft_count' => fn ($query) => $query->whereIn('status', ['active', 'approved', 'aprobado', 'aprobada']),
+                'aircraft as trial_aircraft_count' => fn ($query) => $query->where('status', 'trial_active'),
+                'aircraft as pending_aircraft_count' => fn ($query) => $query->whereNotIn('status', ['active', 'approved', 'aprobado', 'aprobada', 'trial_active']),
+            ])
+            ->paginate(25);
+
         return $this->ok([
-            'providers' => Proveedor::with(['user', 'aircraft', 'companyDocuments'])
-                ->paginate(25)
-                ->through(fn (Proveedor $provider) => $this->serializeProvider($provider)),
+            'providers' => $providers->through(fn (Proveedor $provider) => $this->serializeProviderSummary($provider)),
         ]);
     }
 
     public function showProveedor(Proveedor $provider)
     {
-        $provider->load(['user', 'aircraft', 'companyDocuments']);
+        $provider->load(['user.profile', 'aircraft', 'companyDocuments']);
 
         return $this->ok([
             'provider' => $this->serializeProvider($provider),
@@ -208,10 +217,12 @@ class AdministradorControlador extends ControladorBase
 
     public function providerActivity(Proveedor $provider)
     {
-        $provider->loadMissing(['user', 'users', 'aircraft', 'companyDocuments']);
+        $provider->loadMissing('users:id,provider_id');
         $providerUserIds = $this->providerUserIds($provider);
 
-        $entries = RegistroAuditoria::with('user:id,name')
+        $entries = RegistroAuditoria::query()
+            ->select(['id', 'user_id', 'module', 'action', 'description', 'new_values', 'old_values', 'created_at'])
+            ->with('user:id,name,role,operational_role')
             ->where(function ($query) use ($providerUserIds) {
                 $query->whereIn('user_id', $providerUserIds)
                     ->orWhereIn('module', [
@@ -238,10 +249,10 @@ class AdministradorControlador extends ControladorBase
 
     public function providerDocuments(Proveedor $provider)
     {
-        $provider->loadMissing('companyDocuments');
+        $provider->loadMissing(['user.profile', 'companyDocuments']);
 
         return $this->ok([
-            'provider' => $this->serializeProvider($provider),
+            'provider' => $this->serializeProviderSummary($provider),
             'documents' => $provider->companyDocuments
                 ->sortByDesc('id')
                 ->values()
@@ -703,7 +714,13 @@ class AdministradorControlador extends ControladorBase
 
     public function aircraft()
     {
-        return $this->ok(['aircraft' => Aeronave::with(['provider.user', 'availability'])->paginate(25)]);
+        $aircraft = Aeronave::query()
+            ->with(['provider.user.profile', 'availability'])
+            ->paginate(25);
+
+        return $this->ok([
+            'aircraft' => $aircraft->through(fn (Aeronave $item) => $this->serializeAdminAircraftPayload($item)),
+        ]);
     }
 
     public function showAeronave(Aeronave $aircraft)
@@ -997,6 +1014,10 @@ class AdministradorControlador extends ControladorBase
         $adminValidationStatus = $this->resolveAdminValidationStatus($provider);
         $operatorStatus = $this->resolveOperatorStatus($provider, $adminValidationStatus);
         $accessEnabled = $this->resolveProviderAccessEnabled($provider, $adminValidationStatus);
+        $aircraft = $provider->aircraft
+            ->map(fn (Aeronave $item) => $this->serializeProviderAircraftPayload($item))
+            ->values()
+            ->all();
 
         return [
             ...$provider->attributesToArray(),
@@ -1024,8 +1045,129 @@ class AdministradorControlador extends ControladorBase
             'documents_count' => count($documents),
             'legal_documents_count' => count($documents),
             'company_documents_count' => count($documents),
-            'user' => $provider->user,
-            'aircraft' => $provider->aircraft,
+            'aircraft_metrics' => $this->providerAircraftMetrics($provider),
+            'user' => $this->serializeProviderUserSummary($provider->user),
+            'aircraft' => $aircraft,
+        ];
+    }
+
+    private function serializeProviderSummary(Proveedor $provider): array
+    {
+        $provider->loadMissing('user.profile');
+        $adminValidationStatus = $this->resolveAdminValidationStatus($provider);
+        $operatorStatus = $this->resolveOperatorStatus($provider, $adminValidationStatus);
+
+        return [
+            ...$provider->attributesToArray(),
+            'provider_id' => $provider->id,
+            'admin_validation_status' => $adminValidationStatus,
+            'operator_status' => $operatorStatus,
+            'sat_validation_status' => $this->resolveSatValidationStatus($provider),
+            'admin_notes' => $provider->admin_notes ?: $provider->admin_validation_notes ?: $provider->notes,
+            'admin_validation_notes' => $provider->admin_validation_notes ?: $provider->admin_notes ?: $provider->notes,
+            'changes_notes' => $provider->changes_notes,
+            'rejection_reason' => $provider->rejection_reason,
+            'access_enabled' => $this->resolveProviderAccessEnabled($provider, $adminValidationStatus),
+            'provider_validation_requirements' => $this->providerRequirementReviews($provider),
+            'validation_requirements' => [],
+            'can_validate' => false,
+            'documents_count' => (int) ($provider->company_documents_count ?? $provider->documents_count ?? 0),
+            'legal_documents_count' => (int) ($provider->company_documents_count ?? $provider->legal_documents_count ?? 0),
+            'company_documents_count' => (int) ($provider->company_documents_count ?? 0),
+            'aircraft_metrics' => $this->providerAircraftMetrics($provider),
+            'user' => $this->serializeProviderUserSummary($provider->user),
+        ];
+    }
+
+    private function providerAircraftMetrics(Proveedor $provider): array
+    {
+        $aircraftCount = (int) ($provider->aircraft_count ?? ($provider->relationLoaded('aircraft') ? $provider->aircraft->count() : 0));
+        $activeCount = (int) ($provider->active_aircraft_count ?? ($provider->relationLoaded('aircraft')
+            ? $provider->aircraft->filter(fn (Aeronave $item) => in_array(strtolower(trim((string) $item->status)), ['active', 'approved', 'aprobado', 'aprobada'], true))->count()
+            : 0));
+        $trialCount = (int) ($provider->trial_aircraft_count ?? ($provider->relationLoaded('aircraft')
+            ? $provider->aircraft->filter(fn (Aeronave $item) => strtolower(trim((string) $item->status)) === 'trial_active')->count()
+            : 0));
+        $pendingCount = (int) ($provider->pending_aircraft_count ?? max($aircraftCount - $activeCount - $trialCount, 0));
+
+        return [
+            'aircraft' => $aircraftCount,
+            'active' => $activeCount,
+            'trial' => $trialCount,
+            'pending' => $pendingCount,
+        ];
+    }
+
+    private function serializeProviderUserSummary(?Usuario $user): ?array
+    {
+        if (! $user) {
+            return null;
+        }
+
+        $profile = $user->relationLoaded('profile') && $user->profile
+            ? $user->profile->attributesToArray()
+            : null;
+
+        return [
+            'id' => $user->id,
+            'provider_id' => $user->provider_id,
+            'name' => $user->name,
+            'email' => $user->email,
+            'phone' => $user->phone,
+            'role' => $user->role,
+            'operational_role' => $user->operational_role,
+            'status' => $user->status,
+            'profile' => $profile,
+        ];
+    }
+
+    private function serializeProviderInlineSummary(?Proveedor $provider): ?array
+    {
+        if (! $provider) {
+            return null;
+        }
+
+        $provider->loadMissing('user.profile');
+
+        return [
+            'id' => $provider->id,
+            'provider_id' => $provider->id,
+            'company_name' => $provider->company_name,
+            'commercial_name' => $provider->commercial_name,
+            'legal_name' => $provider->legal_name,
+            'rfc' => $provider->rfc,
+            'company_phone' => $provider->company_phone,
+            'company_email' => $provider->company_email,
+            'base_airport' => $provider->base_airport,
+            'representative_name' => $provider->representative_name,
+            'representative_phone' => $provider->representative_phone,
+            'approval_status' => $provider->approval_status,
+            'admin_validation_status' => $this->resolveAdminValidationStatus($provider),
+            'operator_status' => $this->resolveOperatorStatus($provider),
+            'status' => $provider->status,
+            'user' => $this->serializeProviderUserSummary($provider->user),
+        ];
+    }
+
+    private function serializeProviderAircraftPayload(Aeronave $aircraft): array
+    {
+        return [
+            ...$aircraft->attributesToArray(),
+            'approved' => strtolower(trim((string) $aircraft->status)) === 'active',
+            'documents' => [],
+        ];
+    }
+
+    private function serializeAdminAircraftPayload(Aeronave $aircraft): array
+    {
+        $availability = $aircraft->relationLoaded('availability')
+            ? $aircraft->availability->map(fn ($item) => $item->attributesToArray())->values()->all()
+            : [];
+
+        return [
+            ...$aircraft->attributesToArray(),
+            'provider' => $this->serializeProviderInlineSummary($aircraft->provider),
+            'availability' => $availability,
         ];
     }
 
@@ -1247,11 +1389,19 @@ class AdministradorControlador extends ControladorBase
             'event_type' => $eventType,
             'title' => $title,
             'description' => $description,
-            'actor_type' => $metadata['actor_type'] ?? ($entry->user?->hasRole('admin') ? 'admin' : 'provider'),
+            'actor_type' => $metadata['actor_type'] ?? $this->resolveProviderActivityActorType($entry),
             'actor_name' => $metadata['actor_name'] ?? $entry->user?->name ?? 'Proveedor',
             'created_at' => optional($entry->created_at)?->toISOString(),
             'metadata' => $metadata,
         ];
+    }
+
+    private function resolveProviderActivityActorType(RegistroAuditoria $entry): string
+    {
+        $role = strtolower(trim((string) ($entry->user?->role ?: '')));
+        $operationalRole = strtolower(trim((string) ($entry->user?->operational_role ?: '')));
+
+        return in_array('admin', [$role, $operationalRole], true) ? 'admin' : 'provider';
     }
 
     private function inferProviderActivityEventType(RegistroAuditoria $entry): string
