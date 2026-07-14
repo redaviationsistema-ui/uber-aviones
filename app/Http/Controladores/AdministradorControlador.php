@@ -24,6 +24,18 @@ use Illuminate\Validation\ValidationException;
 
 class AdministradorControlador extends ControladorBase
 {
+    private const APPROVED_DOCUMENT_STATUSES = ['approved', 'aprobado', 'aprobada', 'vigente', 'validado'];
+
+    private const APPROVED_AIRCRAFT_STATUSES = ['active', 'trial_active', 'inactive', 'approved', 'aprobada', 'aprobado'];
+
+    private const LEGAL_REQUIREMENT_DOCUMENT_KEYS = [
+        'articles_of_incorporation',
+        'legal_representative_power',
+        'legal_representative_id',
+        'tax_address_proof',
+        'operational_permit',
+    ];
+
     public function dashboard()
     {
         return $this->ok([
@@ -31,7 +43,7 @@ class AdministradorControlador extends ControladorBase
                 'users_registered' => Usuario::count(),
                 'active_demos' => Demo::where('status', 'active')->where('expires_at', '>', now())->count(),
                 'active_subscriptions' => Suscripcion::where('status', 'active')->where('expires_at', '>', now())->count(),
-                'approved_providers' => Proveedor::where('approval_status', 'approved')->count(),
+                'approved_providers' => Proveedor::approvedForOperations()->count(),
                 'aircraft_registered' => Aeronave::count(),
                 'flight_requests' => SolicitudVuelo::count(),
                 'closed_quotes' => Cotizacion::where('status', 'accepted')->count(),
@@ -725,21 +737,62 @@ class AdministradorControlador extends ControladorBase
 
     public function showAeronave(Aeronave $aircraft)
     {
-        return $this->ok(['aircraft' => $aircraft->load(['provider.user', 'images', 'documents', 'availability'])]);
+        return $this->ok([
+            'aircraft' => $this->serializeAdminAircraftPayload(
+                $aircraft->load(['provider.user.profile', 'images', 'documents', 'availability'])
+            ),
+        ]);
     }
 
     public function blockAeronave(Aeronave $aircraft)
     {
         $aircraft->update(['status' => 'blocked']);
 
-        return $this->ok(['aircraft' => $aircraft->fresh()]);
+        return $this->ok([
+            'aircraft' => $this->serializeAdminAircraftPayload(
+                $aircraft->fresh(['provider.user.profile', 'images', 'documents', 'availability'])
+            ),
+        ]);
     }
 
     public function activateAeronave(Aeronave $aircraft)
     {
-        $aircraft->update(['status' => 'active']);
+        $provider = $aircraft->provider;
+        if (! $provider) {
+            return response()->json([
+                'success' => false,
+                'code' => 'PROVIDER_NOT_FOUND',
+                'message' => 'No se encontró el proveedor asociado a la aeronave.',
+            ], 404);
+        }
 
-        return $this->ok(['aircraft' => $aircraft->fresh()]);
+        if (! $provider->isApprovedForOperations()) {
+            return response()->json([
+                'success' => false,
+                'code' => 'PROVIDER_NOT_APPROVED',
+                'message' => 'No se puede activar la aeronave porque el proveedor aún no está aprobado.',
+            ], 403);
+        }
+
+        $aircraftStatus = Proveedor::normalizeStatusValue($aircraft->status ?? 'inactive');
+        if ($aircraftStatus !== 'inactive') {
+            return response()->json([
+                'success' => false,
+                'code' => 'AIRCRAFT_NOT_APPROVED',
+                'message' => 'No se puede activar la aeronave porque todavía no ha sido aprobada.',
+            ], 403);
+        }
+
+        $aircraft->update([
+            'approved_at' => $aircraft->approved_at ?: now(),
+            'status' => $aircraft->hasActiveBillingSubscription() ? 'active' : 'inactive',
+        ]);
+
+        return $this->ok([
+            'aircraft' => $this->serializeAdminAircraftPayload(
+                $aircraft->fresh(['provider.user.profile', 'images', 'documents', 'availability'])
+            ),
+        ]);
     }
 
     public function flightRequests()
@@ -1153,7 +1206,9 @@ class AdministradorControlador extends ControladorBase
     {
         return [
             ...$aircraft->attributesToArray(),
-            'approved' => strtolower(trim((string) $aircraft->status)) === 'active',
+            'approved_at' => $aircraft->approved_at,
+            'approved' => $aircraft->isAdministrativelyApproved(),
+            'review_status' => $aircraft->resolvedReviewStatus(),
             'documents' => [],
         ];
     }
@@ -1166,7 +1221,16 @@ class AdministradorControlador extends ControladorBase
 
         return [
             ...$aircraft->attributesToArray(),
+            'approved_at' => $aircraft->approved_at,
+            'approved' => $aircraft->isAdministrativelyApproved(),
+            'review_status' => $aircraft->resolvedReviewStatus(),
             'provider' => $this->serializeProviderInlineSummary($aircraft->provider),
+            'documents' => $aircraft->relationLoaded('documents')
+                ? $aircraft->documents->map(fn ($item) => $item->attributesToArray())->values()->all()
+                : [],
+            'images' => $aircraft->relationLoaded('images')
+                ? $aircraft->images->map(fn ($item) => $item->attributesToArray())->values()->all()
+                : [],
             'availability' => $availability,
         ];
     }
@@ -1225,18 +1289,106 @@ class AdministradorControlador extends ControladorBase
         return filled($provider->rfc) ? 'approved' : 'pending';
     }
 
+    private function providerSatDocuments(iterable $documents): array
+    {
+        return collect($documents)
+            ->filter(function ($document) {
+                if (! $document instanceof DocumentoEmpresa) {
+                    return false;
+                }
+
+                return ($this->companyDocumentMetadataForResponse($document)['definition_key'] ?? '') === 'sat_certificate';
+            })
+            ->values()
+            ->all();
+    }
+
+    private function providerLegalDocuments(iterable $documents): array
+    {
+        return collect($documents)
+            ->filter(function ($document) {
+                if (! $document instanceof DocumentoEmpresa) {
+                    return false;
+                }
+
+                $metadata = $this->companyDocumentMetadataForResponse($document);
+                $definitionKey = $metadata['definition_key'] ?? '';
+                $sectionKey = $metadata['section_key'] ?? '';
+
+                return in_array($definitionKey, self::LEGAL_REQUIREMENT_DOCUMENT_KEYS, true)
+                    || ($sectionKey === 'legal' && $definitionKey !== 'sat_certificate');
+            })
+            ->values()
+            ->all();
+    }
+
+    private function documentsAreApproved(iterable $documents): bool
+    {
+        $collection = collect($documents)->filter(fn ($document) => $document instanceof DocumentoEmpresa)->values();
+
+        return $collection->isNotEmpty()
+            && $collection->every(
+                fn (DocumentoEmpresa $document) => in_array(
+                    strtolower(trim((string) $document->status)),
+                    self::APPROVED_DOCUMENT_STATUSES,
+                    true,
+                )
+            );
+    }
+
+    private function pendingDocumentLabels(iterable $documents): array
+    {
+        return collect($documents)
+            ->filter(fn ($document) => $document instanceof DocumentoEmpresa)
+            ->reject(fn (DocumentoEmpresa $document) => in_array(
+                strtolower(trim((string) $document->status)),
+                self::APPROVED_DOCUMENT_STATUSES,
+                true,
+            ))
+            ->map(function (DocumentoEmpresa $document) {
+                $metadata = $this->companyDocumentMetadataForResponse($document);
+
+                return $metadata['definition_label']
+                    ?? $document->document_name
+                    ?? $document->original_name
+                    ?? 'Documento legal';
+            })
+            ->filter()
+            ->values()
+            ->all();
+    }
+
+    private function providerHasApprovedSatValidation(Proveedor $provider, iterable $documents): bool
+    {
+        $satDocuments = $this->providerSatDocuments($documents);
+        if ($satDocuments !== []) {
+            return $this->documentsAreApproved($satDocuments);
+        }
+
+        return in_array($this->resolveSatValidationStatus($provider), ['approved', 'aprobado', 'validated', 'validado'], true);
+    }
+
+    private function providerHasApprovedAircraft(Proveedor $provider): bool
+    {
+        return ($provider->aircraft ?? collect())
+            ->contains(fn ($aircraft) => in_array(
+                strtolower(trim((string) $aircraft->status)),
+                self::APPROVED_AIRCRAFT_STATUSES,
+                true,
+            ));
+    }
+
     private function providerValidationChecklist(Proveedor $provider): array
     {
         $documents = $provider->companyDocuments ?? collect();
-        $approvedDocumentStatuses = ['approved', 'aprobado', 'aprobada', 'vigente', 'validado'];
-        $activeAircraftStatuses = ['active', 'trial_active', 'approved', 'aprobada', 'aprobado'];
         $companyIdentityComplete = filled($provider->company_name) && filled($provider->commercial_name) && filled($provider->legal_name);
         $contactComplete = filled($provider->company_phone) && filled($provider->company_email);
         $representativeComplete = filled($provider->representative_name) && filled($provider->representative_phone);
-        $documentsApproved = $documents->isNotEmpty()
-            && $documents->every(fn (DocumentoEmpresa $document) => in_array(strtolower(trim((string) $document->status)), $approvedDocumentStatuses, true));
-        $satApproved = in_array($this->resolveSatValidationStatus($provider), ['approved', 'aprobado', 'validated', 'validado'], true);
-        $activeAircraft = ($provider->aircraft ?? collect())->filter(fn ($aircraft) => in_array(strtolower(trim((string) $aircraft->status)), $activeAircraftStatuses, true))->count();
+        $legalDocuments = $this->providerLegalDocuments($documents);
+        $documentsApproved = $this->documentsAreApproved($legalDocuments);
+        $pendingLegalDocumentLabels = $this->pendingDocumentLabels($legalDocuments);
+        $satApproved = $this->providerHasApprovedSatValidation($provider, $documents);
+        $activeAircraft = $this->providerHasApprovedAircraft($provider);
         $requirementReviews = $this->providerRequirementReviews($provider);
 
         return array_map(function (array $item) use ($requirementReviews) {
@@ -1274,7 +1426,9 @@ class AdministradorControlador extends ControladorBase
                 'key' => 'legal_documents_approved',
                 'label' => 'Documentacion legal aprobada',
                 'complete' => $documentsApproved,
-                'message' => 'La documentacion legal aun no esta aprobada.',
+                'message' => $pendingLegalDocumentLabels !== []
+                    ? 'La documentacion legal aun no esta aprobada. Pendientes: '.implode(', ', $pendingLegalDocumentLabels).'.'
+                    : 'La documentacion legal aun no esta aprobada.',
             ],
             [
                 'key' => 'base_operativa',
@@ -1285,7 +1439,7 @@ class AdministradorControlador extends ControladorBase
             [
                 'key' => 'aircraft_active',
                 'label' => 'Aeronave activa o aprobada',
-                'complete' => $activeAircraft > 0,
+                'complete' => $activeAircraft,
                 'message' => 'Se requiere al menos una aeronave activa o aprobada.',
             ],
             [

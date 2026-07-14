@@ -6,8 +6,8 @@ use App\Modelos\Proveedor;
 
 class ProveedorServicio
 {
-    public function isApproved(Proveedor $provider): bool
+    public function isApproved(?Proveedor $provider): bool
     {
-        return $provider->approval_status === 'approved';
+        return $provider?->isApprovedForOperations() ?? false;
     }
 }

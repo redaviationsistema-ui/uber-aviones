@@ -20,7 +20,7 @@ class MatchingRedAviationServicio
         $aeronaves = Aeronave::with('provider')
             ->whereIn('status', ['active', 'trial_active'])
             ->where('capacity', '>=', $solicitud->passengers)
-            ->whereHas('provider', fn ($query) => $query->where('approval_status', 'approved'))
+            ->whereHas('provider', fn ($query) => $query->approvedForOperations())
             ->tap(fn ($query) => $this->aircraftAvailabilityService->excludeConflictingAircraft($query, $inicio, $fin))
             ->whereDoesntHave('availability', function ($query) use ($inicio, $fin) {
                 $query->whereIn('status', ['occupied', 'blocked', 'maintenance'])

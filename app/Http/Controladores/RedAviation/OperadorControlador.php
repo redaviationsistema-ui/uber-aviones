@@ -108,7 +108,6 @@ class OperadorControlador extends ControladorBase
     public function storeAircraft(Request $request)
     {
         abort_if(! $request->user()->provider_id, 422, 'El usuario proveedor no tiene provider_id asignado.');
-        abort_if($request->user()->provider?->approval_status !== 'approved', 403, 'Proveedor pendiente de validacion por Admin.');
 
         $data = $this->normalizeAircraftInput($request->validate($this->aircraftRules()));
         $user = $request->user()->loadMissing('activeSuscripcion.plan');
@@ -128,7 +127,9 @@ class OperadorControlador extends ControladorBase
                 Aeronave::where('provider_id', $request->user()->provider_id)->count(),
                 true
             ),
-            'message' => 'Aeronave registrada correctamente. Pendiente de activacion.',
+            'message' => 'Aeronave registrada y enviada a revisión administrativa.',
+            'review_status' => 'pending_review',
+            'status' => 'inactive',
             'redirect_to' => '/provider/aircraft/'.$aeronave->id.'/billing',
         ], 201);
     }
@@ -457,7 +458,7 @@ class OperadorControlador extends ControladorBase
     public function subscribeAircraft(Request $request, Aeronave $aircraft)
     {
         abort_if($aircraft->provider_id !== $request->user()->provider_id, 403, 'No puedes suscribir aeronaves de otro proveedor.');
-        abort_if($request->user()->provider?->approval_status !== 'approved', 403, 'Proveedor pendiente de validacion por Admin.');
+        abort_if(! $request->user()->provider?->isApprovedForOperations(), 403, 'Proveedor pendiente de validacion por Admin.');
 
         $data = $request->validate([
             'plan_id' => ['nullable', 'exists:plans,id'],
@@ -676,6 +677,9 @@ class OperadorControlador extends ControladorBase
             'operational_cost' => $aircraft->operational_cost,
             'currency' => $aircraft->currency,
             'status' => $aircraft->status,
+            'approved_at' => $aircraft->approved_at,
+            'approved' => $aircraft->isAdministrativelyApproved(),
+            'review_status' => $aircraft->resolvedReviewStatus(),
             'billing_status' => $aircraft->billing_status,
             'billing_plan_id' => $aircraft->billing_plan_id,
             'subscription_status' => $aircraft->subscription_status,

@@ -8,7 +8,12 @@ class ProveedorApprovalServicio
 {
     public function approve(Proveedor $provider): Proveedor
     {
-        $provider->update(['approval_status' => 'approved']);
+        $provider->update([
+            'approval_status' => 'approved',
+            'admin_validation_status' => 'approved',
+            'status' => 'approved',
+            'access_enabled' => true,
+        ]);
 
         return $provider;
     }

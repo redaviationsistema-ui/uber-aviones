@@ -4,11 +4,15 @@ namespace App\Modelos;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Str;
 
 class Proveedor extends Model
 {
+    private const ADMIN_VALIDATION_DRAFT_STATUS = 'expediente_incompleto';
+
     protected $table = 'providers';
 
     use HasFactory;
@@ -118,5 +122,67 @@ class Proveedor extends Model
     public function commissions(): HasMany
     {
         return $this->hasMany(Comision::class, 'provider_id');
+    }
+
+    public static function normalizeStatusValue(mixed $value): string
+    {
+        $normalized = Str::of((string) ($value ?? ''))
+            ->trim()
+            ->lower()
+            ->ascii()
+            ->replaceMatches('/[\s-]+/', '_')
+            ->value();
+
+        return preg_replace('/_+/', '_', $normalized) ?: '';
+    }
+
+    public function resolvedApprovalStatus(): string
+    {
+        $adminValidationStatus = self::normalizeStatusValue($this->admin_validation_status);
+        if ($adminValidationStatus !== '' && $adminValidationStatus !== self::ADMIN_VALIDATION_DRAFT_STATUS) {
+            return $adminValidationStatus;
+        }
+
+        $approvalStatus = self::normalizeStatusValue($this->approval_status);
+        if ($approvalStatus !== '') {
+            return $approvalStatus;
+        }
+
+        return self::normalizeStatusValue($this->status);
+    }
+
+    public function isApprovedForOperations(): bool
+    {
+        return $this->resolvedApprovalStatus() === 'approved';
+    }
+
+    public function scopeApprovedForOperations(Builder $query): Builder
+    {
+        return $query->where(function (Builder $query) {
+            $query
+                ->whereRaw("LOWER(TRIM(COALESCE(admin_validation_status, ''))) = ?", ['approved'])
+                ->orWhere(function (Builder $fallback) {
+                    $fallback
+                        ->where(function (Builder $adminBlank) {
+                            $adminBlank
+                                ->whereNull('admin_validation_status')
+                                ->orWhereRaw("TRIM(COALESCE(admin_validation_status, '')) = ''")
+                                ->orWhereRaw("LOWER(TRIM(COALESCE(admin_validation_status, ''))) = ?", [self::ADMIN_VALIDATION_DRAFT_STATUS]);
+                        })
+                        ->where(function (Builder $resolved) {
+                            $resolved
+                                ->whereRaw("LOWER(TRIM(COALESCE(approval_status, ''))) = ?", ['approved'])
+                                ->orWhere(function (Builder $statusFallback) {
+                                    $statusFallback
+                                        ->where(function (Builder $approvalBlank) {
+                                            $approvalBlank
+                                                ->whereNull('approval_status')
+                                                ->orWhereRaw("TRIM(COALESCE(approval_status, '')) = ''");
+                                        })
+                                        ->whereRaw("LOWER(TRIM(COALESCE(status, ''))) = ?", ['approved']);
+                                });
+                        });
+                });
+        });
     }
 }

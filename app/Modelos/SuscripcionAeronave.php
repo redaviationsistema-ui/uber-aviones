@@ -16,15 +16,23 @@ class SuscripcionAeronave extends Model
         'status',
         'payment_provider',
         'payment_reference',
+        'provider_checkout_id',
+        'provider_subscription_id',
+        'provider_customer_id',
+        'provider_invoice_id',
+        'paid_at',
         'starts_at',
         'ends_at',
+        'cancelled_at',
     ];
 
     protected function casts(): array
     {
         return [
+            'paid_at' => 'datetime',
             'starts_at' => 'datetime',
             'ends_at' => 'datetime',
+            'cancelled_at' => 'datetime',
         ];
     }
 

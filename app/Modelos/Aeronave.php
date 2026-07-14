@@ -71,6 +71,7 @@ class Aeronave extends Model
         'overnight_fee',
         'currency',
         'status',
+        'approved_at',
         'billing_status',
         'billing_plan_id',
         'subscription_status',
@@ -112,6 +113,7 @@ class Aeronave extends Model
             'overnight_fee' => 'decimal:2',
             'billing_plan_id' => 'integer',
             'security_score' => 'integer',
+            'approved_at' => 'datetime',
             'subscription_started_at' => 'datetime',
             'subscription_ends_at' => 'datetime',
             'last_payment_at' => 'datetime',
@@ -169,5 +171,33 @@ class Aeronave extends Model
         }
 
         return $this->base_airport;
+    }
+
+    public function isAdministrativelyApproved(): bool
+    {
+        if ($this->approved_at !== null) {
+            return true;
+        }
+
+        return self::normalizeStatusValue($this->status) === 'active';
+    }
+
+    public function hasActiveBillingSubscription(): bool
+    {
+        $subscriptionStatus = self::normalizeStatusValue($this->subscription_status);
+        $billingStatus = self::normalizeStatusValue($this->billing_status);
+
+        return in_array($subscriptionStatus, ['active', 'trialing'], true)
+            || $billingStatus === 'active';
+    }
+
+    public function resolvedReviewStatus(): string
+    {
+        return $this->isAdministrativelyApproved() ? 'approved' : 'pending_review';
+    }
+
+    private static function normalizeStatusValue(mixed $value): string
+    {
+        return strtolower(trim((string) $value));
     }
 }

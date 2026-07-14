@@ -20,6 +20,8 @@ class AircraftBillingPayment extends Model
         'status',
         'provider',
         'provider_payment_id',
+        'provider_customer_id',
+        'provider_invoice_id',
         'provider_subscription_id',
         'provider_checkout_id',
         'paid_at',

@@ -5,6 +5,7 @@ namespace App\Http\Controladores\RedAviation;
 use App\Http\Controladores\ControladorBase;
 use App\Modelos\Aeronave;
 use App\Modelos\AircraftBillingPayment;
+use App\Modelos\Proveedor;
 use App\Modelos\SuscripcionAeronave;
 use App\Servicios\Billing\BillingPlanServicio;
 use Carbon\Carbon;
@@ -27,8 +28,9 @@ class ProviderAircraftBillingControlador extends ControladorBase
         }
 
         $providerId = $request->user()->resolvedProviderId();
+        $provider = $request->user()?->provider;
         abort_if(! $providerId || (int) $aircraft->provider_id !== (int) $providerId, 403, 'No puedes cobrar esta aeronave.');
-        abort_if($request->user()->provider?->approval_status !== 'approved', 403, 'Proveedor no aprobado.');
+        abort_if(! $provider?->isApprovedForOperations(), 403, 'Proveedor no aprobado.');
 
         $data = $request->validate([
             'success_url' => ['nullable', 'url'],
@@ -43,6 +45,45 @@ class ProviderAircraftBillingControlador extends ControladorBase
 
         $periodStart = now()->startOfMonth()->toDateString();
         $periodEnd = now()->endOfMonth()->toDateString();
+        $provider = $provider ?: Proveedor::query()->find($providerId);
+        $companyName = $this->resolveProviderCompanyName($provider);
+        $aircraftName = $this->resolveAircraftDisplayName($aircraft);
+        $visibleDescription = $this->buildStripeAircraftBillingLabel($aircraftName, $companyName);
+
+        $activeSubscription = SuscripcionAeronave::query()
+            ->where('aircraft_id', $aircraft->id)
+            ->whereIn('status', ['active', 'trialing'])
+            ->where(function ($query) {
+                $query->whereNull('ends_at')->orWhere('ends_at', '>=', now());
+            })
+            ->latest('id')
+            ->first();
+
+        abort_if($activeSubscription, 409, 'La aeronave ya cuenta con una suscripcion activa.');
+
+        $reusablePayment = AircraftBillingPayment::query()
+            ->where('provider_id', $providerId)
+            ->where('aircraft_id', $aircraft->id)
+            ->where('billing_plan_id', $plan->id)
+            ->where('provider', 'stripe')
+            ->whereIn('status', ['pending', 'open', 'requires_action'])
+            ->whereDate('billing_period_start', $periodStart)
+            ->whereDate('billing_period_end', $periodEnd)
+            ->latest('id')
+            ->first();
+
+        if ($reusablePayment) {
+            $existingCheckoutUrl = (string) data_get($reusablePayment->gateway_response, 'checkout_url', '');
+
+            if ($existingCheckoutUrl !== '') {
+                return $this->ok([
+                    'payment' => $reusablePayment->fresh('billingPlan'),
+                    'checkout_url' => $existingCheckoutUrl,
+                    'checkout_session_id' => $reusablePayment->provider_checkout_id,
+                    'reused_checkout' => true,
+                ]);
+            }
+        }
 
         $payment = AircraftBillingPayment::create([
             'provider_id' => $providerId,
@@ -73,9 +114,15 @@ class ProviderAircraftBillingControlador extends ControladorBase
 
         $metadata = [
             'billing_context' => 'provider_aircraft_subscription',
+            'action' => 'activate_aircraft',
+            'billing_type' => 'monthly_aircraft_subscription',
             'user_id' => (string) $request->user()->id,
             'provider_id' => (string) $providerId,
+            'provider_aircraft_id' => (string) $aircraft->id,
             'aircraft_id' => (string) $aircraft->id,
+            'aircraft_name' => $aircraftName,
+            'provider_name' => $companyName,
+            'company_name' => $companyName,
             'aircraft_billing_payment_id' => (string) $payment->id,
             'billing_plan_id' => (string) $plan->id,
             'plan_code' => (string) $plan->code,
@@ -92,8 +139,8 @@ class ProviderAircraftBillingControlador extends ControladorBase
                 'price_data' => [
                     'currency' => strtolower((string) ($plan->currency ?: 'USD')),
                     'product_data' => [
-                        'name' => 'Mensualidad por aeronave: '.($aircraft->registration ?: $aircraft->model ?: 'Aeronave'),
-                        'description' => $plan->description,
+                        'name' => $visibleDescription,
+                        'description' => $this->buildStripeAircraftBillingProductDescription($aircraft, $provider, $plan),
                     ],
                     'unit_amount' => (int) round($amount * 100),
                     'recurring' => [
@@ -103,6 +150,7 @@ class ProviderAircraftBillingControlador extends ControladorBase
                 'quantity' => 1,
             ]],
             'subscription_data' => [
+                'description' => $visibleDescription,
                 'metadata' => $metadata,
             ],
         ]);
@@ -111,6 +159,7 @@ class ProviderAircraftBillingControlador extends ControladorBase
             'provider_checkout_id' => $session->id,
             'gateway_response' => [
                 'checkout_url' => $session->url,
+                'description' => $visibleDescription,
             ],
         ]);
 
@@ -171,6 +220,10 @@ class ProviderAircraftBillingControlador extends ControladorBase
                 'id' => $aircraft->id,
                 'registration' => $aircraft->registration,
                 'model' => $aircraft->model,
+                'status' => $aircraft->status,
+                'approved_at' => $aircraft->approved_at,
+                'approved' => $aircraft->isAdministrativelyApproved(),
+                'review_status' => $aircraft->resolvedReviewStatus(),
                 'billing_status' => $aircraft->billing_status,
                 'billing_plan_id' => $aircraft->billing_plan_id,
                 'subscription_status' => $aircraft->subscription_status,
@@ -178,6 +231,10 @@ class ProviderAircraftBillingControlador extends ControladorBase
                 'subscription_ends_at' => $aircraft->subscription_ends_at,
                 'last_payment_at' => $aircraft->last_payment_at,
                 'payment_reference' => $subscription?->payment_reference ?: $latestPayment?->provider_subscription_id ?: $latestPayment?->provider_payment_id,
+                'provider_checkout_id' => $latestPayment?->provider_checkout_id,
+                'provider_customer_id' => $latestPayment?->provider_customer_id,
+                'provider_subscription_id' => $latestPayment?->provider_subscription_id ?: $subscription?->provider_subscription_id,
+                'provider_invoice_id' => $latestPayment?->provider_invoice_id ?: $subscription?->provider_invoice_id,
             ],
             'latest_payment' => $latestPayment,
             'subscription' => $subscription,
@@ -245,11 +302,12 @@ class ProviderAircraftBillingControlador extends ControladorBase
             'expand' => [
                 'subscription',
                 'subscription.latest_invoice.payment_intent',
+                'subscription.latest_invoice',
                 'payment_intent',
             ],
         ]);
 
-        $metadata = (array) ($session->metadata?->toArray() ?? []);
+        $metadata = $this->extractStripeMetadata($session);
         $context = (string) ($metadata['billing_context'] ?? '');
         if ($context !== 'provider_aircraft_subscription') {
             return;
@@ -270,16 +328,18 @@ class ProviderAircraftBillingControlador extends ControladorBase
             return;
         }
 
+        $customerId = (string) ($session->customer ?? '');
         $subscriptionId = (string) ($session->subscription->id ?? $session->subscription ?? '');
+        $invoiceId = (string) ($session->subscription->latest_invoice->id ?? $session->invoice ?? '');
         $paymentStatus = strtolower((string) ($session->payment_status ?? ''));
         $sessionStatus = strtolower((string) ($session->status ?? ''));
         $subscriptionStatus = strtolower((string) ($session->subscription->status ?? ''));
-
-        if (! in_array($paymentStatus, ['paid', 'no_payment_required'], true)
-            && $sessionStatus !== 'complete'
-            && ! in_array($subscriptionStatus, ['active', 'trialing'], true)) {
-            return;
-        }
+        $paymentIntentStatus = strtolower((string) ($session->payment_intent->status ?? $session->subscription->latest_invoice->payment_intent->status ?? ''));
+        $invoiceStatus = strtolower((string) ($session->subscription->latest_invoice->status ?? ''));
+        $isConfirmedPayment =
+            in_array($paymentStatus, ['paid', 'no_payment_required'], true)
+            || $paymentIntentStatus === 'succeeded'
+            || $invoiceStatus === 'paid';
 
         $periodStart = null;
         $periodEnd = null;
@@ -299,21 +359,51 @@ class ProviderAircraftBillingControlador extends ControladorBase
             ?? ''
         );
 
-        DB::transaction(function () use ($payment, $subscriptionId, $providerPaymentId, $session, $periodStart, $periodEnd, $aircraft, $userId) {
+        DB::transaction(function () use ($payment, $subscriptionId, $providerPaymentId, $customerId, $invoiceId, $session, $periodStart, $periodEnd, $aircraft, $userId, $isConfirmedPayment, $sessionStatus, $subscriptionStatus, $paymentStatus) {
             $amount = ((int) ($session->amount_total ?? 0)) / 100;
             $resolvedUserId = $userId > 0 ? $userId : (int) DB::table('providers')->where('id', $payment->provider_id)->value('user_id');
 
             $payment->update([
-                'status' => 'paid',
+                'status' => $isConfirmedPayment ? 'paid' : ($sessionStatus === 'complete' ? 'pending' : ($subscriptionStatus ?: ($paymentStatus ?: $payment->status))),
                 'provider_payment_id' => $providerPaymentId !== '' ? $providerPaymentId : $payment->provider_payment_id,
+                'provider_customer_id' => $customerId !== '' ? $customerId : $payment->provider_customer_id,
+                'provider_invoice_id' => $invoiceId !== '' ? $invoiceId : $payment->provider_invoice_id,
                 'provider_subscription_id' => $subscriptionId !== '' ? $subscriptionId : $payment->provider_subscription_id,
                 'amount' => $amount > 0 ? $amount : $payment->amount,
                 'currency' => strtoupper((string) ($session->currency ?? $payment->currency ?? 'USD')),
                 'billing_period_start' => $periodStart ?: $payment->billing_period_start,
                 'billing_period_end' => $periodEnd ?: $payment->billing_period_end,
-                'paid_at' => now(),
+                'paid_at' => $isConfirmedPayment ? now() : $payment->paid_at,
                 'gateway_response' => json_decode(json_encode($session), true),
             ]);
+
+            if (! $isConfirmedPayment) {
+                DB::table('aircraft')->where('id', $aircraft->id)->update([
+                    'billing_status' => in_array($subscriptionStatus, ['past_due', 'unpaid', 'incomplete_expired'], true) ? 'past_due' : 'pending_payment',
+                    'billing_plan_id' => $payment->billing_plan_id,
+                    'subscription_status' => $subscriptionStatus !== '' ? $subscriptionStatus : 'pending',
+                    'updated_at' => now(),
+                ]);
+
+                SuscripcionAeronave::updateOrCreate(
+                    ['aircraft_id' => $payment->aircraft_id, 'plan_id' => $payment->billing_plan_id],
+                    [
+                        'user_id' => $resolvedUserId ?: null,
+                        'status' => $subscriptionStatus !== '' ? $subscriptionStatus : 'pending',
+                        'payment_provider' => 'stripe',
+                        'payment_reference' => $subscriptionId !== '' ? $subscriptionId : ($providerPaymentId !== '' ? $providerPaymentId : $payment->provider_checkout_id),
+                        'provider_checkout_id' => $payment->provider_checkout_id,
+                        'provider_subscription_id' => $subscriptionId !== '' ? $subscriptionId : null,
+                        'provider_customer_id' => $customerId !== '' ? $customerId : null,
+                        'provider_invoice_id' => $invoiceId !== '' ? $invoiceId : null,
+                        'starts_at' => $periodStart ? Carbon::createFromFormat('Y-m-d', $periodStart)->startOfDay() : null,
+                        'ends_at' => $periodEnd ? Carbon::createFromFormat('Y-m-d', $periodEnd)->endOfDay() : null,
+                        'updated_at' => now(),
+                    ]
+                );
+
+                return;
+            }
 
             DB::table('aircraft')->where('id', $aircraft->id)->update([
                 'billing_status' => 'active',
@@ -333,11 +423,74 @@ class ProviderAircraftBillingControlador extends ControladorBase
                     'status' => 'active',
                     'payment_provider' => 'stripe',
                     'payment_reference' => $subscriptionId !== '' ? $subscriptionId : ($providerPaymentId !== '' ? $providerPaymentId : $payment->provider_checkout_id),
+                    'provider_checkout_id' => $payment->provider_checkout_id,
+                    'provider_subscription_id' => $subscriptionId !== '' ? $subscriptionId : null,
+                    'provider_customer_id' => $customerId !== '' ? $customerId : null,
+                    'provider_invoice_id' => $invoiceId !== '' ? $invoiceId : null,
+                    'paid_at' => now(),
                     'starts_at' => $periodStart ? Carbon::createFromFormat('Y-m-d', $periodStart)->startOfDay() : now(),
                     'ends_at' => $periodEnd ? Carbon::createFromFormat('Y-m-d', $periodEnd)->endOfDay() : now()->addMonth()->endOfDay(),
+                    'cancelled_at' => null,
                     'updated_at' => now(),
                 ]
             );
         });
+    }
+
+    private function resolveProviderCompanyName(?Proveedor $provider): string
+    {
+        return trim((string) (
+            $provider?->commercial_name
+            ?: $provider?->company_name
+            ?: $provider?->legal_name
+            ?: $provider?->user?->name
+            ?: 'Proveedor'
+        ));
+    }
+
+    private function resolveAircraftDisplayName(Aeronave $aircraft): string
+    {
+        return trim((string) ($aircraft->model ?: $aircraft->registration ?: ('Aeronave '.$aircraft->id)));
+    }
+
+    private function buildStripeAircraftBillingLabel(string $aircraftName, string $companyName): string
+    {
+        return trim(sprintf('Mensualidad %s - %s', $aircraftName, $companyName));
+    }
+
+    private function buildStripeAircraftBillingProductDescription(Aeronave $aircraft, ?Proveedor $provider, object $plan): string
+    {
+        $parts = [
+            'Suscripcion mensual para activar comercialmente la aeronave.',
+            'Aeronave: '.$this->resolveAircraftDisplayName($aircraft),
+            'Proveedor: '.$this->resolveProviderCompanyName($provider),
+        ];
+
+        if (! empty($aircraft->registration)) {
+            $parts[] = 'Matricula: '.$aircraft->registration;
+        }
+
+        if (! empty($plan->description)) {
+            $parts[] = trim((string) $plan->description);
+        }
+
+        return implode(' ', $parts);
+    }
+
+    private function extractStripeMetadata(object $payload): array
+    {
+        $candidates = [
+            json_decode(json_encode($payload->metadata ?? []), true) ?: [],
+            json_decode(json_encode($payload->subscription->metadata ?? []), true) ?: [],
+            json_decode(json_encode($payload->subscription_details->metadata ?? []), true) ?: [],
+        ];
+
+        foreach ($candidates as $candidate) {
+            if (is_array($candidate) && $candidate !== []) {
+                return $candidate;
+            }
+        }
+
+        return [];
     }
 }

@@ -31,6 +31,18 @@ use Illuminate\Validation\ValidationException;
 
 class ProveedorControlador extends ControladorBase
 {
+    private const APPROVED_DOCUMENT_STATUSES = ['approved', 'aprobado', 'aprobada', 'vigente', 'validado'];
+
+    private const APPROVED_AIRCRAFT_STATUSES = ['active', 'trial_active', 'inactive', 'approved', 'aprobada', 'aprobado'];
+
+    private const LEGAL_REQUIREMENT_DOCUMENT_KEYS = [
+        'articles_of_incorporation',
+        'legal_representative_power',
+        'legal_representative_id',
+        'tax_address_proof',
+        'operational_permit',
+    ];
+
     public function __construct(
         private readonly ReintentoCoincidenciaSolicitudServicio $reintentoServicio,
         private readonly VisibilidadServicio $visibilidadServicio,
@@ -1753,15 +1765,73 @@ class ProveedorControlador extends ControladorBase
         return filled($provider->rfc ?: ($taxData['rfc'] ?? null)) ? 'approved' : 'pending';
     }
 
+    private function providerSatDocuments(array $documents): array
+    {
+        return array_values(array_filter($documents, fn (array $document) => ($document['definition_key'] ?? '') === 'sat_certificate'));
+    }
+
+    private function providerLegalDocuments(array $documents): array
+    {
+        return array_values(array_filter($documents, function (array $document) {
+            $definitionKey = $document['definition_key'] ?? '';
+            $sectionKey = $document['section_key'] ?? '';
+
+            return in_array($definitionKey, self::LEGAL_REQUIREMENT_DOCUMENT_KEYS, true)
+                || ($sectionKey === 'legal' && $definitionKey !== 'sat_certificate');
+        }));
+    }
+
+    private function documentsAreApproved(array $documents): bool
+    {
+        return $documents !== []
+            && collect($documents)->every(fn (array $document) => in_array(
+                strtolower(trim((string) ($document['status'] ?? $document['state'] ?? ''))),
+                self::APPROVED_DOCUMENT_STATUSES,
+                true,
+            ));
+    }
+
+    private function pendingDocumentLabels(array $documents): array
+    {
+        return collect($documents)
+            ->reject(fn (array $document) => in_array(
+                strtolower(trim((string) ($document['status'] ?? $document['state'] ?? ''))),
+                self::APPROVED_DOCUMENT_STATUSES,
+                true,
+            ))
+            ->map(fn (array $document) => $document['definition_label'] ?? $document['name'] ?? $document['document_name'] ?? 'Documento legal')
+            ->filter()
+            ->values()
+            ->all();
+    }
+
+    private function providerHasApprovedSatValidation(Proveedor $provider, array $documents, array $taxData = []): bool
+    {
+        $satDocuments = $this->providerSatDocuments($documents);
+        if ($satDocuments !== []) {
+            return $this->documentsAreApproved($satDocuments);
+        }
+
+        return in_array($this->resolveSatValidationStatus($provider, $taxData), ['approved', 'aprobado', 'validated', 'validado'], true);
+    }
+
+    private function providerHasApprovedAircraft(Proveedor $provider): bool
+    {
+        return $provider->aircraft->contains(fn ($aircraft) => in_array(
+            strtolower(trim((string) $aircraft->status)),
+            self::APPROVED_AIRCRAFT_STATUSES,
+            true,
+        ));
+    }
+
     private function companyValidationChecklist(Proveedor $provider, array $documents, array $taxData = []): array
     {
-        $approvedDocumentStatuses = ['approved', 'aprobado', 'aprobada', 'vigente', 'validado'];
-        $activeAircraftStatuses = ['active', 'trial_active', 'approved', 'aprobada', 'aprobado'];
         $companyIdentityComplete = filled($provider->company_name) && filled($provider->commercial_name) && filled($provider->legal_name);
-        $documentsApproved = $documents !== []
-            && collect($documents)->every(fn (array $document) => in_array(strtolower(trim((string) ($document['status'] ?? $document['state'] ?? ''))), $approvedDocumentStatuses, true));
-        $activeAircraft = $provider->aircraft->filter(fn ($aircraft) => in_array(strtolower(trim((string) $aircraft->status)), $activeAircraftStatuses, true))->count();
-        $satApproved = in_array($this->resolveSatValidationStatus($provider, $taxData), ['approved', 'aprobado', 'validated', 'validado'], true);
+        $legalDocuments = $this->providerLegalDocuments($documents);
+        $documentsApproved = $this->documentsAreApproved($legalDocuments);
+        $pendingLegalDocumentLabels = $this->pendingDocumentLabels($legalDocuments);
+        $activeAircraft = $this->providerHasApprovedAircraft($provider);
+        $satApproved = $this->providerHasApprovedSatValidation($provider, $documents, $taxData);
         $contactComplete = filled($provider->company_phone) && filled($provider->company_email);
         $representativeComplete = filled($provider->representative_name) && filled($provider->representative_phone);
         $requirementReviews = $this->providerRequirementReviews($provider);
@@ -1801,7 +1871,9 @@ class ProveedorControlador extends ControladorBase
                 'key' => 'legal_documents_approved',
                 'label' => 'Documentacion legal aprobada',
                 'complete' => $documentsApproved,
-                'message' => 'La documentacion legal aun no esta aprobada.',
+                'message' => $pendingLegalDocumentLabels !== []
+                    ? 'La documentacion legal aun no esta aprobada. Pendientes: '.implode(', ', $pendingLegalDocumentLabels).'.'
+                    : 'La documentacion legal aun no esta aprobada.',
             ],
             [
                 'key' => 'base_operativa',
@@ -1812,7 +1884,7 @@ class ProveedorControlador extends ControladorBase
             [
                 'key' => 'aircraft_active',
                 'label' => 'Aeronave activa o aprobada',
-                'complete' => $activeAircraft > 0,
+                'complete' => $activeAircraft,
                 'message' => 'Se requiere al menos una aeronave activa o aprobada.',
             ],
             [
