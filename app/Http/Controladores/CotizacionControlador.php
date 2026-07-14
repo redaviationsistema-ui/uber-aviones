@@ -4,10 +4,20 @@ namespace App\Http\Controladores;
 
 use App\Modelos\SolicitudVuelo;
 use App\Modelos\Cotizacion;
+use App\Servicios\Aeronaves\AircraftAvailabilityService;
+use App\Servicios\Billing\FlightMembershipService;
 use Illuminate\Http\Request;
+use RuntimeException;
 
 class CotizacionControlador extends ControladorBase
 {
+    public function __construct(
+        private readonly FlightMembershipService $flightMembershipService,
+        private readonly AircraftAvailabilityService $aircraftAvailabilityService,
+    )
+    {
+    }
+
     public function index(Request $request)
     {
         $query = Cotizacion::with(['flightRequest', 'aircraft', 'provider.user'])->latest();
@@ -42,7 +52,12 @@ class CotizacionControlador extends ControladorBase
             abort_if($quote->provider_id !== $request->user()->provider?->id, 403);
         }
 
-        return $this->ok(['quote' => $quote->load(['flightRequest', 'aircraft', 'provider', 'items'])]);
+        $quote->load(['flightRequest', 'aircraft', 'provider', 'items']);
+
+        return $this->ok([
+            'quote' => $quote,
+            'flight_membership_preview' => $this->flightMembershipService->previewForQuote($request->user(), $quote),
+        ]);
     }
 
     public function store(Request $request)
@@ -111,5 +126,74 @@ class CotizacionControlador extends ControladorBase
         $quote->update(['status' => 'rejected']);
 
         return $this->ok(['quote' => $quote->fresh()]);
+    }
+
+    public function createAircraftHold(Request $request, Cotizacion $quote)
+    {
+        abort_if($quote->flightRequest?->client_id !== $request->user()->id && ! $request->user()->hasRole('admin'), 403);
+
+        $reservation = $quote->flightRequest?->reservation;
+
+        try {
+            $hold = $this->aircraftAvailabilityService->holdAircraftForQuote($quote->load(['flightRequest.legs', 'aircraft']), (int) $request->user()->id, $reservation);
+        } catch (RuntimeException $exception) {
+            abort(409, $exception->getMessage());
+        }
+
+        $reused = (bool) $hold->getAttribute('hold_reused');
+
+        return $this->ok([
+            'message' => $reused
+                ? 'La aeronave ya estaba retenida para tu pago. Conservamos la retencion actual.'
+                : 'La aeronave quedo retenida temporalmente mientras completas el pago.',
+            'data' => $this->aircraftHoldPayload($hold),
+        ], $reused ? 200 : 201);
+    }
+
+    public function showAircraftHold(Request $request, Cotizacion $quote)
+    {
+        abort_if($quote->flightRequest?->client_id !== $request->user()->id && ! $request->user()->hasRole('admin'), 403);
+
+        $hold = $this->aircraftAvailabilityService->getActiveHoldForQuote($quote, (int) $request->user()->id);
+
+        return $this->ok([
+            'message' => $hold
+                ? 'Tienes una retencion activa para esta cotizacion.'
+                : 'No hay una retencion activa para esta cotizacion.',
+            'data' => $hold ? $this->aircraftHoldPayload($hold) : null,
+        ]);
+    }
+
+    public function releaseAircraftHold(Request $request, Cotizacion $quote)
+    {
+        abort_if($quote->flightRequest?->client_id !== $request->user()->id && ! $request->user()->hasRole('admin'), 403);
+
+        $hold = $this->aircraftAvailabilityService->releaseQuoteHold($quote, (int) $request->user()->id, 'Retencion liberada por el cliente.');
+
+        return $this->ok([
+            'message' => $hold
+                ? 'La retencion fue liberada correctamente.'
+                : 'No habia una retencion activa que liberar.',
+            'data' => $hold ? $this->aircraftHoldPayload($hold) : null,
+        ]);
+    }
+
+    private function aircraftHoldPayload(object $hold): array
+    {
+        $expiresAt = $hold->hold_expires_at;
+        $secondsRemaining = $expiresAt ? max(now()->diffInSeconds($expiresAt, false), 0) : null;
+
+        return [
+            'hold_id' => $hold->id,
+            'aircraft_id' => $hold->aircraft_id,
+            'status' => $hold->status,
+            'starts_at' => $hold->start_datetime,
+            'ends_at' => $hold->end_datetime,
+            'hold_expires_at' => $expiresAt,
+            'expires_in_seconds' => $secondsRemaining,
+            'is_active' => $hold->status === AircraftAvailabilityService::STATUS_HELD
+                && $secondsRemaining !== null
+                && $secondsRemaining > 0,
+        ];
     }
 }

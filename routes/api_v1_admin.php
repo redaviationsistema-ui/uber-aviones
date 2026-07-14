@@ -3,10 +3,11 @@
 use App\Http\Controladores\AdministradorControlador;
 use App\Http\Controladores\AeronaveControlador;
 use App\Http\Controladores\RedAviation\AdminControlador as RedAviationAdminControlador;
+use App\Http\Controladores\RedAviation\FlightMembershipAdminControlador;
 use Illuminate\Support\Facades\Route;
 
 Route::prefix('admin')->middleware(['auth.token', 'role:admin'])->group(function () {
-    Route::get('/dashboard-marketplace', [AdministradorControlador::class, 'dashboard']);
+    Route::get('/dashboard-marketplace', [RedAviationAdminControlador::class, 'dashboard']);
     Route::get('/usuarios', [AdministradorControlador::class, 'users']);
     Route::get('/users', [AdministradorControlador::class, 'users']);
     Route::get('/usuarios/{user}', [AdministradorControlador::class, 'showUsuario']);
@@ -74,7 +75,7 @@ Route::prefix('admin')->middleware(['auth.token', 'role:admin'])->group(function
     Route::post('/aeronaves/{aircraft}/activar', [AdministradorControlador::class, 'activateAeronave']);
 
     Route::get('/solicitudes', [AdministradorControlador::class, 'flightRequests']);
-    Route::get('/cotizaciones', [AdministradorControlador::class, 'quotes']);
+    Route::get('/cotizaciones', [RedAviationAdminControlador::class, 'quotes']);
     Route::get('/reservas', [AdministradorControlador::class, 'reservations']);
     Route::get('/pagos', [AdministradorControlador::class, 'payments']);
     Route::get('/comisiones', [AdministradorControlador::class, 'commissions']);
@@ -85,9 +86,17 @@ Route::prefix('admin')->middleware(['auth.token', 'role:admin'])->group(function
     Route::get('/planes', [AdministradorControlador::class, 'plans']);
     Route::post('/planes', [AdministradorControlador::class, 'storePlan']);
     Route::put('/planes/{plan}', [AdministradorControlador::class, 'updatePlan']);
+    Route::get('/flight-membership-plans', [FlightMembershipAdminControlador::class, 'plans']);
+    Route::post('/flight-membership-plans', [FlightMembershipAdminControlador::class, 'storePlan']);
+    Route::get('/flight-membership-plans/{plan}', [FlightMembershipAdminControlador::class, 'showPlan']);
+    Route::put('/flight-membership-plans/{plan}', [FlightMembershipAdminControlador::class, 'updatePlan']);
+    Route::patch('/flight-membership-plans/{plan}/status', [FlightMembershipAdminControlador::class, 'updatePlanStatus']);
+    Route::get('/flight-memberships', [FlightMembershipAdminControlador::class, 'memberships']);
+    Route::get('/flight-memberships/{membership}', [FlightMembershipAdminControlador::class, 'showMembership']);
+    Route::post('/flight-memberships/{membership}/adjustment', [FlightMembershipAdminControlador::class, 'adjustment']);
 
-    Route::get('/reportes', [AdministradorControlador::class, 'reports']);
-    Route::get('/auditoria', [AdministradorControlador::class, 'audit']);
-    Route::get('/configuracion', [AdministradorControlador::class, 'settings']);
-    Route::put('/configuracion', [AdministradorControlador::class, 'updateSettings']);
+    Route::get('/reportes', [RedAviationAdminControlador::class, 'reports']);
+    Route::get('/auditoria', [RedAviationAdminControlador::class, 'auditLogs']);
+    Route::get('/configuracion', [RedAviationAdminControlador::class, 'settings']);
+    Route::put('/configuracion', [RedAviationAdminControlador::class, 'updateSettings']);
 });

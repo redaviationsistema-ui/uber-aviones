@@ -9,6 +9,7 @@ use App\Http\Controladores\NotificacionControlador;
 use App\Http\Controladores\PagoControlador;
 use App\Http\Controladores\MetodoPagoControlador;
 use App\Http\Controladores\CotizacionControlador;
+use App\Http\Controladores\RedAviation\FlightMembershipControlador;
 use App\Http\Controladores\ReservaControlador;
 use App\Http\Controladores\StripePagoControlador;
 use App\Http\Controladores\SuscripcionControlador;
@@ -36,6 +37,9 @@ Route::prefix('cliente')->middleware(['auth.token', 'role:client,admin'])->group
     Route::get('/cotizaciones/{quote}', [CotizacionControlador::class, 'show']);
     Route::post('/cotizaciones/{quote}/aceptar', [CotizacionControlador::class, 'accept']);
     Route::post('/cotizaciones/{quote}/rechazar', [CotizacionControlador::class, 'reject']);
+    Route::post('/cotizaciones/{quote}/aircraft-hold', [CotizacionControlador::class, 'createAircraftHold']);
+    Route::get('/cotizaciones/{quote}/aircraft-hold', [CotizacionControlador::class, 'showAircraftHold']);
+    Route::delete('/cotizaciones/{quote}/aircraft-hold', [CotizacionControlador::class, 'releaseAircraftHold']);
 
     Route::get('/reservas', [ReservaControlador::class, 'index']);
     Route::get('/reservas/{reservation}', [ReservaControlador::class, 'show']);
@@ -59,6 +63,7 @@ Route::prefix('cliente')->middleware(['auth.token', 'role:client,admin'])->group
     Route::post('/reservas/{reservation}/pago/confirmar', [StripePagoControlador::class, 'confirmReservationPayment']);
     Route::post('/stripe/payment-intent/confirm', [StripePagoControlador::class, 'confirmFlightRequestPayment']);
     Route::post('/reservas/{reservation}/reintentar-pago', [PagoControlador::class, 'retryReservaPago']);
+    Route::post('/reservas/{reservation}/cancel', [ReservaControlador::class, 'cancel']);
     Route::post('/stripe/checkout/create', [StripePagoControlador::class, 'createCheckout']);
     Route::get('/stripe/checkout/success', [StripePagoControlador::class, 'success']);
     Route::get('/stripe/checkout/cancel', [StripePagoControlador::class, 'cancel']);
@@ -73,6 +78,14 @@ Route::prefix('cliente')->middleware(['auth.token', 'role:client,admin'])->group
     Route::apiResource('metodos-pago', MetodoPagoControlador::class)
         ->parameters(['metodos-pago' => 'paymentMethod'])
         ->only(['index', 'store', 'destroy']);
+});
+
+Route::prefix('flight-membership')->middleware(['auth.token', 'role:client,admin'])->group(function () {
+    Route::get('/plans', [FlightMembershipControlador::class, 'plans']);
+    Route::post('/checkout', [FlightMembershipControlador::class, 'checkout']);
+    Route::get('/current', [FlightMembershipControlador::class, 'current']);
+    Route::get('/history', [FlightMembershipControlador::class, 'history']);
+    Route::get('/quotes/{quote}/preview', [FlightMembershipControlador::class, 'quotePreview']);
 });
 
 Route::prefix('stripe')->middleware(['auth.token', 'role:client,admin'])->group(function () {

@@ -484,8 +484,8 @@ class ProveedorControlador extends ControladorBase
 
     public function showRequest(Request $request, SolicitudVuelo $flightRequest)
     {
-        $providerId = $request->user()->provider_id;
-        $hasAccess = $providerId && (
+        $providerId = $this->resolvedProviderIdOrAbort($request, 403);
+        $hasAccess = (
             (int) $flightRequest->assigned_provider_id === (int) $providerId ||
             $flightRequest->matches()->where('provider_id', $providerId)->exists()
         );
@@ -496,8 +496,7 @@ class ProveedorControlador extends ControladorBase
 
     public function acceptRequest(Request $request, SolicitudVuelo $flightRequest)
     {
-        $providerId = $request->user()->provider_id;
-        abort_if(! $providerId, 404);
+        $providerId = $this->resolvedProviderIdOrAbort($request, 404);
 
         $match = $flightRequest->matches()->where('provider_id', $providerId)->first();
         $match?->loadMissing('aircraft');
@@ -529,8 +528,7 @@ class ProveedorControlador extends ControladorBase
 
     public function rejectRequest(Request $request, SolicitudVuelo $flightRequest)
     {
-        $providerId = $request->user()->provider_id;
-        abort_if(! $providerId, 404);
+        $providerId = $this->resolvedProviderIdOrAbort($request, 404);
 
         $flightRequest->matches()->where('provider_id', $providerId)->update([
             'status' => 'rejected',
@@ -564,8 +562,7 @@ class ProveedorControlador extends ControladorBase
 
     public function payments(Request $request)
     {
-        $providerId = $request->user()->provider_id;
-        abort_if(! $providerId, 404);
+        $providerId = $this->resolvedProviderIdOrAbort($request, 404);
 
         $aircraftPayments = AircraftBillingPayment::query()
             ->with(['aircraft:id,registration,model,base_airport', 'billingPlan:id,code,name,amount,currency'])
@@ -620,8 +617,7 @@ class ProveedorControlador extends ControladorBase
 
     public function crew(Request $request)
     {
-        $providerId = $request->user()->provider_id;
-        abort_if(! $providerId, 404, 'Proveedor no encontrado.');
+        $providerId = $this->resolvedProviderIdOrAbort($request, 404);
         $perPage = min(max((int) $request->integer('per_page', 20), 1), 50);
 
         $activeStatuses = ['confirmada', 'confirmed', 'en_preparacion', 'preparacion', 'preparing', 'lista', 'ready', 'en_vuelo', 'in_progress', 'in_flight', 'incidencia'];
@@ -688,16 +684,14 @@ class ProveedorControlador extends ControladorBase
 
     public function commissions(Request $request)
     {
-        $providerId = $request->user()->provider_id;
-        abort_if(! $providerId, 404);
+        $providerId = $this->resolvedProviderIdOrAbort($request, 404);
 
         return $this->ok(['commissions' => Comision::where('provider_id', $providerId)->paginate(20)]);
     }
 
     public function operations(Request $request)
     {
-        $providerId = $request->user()->provider_id;
-        abort_if(! $providerId, 404, 'Proveedor no encontrado.');
+        $providerId = $this->resolvedProviderIdOrAbort($request, 404);
 
         $operations = Operacion::with(['solicitudVuelo', 'aeronave', 'sobrecargo', 'timeline'])
             ->where('provider_id', $providerId)
@@ -710,7 +704,7 @@ class ProveedorControlador extends ControladorBase
 
     public function updateOperation(Request $request, Operacion $operation)
     {
-        $providerId = $request->user()->provider_id;
+        $providerId = $this->resolvedProviderIdOrAbort($request, 403);
         abort_if($operation->provider_id !== $providerId, 403, 'No puedes actualizar esta operacion.');
 
         $data = $request->validate([
@@ -796,8 +790,7 @@ class ProveedorControlador extends ControladorBase
 
     public function updateReleaseProvider(Request $request, SolicitudVuelo $flightRequest)
     {
-        $providerId = $request->user()->provider_id;
-        abort_if(! $providerId, 404, 'Proveedor no encontrado.');
+        $providerId = $this->resolvedProviderIdOrAbort($request, 404);
 
         $hasAccess = (int) $flightRequest->assigned_provider_id === (int) $providerId
             || $flightRequest->matches()->where('provider_id', $providerId)->exists();
@@ -1100,8 +1093,7 @@ class ProveedorControlador extends ControladorBase
 
     public function incidents(Request $request)
     {
-        $providerId = $request->user()->provider_id;
-        abort_if(! $providerId, 404, 'Proveedor no encontrado.');
+        $providerId = $this->resolvedProviderIdOrAbort($request, 404);
 
         $incidents = LineaTiempoOperacion::with(['operacion.solicitudVuelo', 'operacion.aeronave', 'operacion.sobrecargo', 'operacion.proveedor'])
             ->whereIn('status', ['incidencia', 'cerrada'])
@@ -1115,8 +1107,7 @@ class ProveedorControlador extends ControladorBase
 
     public function storeIncident(Request $request)
     {
-        $providerId = $request->user()->provider_id;
-        abort_if(! $providerId, 404, 'Proveedor no encontrado.');
+        $providerId = $this->resolvedProviderIdOrAbort($request, 404);
 
         $data = $request->validate([
             'operation_id' => ['nullable', 'exists:operations,id'],
@@ -1167,7 +1158,7 @@ class ProveedorControlador extends ControladorBase
 
     public function updateIncident(Request $request, LineaTiempoOperacion $timeline)
     {
-        $providerId = $request->user()->provider_id;
+        $providerId = $this->resolvedProviderIdOrAbort($request, 403);
         $timeline->loadMissing('operacion');
         abort_if(! $timeline->operacion || $timeline->operacion->provider_id !== $providerId, 403, 'No puedes editar esta incidencia.');
 
@@ -1193,8 +1184,7 @@ class ProveedorControlador extends ControladorBase
 
     public function history(Request $request)
     {
-        $providerId = $request->user()->provider_id;
-        abort_if(! $providerId, 404, 'Proveedor no encontrado.');
+        $providerId = $this->resolvedProviderIdOrAbort($request, 404);
 
         $userIds = Proveedor::findOrFail($providerId)->users()->pluck('id')->push($request->user()->id)->unique();
 

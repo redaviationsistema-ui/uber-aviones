@@ -135,16 +135,7 @@ class ReintentoCoincidenciaSolicitudServicio
             ->where('status', EstadoAeronave::Active->value)
             ->where('capacity', '>=', $flightRequest->passengers)
             ->whereHas('provider', fn ($scope) => $scope->where('approval_status', EstadoProveedor::Approved->value))
-            ->tap(fn ($scope) => $this->aircraftAvailabilityService->excludeConflictingAircraft($scope, $start, $end))
-            ->whereDoesntHave('availability', function ($scope) use ($start, $end) {
-                $scope->whereIn('status', [
-                    EstadoDisponibilidad::Occupied->value,
-                    EstadoDisponibilidad::Blocked->value,
-                    EstadoDisponibilidad::Maintenance->value,
-                ])
-                    ->where('start_datetime', '<', $end)
-                    ->where('end_datetime', '>', $start);
-            });
+            ->tap(fn ($scope) => $this->aircraftAvailabilityService->applyAvailabilityConstraints($scope, $start, $end));
 
         if ($flightRequest->origin_airport_id || $flightRequest->origin) {
             $originCode = $flightRequest->resolvedOriginCode();

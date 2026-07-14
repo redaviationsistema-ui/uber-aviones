@@ -21,12 +21,7 @@ class MatchingRedAviationServicio
             ->whereIn('status', ['active', 'trial_active'])
             ->where('capacity', '>=', $solicitud->passengers)
             ->whereHas('provider', fn ($query) => $query->approvedForOperations())
-            ->tap(fn ($query) => $this->aircraftAvailabilityService->excludeConflictingAircraft($query, $inicio, $fin))
-            ->whereDoesntHave('availability', function ($query) use ($inicio, $fin) {
-                $query->whereIn('status', ['occupied', 'blocked', 'maintenance'])
-                    ->where('start_datetime', '<', $fin)
-                    ->where('end_datetime', '>', $inicio);
-            })
+            ->tap(fn ($query) => $this->aircraftAvailabilityService->applyAvailabilityConstraints($query, $inicio, $fin))
             ->limit(10)
             ->get();
 

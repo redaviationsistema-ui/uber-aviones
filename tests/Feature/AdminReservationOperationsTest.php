@@ -52,7 +52,7 @@ class AdminReservationOperationsTest extends TestCase
         $flightRequest->refresh();
         $activeBlocks = AircraftAvailabilityBlock::query()
             ->where('reservation_id', $reservation->id)
-            ->where('status', 'active')
+            ->whereIn('status', ['active', 'booked'])
             ->get();
         $block = $activeBlocks->sole();
         $releasedBlocks = AircraftAvailabilityBlock::query()
@@ -63,7 +63,7 @@ class AdminReservationOperationsTest extends TestCase
         $this->assertSame($aircraftB->id, $reservation->aircraft_id);
         $this->assertCount(1, $activeBlocks);
         $this->assertSame($aircraftB->id, $block->aircraft_id);
-        $this->assertSame('active', $block->status);
+        $this->assertSame('booked', $block->status);
         $this->assertNull($block->released_at);
         $this->assertSame('2026-07-11 10:00:00', $block->start_datetime->format('Y-m-d H:i:s'));
         $this->assertSame('2026-07-11 14:00:00', $block->end_datetime->format('Y-m-d H:i:s'));

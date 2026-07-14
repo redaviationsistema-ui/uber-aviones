@@ -10,6 +10,7 @@ use App\Modelos\Proveedor;
 use App\Modelos\Reserva;
 use App\Modelos\SolicitudVuelo;
 use App\Modelos\TokenApi;
+use App\Modelos\RegistroAuditoria;
 use App\Modelos\Usuario;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -67,6 +68,60 @@ class AvailabilityBlockAuditTest extends TestCase
         $this->assertSame('pending_payment', $reservation->status);
         $this->assertSame('cancelled', $block->status);
         $this->assertNotNull($block->released_at);
+
+        $this->assertDatabaseHas('audit_logs', [
+            'user_id' => $payment->user_id,
+            'action' => 'stripe_webhook_payment_refunded',
+            'module' => 'reservation_payments',
+        ]);
+    }
+
+    public function test_partial_refund_webhook_is_ignored_for_client_reservations(): void
+    {
+        [$flightRequest, $reservation, , , , $payment] = $this->createPaidReservationContext();
+        config()->set('services.stripe.webhook_secret', 'whsec_test');
+
+        $event = (object) [
+            'id' => 'evt_refund_partial_001',
+            'type' => 'charge.refunded',
+            'created' => Carbon::parse('2026-07-04 12:10:00', 'UTC')->timestamp,
+            'data' => (object) [
+                'object' => (object) [
+                    'id' => 'ch_refund_partial_001',
+                    'payment_intent' => 'pi_paid_001',
+                    'amount' => 1599000,
+                    'amount_refunded' => 400000,
+                    'metadata' => (object) [
+                        'flight_request_id' => (string) $flightRequest->id,
+                    ],
+                ],
+            ],
+        ];
+
+        $webhookAlias = Mockery::mock('alias:Stripe\Webhook');
+        $webhookAlias
+            ->shouldReceive('constructEvent')
+            ->once()
+            ->andReturn($event);
+
+        $this->postJson('/api/v1/stripe/webhook', [], [
+            'Stripe-Signature' => 't=1,v1=fake',
+        ])->assertOk();
+
+        $flightRequest->refresh();
+        $reservation->refresh();
+        $payment->refresh();
+        $block = AircraftAvailabilityBlock::query()->where('reservation_id', $reservation->id)->latest('id')->firstOrFail();
+
+        $this->assertSame('paid', $payment->status);
+        $this->assertSame('paid', $flightRequest->payment_status);
+        $this->assertSame('confirmed', $reservation->status);
+        $this->assertContains($block->status, ['active', 'booked']);
+
+        $this->assertDatabaseHas('audit_logs', [
+            'action' => 'stripe_webhook_partial_refund_ignored',
+            'module' => 'reservation_payments',
+        ]);
     }
 
     public function test_admin_assign_reblocks_paid_reservation_when_aircraft_changes(): void
@@ -91,7 +146,7 @@ class AvailabilityBlockAuditTest extends TestCase
         $flightRequest->refresh();
         $activeBlock = AircraftAvailabilityBlock::query()
             ->where('reservation_id', $reservation->id)
-            ->where('status', 'active')
+            ->whereIn('status', ['active', 'booked'])
             ->latest('id')
             ->firstOrFail();
         $releasedOldBlock = AircraftAvailabilityBlock::query()
@@ -130,7 +185,7 @@ class AvailabilityBlockAuditTest extends TestCase
         $flightRequest->refresh();
         $activeBlock = AircraftAvailabilityBlock::query()
             ->where('reservation_id', $reservation->id)
-            ->where('status', 'active')
+            ->whereIn('status', ['active', 'booked'])
             ->latest('id')
             ->firstOrFail();
         $releasedOldBlock = AircraftAvailabilityBlock::query()
@@ -252,7 +307,7 @@ class AvailabilityBlockAuditTest extends TestCase
             'block_type' => 'reservation',
             'start_datetime' => $departure,
             'end_datetime' => $arrival,
-            'status' => 'active',
+            'status' => 'booked',
             'reason' => 'Reserva pagada',
         ]);
 

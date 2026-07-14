@@ -3,6 +3,7 @@
 use App\Http\Controladores\AeronaveControlador;
 use App\Http\Controladores\CrewOperationIncidentController;
 use App\Http\Controladores\RedAviation\AdminControlador;
+use App\Http\Controladores\RedAviation\AdminInventoryControlador;
 use App\Http\Controladores\RedAviation\BillingPlanControlador;
 use App\Http\Controladores\RedAviation\ChatControlador;
 use App\Http\Controladores\RedAviation\ClientAccessBillingControlador;
@@ -157,6 +158,20 @@ Route::middleware(['auth.token'])->group(function () {
         Route::get('/subscriptions', [AdminControlador::class, 'subscriptions']);
         Route::get('/client-access-payments', [AdminControlador::class, 'clientAccessPayments']);
         Route::get('/subscription-payments', [AdminControlador::class, 'subscriptionPayments']);
+        Route::get('/quotes', [AdminControlador::class, 'quotes']);
+        Route::get('/quotes/{quote}', [AdminControlador::class, 'showQuote']);
+        Route::get('/flights', [AdminControlador::class, 'flights']);
+        Route::get('/flights/{flight}', [AdminControlador::class, 'showFlight']);
+        Route::get('/documents', [AdminControlador::class, 'documents']);
+        Route::get('/documents/{document}', [AdminControlador::class, 'showDocument']);
+        Route::post('/documents/{document}/approve', [AdminControlador::class, 'approveDocument']);
+        Route::post('/documents/{document}/reject', [AdminControlador::class, 'rejectDocument']);
+        Route::post('/documents/{document}/request-correction', [AdminControlador::class, 'requestDocumentCorrection']);
+        Route::get('/documents/{document}/download', [AdminControlador::class, 'downloadDocument']);
+        Route::get('/audit-logs', [AdminControlador::class, 'auditLogs']);
+        Route::get('/settings', [AdminControlador::class, 'settings']);
+        Route::put('/settings', [AdminControlador::class, 'updateSettings']);
+        Route::get('/reports', [AdminControlador::class, 'reports']);
         Route::get('/fleet/aircraft', [AdminControlador::class, 'aircraftFleet']);
         Route::get('/aircraft-calendar', [AdminControlador::class, 'aircraftCalendar']);
         Route::get('/operations/dashboard', [AdminControlador::class, 'operationsDashboard']);
@@ -172,6 +187,18 @@ Route::middleware(['auth.token'])->group(function () {
         Route::get('/data-transfer/schema', [AdminControlador::class, 'dataTransferSchema']);
         Route::post('/data-transfer/import', [AdminControlador::class, 'importDataTransfer']);
         Route::get('/data-transfer/export', [AdminControlador::class, 'exportDataTransfer']);
+        Route::get('/inventory/auth/me', [AdminInventoryControlador::class, 'authMe']);
+        Route::post('/inventory/query', [AdminInventoryControlador::class, 'query']);
+        Route::post('/inventory/insert', [AdminInventoryControlador::class, 'insert']);
+        Route::patch('/inventory/update', [AdminInventoryControlador::class, 'update']);
+        Route::delete('/inventory/delete', [AdminInventoryControlador::class, 'delete']);
+        Route::post('/inventory/upsert', [AdminInventoryControlador::class, 'upsert']);
+        Route::post('/inventory/storage/upload', [AdminInventoryControlador::class, 'uploadStorage']);
+        Route::post('/inventory/storage/remove', [AdminInventoryControlador::class, 'removeStorage']);
+        Route::get('/inventory/storage/url', [AdminInventoryControlador::class, 'storageUrl']);
+        Route::post('/inventory/bulk-email/send-test', [AdminInventoryControlador::class, 'sendTestEmail']);
+        Route::post('/inventory/bulk-email/send-single', [AdminInventoryControlador::class, 'sendCampaignEmail']);
+        Route::post('/inventory/bulk-email/action', [AdminInventoryControlador::class, 'campaignAction']);
     });
 
     Route::get('/chats/{chat}', [ChatControlador::class, 'show']);

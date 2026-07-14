@@ -1,0 +1,546 @@
+<?php
+
+namespace Tests\Feature;
+
+use App\Http\Controladores\StripeWebhookControlador;
+use App\Modelos\AircraftAvailabilityBlock;
+use App\Modelos\Aeronave;
+use App\Modelos\Cotizacion;
+use App\Modelos\Pago;
+use App\Modelos\Proveedor;
+use App\Modelos\Reserva;
+use App\Modelos\SolicitudVuelo;
+use App\Modelos\TokenApi;
+use App\Modelos\Usuario;
+use Carbon\Carbon;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use ReflectionMethod;
+use Tests\TestCase;
+
+class AircraftHoldFlowTest extends TestCase
+{
+    use RefreshDatabase;
+
+    public function test_aircraft_without_blocks_appears_in_results(): void
+    {
+        $this->seed();
+
+        $provider = $this->createProvider();
+        $aircraft = $this->createAircraft($provider, 'XA-HOLD1');
+
+        $response = $this->postJson('/api/v1/client/quotes/preview', $this->previewPayload());
+
+        $response->assertOk();
+        $ids = collect($response->json('matches'))->pluck('aircraft_id')->all();
+        $this->assertContains($aircraft->id, $ids);
+    }
+
+    public function test_active_hold_excludes_aircraft_for_same_schedule(): void
+    {
+        $this->seed();
+
+        [$client, $token, $quote, $aircraft] = $this->createAcceptedQuoteContext('XA-HOLD2');
+
+        $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson("/api/v1/cliente/cotizaciones/{$quote->id}/aircraft-hold")
+            ->assertCreated()
+            ->assertJsonPath('data.status', 'held');
+
+        $response = $this->postJson('/api/v1/client/quotes/preview', $this->previewPayload());
+        $ids = collect($response->json('matches'))->pluck('aircraft_id')->all();
+
+        $this->assertNotContains($aircraft->id, $ids);
+    }
+
+    public function test_repeated_hold_request_reuses_existing_hold_and_returns_200(): void
+    {
+        $this->seed();
+
+        [, $token, $quote] = $this->createAcceptedQuoteContext('XA-HOLD2B');
+
+        $first = $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson("/api/v1/cliente/cotizaciones/{$quote->id}/aircraft-hold")
+            ->assertCreated();
+
+        $second = $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson("/api/v1/cliente/cotizaciones/{$quote->id}/aircraft-hold")
+            ->assertOk()
+            ->assertJsonPath('data.status', 'held');
+
+        $this->assertSame($first->json('data.hold_id'), $second->json('data.hold_id'));
+        $this->assertSame(1, AircraftAvailabilityBlock::query()->where('quote_id', $quote->id)->where('status', 'held')->count());
+    }
+
+    public function test_expired_hold_does_not_exclude_aircraft_and_command_is_idempotent(): void
+    {
+        $this->seed();
+
+        [, $token, $quote, $aircraft] = $this->createAcceptedQuoteContext('XA-HOLD3');
+
+        $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson("/api/v1/cliente/cotizaciones/{$quote->id}/aircraft-hold")
+            ->assertCreated();
+
+        AircraftAvailabilityBlock::query()->where('quote_id', $quote->id)->update([
+            'hold_expires_at' => now()->subMinute(),
+        ]);
+
+        $this->artisan('skygroup:expire-aircraft-holds')->assertExitCode(0);
+        $this->artisan('skygroup:expire-aircraft-holds')->assertExitCode(0);
+
+        $response = $this->postJson('/api/v1/client/quotes/preview', $this->previewPayload());
+        $ids = collect($response->json('matches'))->pluck('aircraft_id')->all();
+
+        $this->assertContains($aircraft->id, $ids);
+        $this->assertDatabaseHas('aircraft_availability_blocks', [
+            'quote_id' => $quote->id,
+            'status' => 'expired',
+        ]);
+    }
+
+    public function test_same_client_can_retry_after_own_hold_expires_and_receives_a_new_hold(): void
+    {
+        $this->seed();
+
+        [, $token, $quote] = $this->createAcceptedQuoteContext('XA-HOLD3B');
+
+        $first = $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson("/api/v1/cliente/cotizaciones/{$quote->id}/aircraft-hold")
+            ->assertCreated();
+
+        AircraftAvailabilityBlock::query()->whereKey($first->json('data.hold_id'))->update([
+            'hold_expires_at' => now()->subMinute(),
+        ]);
+
+        $retry = $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson("/api/v1/cliente/cotizaciones/{$quote->id}/aircraft-hold")
+            ->assertCreated()
+            ->assertJsonPath('data.status', 'held');
+
+        $this->assertNotSame($first->json('data.hold_id'), $retry->json('data.hold_id'));
+        $this->assertDatabaseHas('aircraft_availability_blocks', [
+            'id' => $first->json('data.hold_id'),
+            'status' => 'expired',
+        ]);
+        $this->assertSame(1, AircraftAvailabilityBlock::query()->where('quote_id', $quote->id)->where('status', 'held')->count());
+    }
+
+    public function test_invoice_paid_converts_hold_into_booked_without_duplicate_block(): void
+    {
+        $this->seed();
+
+        [$client, $token, $quote, $aircraft, $flightRequest] = $this->createAcceptedQuoteContext('XA-HOLD4');
+        $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson("/api/v1/cliente/cotizaciones/{$quote->id}/aircraft-hold")
+            ->assertCreated();
+
+        $reservation = Reserva::query()->create([
+            'client_id' => $client->id,
+            'provider_id' => $quote->provider_id,
+            'aircraft_id' => $aircraft->id,
+            'flight_request_id' => $flightRequest->id,
+            'quote_id' => $quote->id,
+            'reservation_code' => 'PV-HOLD-001',
+            'status' => 'pending_payment',
+            'total_amount' => $quote->total,
+            'currency' => 'USD',
+        ]);
+
+        AircraftAvailabilityBlock::query()->where('quote_id', $quote->id)->update([
+            'reservation_id' => $reservation->id,
+        ]);
+
+        Pago::query()->create([
+            'user_id' => $client->id,
+            'reservation_id' => $reservation->id,
+            'flight_request_id' => $flightRequest->id,
+            'payment_type' => 'reservation',
+            'amount' => $quote->total,
+            'currency' => 'USD',
+            'provider' => 'stripe',
+            'transaction_reference' => 'cs_hold_paid',
+            'stripe_checkout_session_id' => 'cs_hold_paid',
+            'status' => 'pending',
+        ]);
+
+        $session = (object) [
+            'id' => 'cs_hold_paid',
+            'payment_intent' => 'pi_hold_paid',
+            'amount_total' => 1210000,
+            'currency' => 'usd',
+            'metadata' => (object) [
+                'flight_request_id' => (string) $flightRequest->id,
+            ],
+        ];
+
+        $this->invokePrivateWebhookMethod('handleCheckoutCompleted', $session);
+        $this->invokePrivateWebhookMethod('handleCheckoutCompleted', $session);
+
+        $this->assertDatabaseHas('aircraft_availability_blocks', [
+            'reservation_id' => $reservation->id,
+            'status' => 'booked',
+        ]);
+        $this->assertSame(1, AircraftAvailabilityBlock::query()->where('reservation_id', $reservation->id)->where('status', 'booked')->count());
+    }
+
+    public function test_booked_block_excludes_aircraft_but_non_overlapping_slots_allow_it(): void
+    {
+        $this->seed();
+
+        [$client, , $quote, $aircraft, $flightRequest] = $this->createAcceptedQuoteContext('XA-HOLD5');
+        $reservation = Reserva::query()->create([
+            'client_id' => $client->id,
+            'provider_id' => $quote->provider_id,
+            'aircraft_id' => $aircraft->id,
+            'flight_request_id' => $flightRequest->id,
+            'quote_id' => $quote->id,
+            'reservation_code' => 'PV-HOLD-002',
+            'status' => 'confirmed',
+            'total_amount' => $quote->total,
+            'currency' => 'USD',
+            'confirmed_at' => now(),
+        ]);
+
+        AircraftAvailabilityBlock::query()->create([
+            'aircraft_id' => $aircraft->id,
+            'quote_id' => $quote->id,
+            'flight_request_id' => $flightRequest->id,
+            'user_id' => $client->id,
+            'reservation_id' => $reservation->id,
+            'block_type' => 'confirmed_flight',
+            'start_datetime' => Carbon::parse('2026-08-20 10:00:00'),
+            'end_datetime' => Carbon::parse('2026-08-20 14:00:00'),
+            'status' => 'booked',
+            'payment_status' => 'paid',
+            'source' => 'test',
+            'reason' => 'Booked test',
+        ]);
+
+        $overlapResponse = $this->postJson('/api/v1/client/quotes/preview', $this->previewPayload());
+        $this->assertNotContains($aircraft->id, collect($overlapResponse->json('matches'))->pluck('aircraft_id')->all());
+
+        $beforeResponse = $this->postJson('/api/v1/client/quotes/preview', $this->previewPayload('2026-08-20 06:00:00', '2026-08-20 08:30:00'));
+        $afterResponse = $this->postJson('/api/v1/client/quotes/preview', $this->previewPayload('2026-08-20 15:00:00', '2026-08-20 18:00:00'));
+
+        $this->assertContains($aircraft->id, collect($beforeResponse->json('matches'))->pluck('aircraft_id')->all());
+        $this->assertContains($aircraft->id, collect($afterResponse->json('matches'))->pluck('aircraft_id')->all());
+    }
+
+    public function test_partial_overlap_excludes_only_the_conflicting_aircraft_and_other_aircraft_remains_available(): void
+    {
+        $this->seed();
+
+        [$client, , $quote, $aircraftA, $flightRequest] = $this->createAcceptedQuoteContext('XA-HOLD6A');
+        $provider = Proveedor::query()->findOrFail($quote->provider_id);
+        $aircraftB = $this->createAircraft($provider, 'XA-HOLD6B');
+
+        AircraftAvailabilityBlock::query()->create([
+            'aircraft_id' => $aircraftA->id,
+            'quote_id' => $quote->id,
+            'flight_request_id' => $flightRequest->id,
+            'user_id' => $client->id,
+            'block_type' => 'confirmed_flight',
+            'start_datetime' => Carbon::parse('2026-08-20 11:30:00'),
+            'end_datetime' => Carbon::parse('2026-08-20 16:00:00'),
+            'status' => 'booked',
+            'payment_status' => 'paid',
+            'source' => 'test',
+            'reason' => 'Partial overlap',
+        ]);
+
+        $response = $this->postJson('/api/v1/client/quotes/preview', $this->previewPayload());
+        $ids = collect($response->json('matches'))->pluck('aircraft_id')->all();
+
+        $this->assertNotContains($aircraftA->id, $ids);
+        $this->assertContains($aircraftB->id, $ids);
+    }
+
+    public function test_cancellation_and_checkout_cancellation_release_availability(): void
+    {
+        $this->seed();
+
+        [$client, $token, $quote, $aircraft, $flightRequest] = $this->createAcceptedQuoteContext('XA-HOLD7');
+        $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson("/api/v1/cliente/cotizaciones/{$quote->id}/aircraft-hold")
+            ->assertCreated();
+
+        $reservation = Reserva::query()->create([
+            'client_id' => $client->id,
+            'provider_id' => $quote->provider_id,
+            'aircraft_id' => $aircraft->id,
+            'flight_request_id' => $flightRequest->id,
+            'quote_id' => $quote->id,
+            'reservation_code' => 'PV-HOLD-007',
+            'status' => 'pending_payment',
+            'total_amount' => $quote->total,
+            'currency' => 'USD',
+        ]);
+
+        AircraftAvailabilityBlock::query()->where('quote_id', $quote->id)->update(['reservation_id' => $reservation->id]);
+
+        Pago::query()->create([
+            'user_id' => $client->id,
+            'reservation_id' => $reservation->id,
+            'flight_request_id' => $flightRequest->id,
+            'payment_type' => 'reservation',
+            'amount' => $quote->total,
+            'currency' => 'USD',
+            'provider' => 'stripe',
+            'transaction_reference' => 'cs_hold_cancel',
+            'stripe_checkout_session_id' => 'cs_hold_cancel',
+            'status' => 'pending',
+        ]);
+
+        $this->withHeader('Authorization', 'Bearer '.$token)
+            ->deleteJson("/api/v1/cliente/cotizaciones/{$quote->id}/aircraft-hold")
+            ->assertOk();
+
+        $response = $this->postJson('/api/v1/client/quotes/preview', $this->previewPayload());
+        $this->assertContains($aircraft->id, collect($response->json('matches'))->pluck('aircraft_id')->all());
+    }
+
+    public function test_second_client_cannot_take_same_aircraft_during_valid_hold(): void
+    {
+        $this->seed();
+
+        [$clientA, $tokenA, $quoteA, $aircraft, $flightRequest] = $this->createAcceptedQuoteContext('XA-HOLD8');
+        [$clientB, $tokenB, $quoteB] = $this->createAcceptedQuoteForSameAircraftAndFlight($aircraft, $flightRequest);
+
+        $this->withHeader('Authorization', 'Bearer '.$tokenA)
+            ->postJson("/api/v1/cliente/cotizaciones/{$quoteA->id}/aircraft-hold")
+            ->assertCreated();
+
+        $this->withHeader('Authorization', 'Bearer '.$tokenB)
+            ->postJson("/api/v1/cliente/cotizaciones/{$quoteB->id}/aircraft-hold")
+            ->assertStatus(409);
+    }
+
+    public function test_inactive_aircraft_never_appears_and_round_trip_window_is_filtered(): void
+    {
+        $this->seed();
+
+        $provider = $this->createProvider();
+        $inactiveAircraft = $this->createAircraft($provider, 'XA-HOLD9A', ['status' => 'inactive']);
+        $activeAircraft = $this->createAircraft($provider, 'XA-HOLD9B');
+
+        AircraftAvailabilityBlock::query()->create([
+            'aircraft_id' => $activeAircraft->id,
+            'block_type' => 'confirmed_flight',
+            'start_datetime' => Carbon::parse('2026-08-20 09:00:00'),
+            'end_datetime' => Carbon::parse('2026-08-20 19:00:00'),
+            'status' => 'booked',
+            'payment_status' => 'paid',
+            'source' => 'test',
+            'reason' => 'Round trip occupied',
+        ]);
+
+        $response = $this->postJson('/api/v1/client/quotes/preview', [
+            ...$this->previewPayload(),
+            'trip_type' => 'round_trip',
+            'return_datetime' => '2026-08-20 18:00:00',
+            'round_trip' => true,
+        ]);
+
+        $ids = collect($response->json('matches'))->pluck('aircraft_id')->all();
+        $this->assertNotContains($inactiveAircraft->id, $ids);
+        $this->assertNotContains($activeAircraft->id, $ids);
+    }
+
+    public function test_trial_active_aircraft_can_be_held_and_hold_payload_exposes_remaining_time(): void
+    {
+        $this->seed();
+
+        [, $token, $quote] = $this->createAcceptedQuoteContext('XA-HOLD10');
+        $quote->aircraft()->update(['status' => 'trial_active']);
+
+        $response = $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson("/api/v1/cliente/cotizaciones/{$quote->id}/aircraft-hold")
+            ->assertCreated()
+            ->assertJsonPath('data.status', 'held');
+
+        $this->assertGreaterThan(0, (int) $response->json('data.expires_in_seconds'));
+
+        $this->withHeader('Authorization', 'Bearer '.$token)
+            ->getJson("/api/v1/cliente/cotizaciones/{$quote->id}/aircraft-hold")
+            ->assertOk()
+            ->assertJsonPath('data.hold_id', $response->json('data.hold_id'))
+            ->assertJsonPath('data.is_active', true);
+    }
+
+    public function test_expired_quote_cannot_create_hold(): void
+    {
+        $this->seed();
+
+        [, $token, $quote] = $this->createAcceptedQuoteContext('XA-HOLD11');
+        $quote->update(['expires_at' => now()->subMinute()]);
+
+        $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson("/api/v1/cliente/cotizaciones/{$quote->id}/aircraft-hold")
+            ->assertStatus(409)
+            ->assertSeeText('La cotizacion ya vencio');
+
+        $this->assertDatabaseMissing('aircraft_availability_blocks', [
+            'quote_id' => $quote->id,
+            'status' => 'held',
+        ]);
+    }
+
+    private function createAcceptedQuoteContext(string $registration): array
+    {
+        $client = Usuario::factory()->create([
+            'role' => Usuario::ROLE_CLIENT,
+            'status' => 'active',
+            'email' => uniqid('client.', true).'@test.dev',
+        ]);
+
+        $provider = $this->createProvider();
+        $aircraft = $this->createAircraft($provider, $registration);
+        $flightRequest = $this->createFlightRequest($client, $provider, $aircraft);
+        $quote = $this->createAcceptedQuote($flightRequest, $provider, $aircraft);
+
+        return [$client, TokenApi::issue($client), $quote, $aircraft, $flightRequest];
+    }
+
+    private function createAcceptedQuoteForSameAircraftAndFlight(Aeronave $aircraft, SolicitudVuelo $flightRequest): array
+    {
+        $client = Usuario::factory()->create([
+            'role' => Usuario::ROLE_CLIENT,
+            'status' => 'active',
+            'email' => uniqid('clientb.', true).'@test.dev',
+        ]);
+
+        $secondFlightRequest = SolicitudVuelo::query()->create([
+            'client_id' => $client->id,
+            'origin' => $flightRequest->origin,
+            'destination' => $flightRequest->destination,
+            'departure_datetime' => $flightRequest->departure_datetime,
+            'return_datetime' => $flightRequest->return_datetime,
+            'departure_date' => optional($flightRequest->departure_datetime)->toDateString(),
+            'departure_time' => optional($flightRequest->departure_datetime)->format('H:i'),
+            'return_date' => optional($flightRequest->return_datetime)->toDateString(),
+            'return_time' => optional($flightRequest->return_datetime)->format('H:i'),
+            'passengers' => $flightRequest->passengers,
+            'trip_type' => $flightRequest->trip_type,
+            'assigned_provider_id' => $flightRequest->assigned_provider_id,
+            'assigned_aircraft_id' => $aircraft->id,
+            'assigned_aircraft_model' => $aircraft->model,
+            'currency' => 'USD',
+            'final_price' => 12100,
+            'status' => 'quoted',
+            'workflow_status' => 'cotizada',
+        ]);
+
+        $quote = Cotizacion::query()->create([
+            'flight_request_id' => $secondFlightRequest->id,
+            'provider_id' => $aircraft->provider_id,
+            'aircraft_id' => $aircraft->id,
+            'subtotal' => 10000,
+            'taxes' => 1600,
+            'fees' => 500,
+            'total' => 12100,
+            'currency' => 'USD',
+            'status' => 'accepted',
+            'expires_at' => now()->addDays(2),
+        ]);
+
+        return [$client, TokenApi::issue($client), $quote];
+    }
+
+    private function createProvider(): Proveedor
+    {
+        $providerUser = Usuario::factory()->create([
+            'role' => Usuario::ROLE_PROVIDER,
+            'status' => 'active',
+            'email' => uniqid('provider.', true).'@test.dev',
+        ]);
+
+        $provider = Proveedor::query()->create([
+            'user_id' => $providerUser->id,
+            'company_name' => 'Provider Holds',
+            'commercial_name' => 'Provider Holds',
+            'approval_status' => 'approved',
+        ]);
+
+        $providerUser->forceFill(['provider_id' => $provider->id])->save();
+
+        return $provider;
+    }
+
+    private function createAircraft(Proveedor $provider, string $registration, array $overrides = []): Aeronave
+    {
+        return Aeronave::query()->create([
+            'provider_id' => $provider->id,
+            'model' => 'Citation XLS+',
+            'registration' => $registration,
+            'category' => 'Light Jet',
+            'capacity' => 6,
+            'base_airport' => 'MMMX',
+            'range_km' => 2500,
+            'speed_kmh' => 700,
+            'hourly_rate' => 5000,
+            'currency' => 'USD',
+            'status' => 'active',
+            ...$overrides,
+        ]);
+    }
+
+    private function createFlightRequest(Usuario $client, Proveedor $provider, Aeronave $aircraft): SolicitudVuelo
+    {
+        return SolicitudVuelo::query()->create([
+            'client_id' => $client->id,
+            'origin' => 'MMMX',
+            'destination' => 'MMTO',
+            'departure_datetime' => Carbon::parse('2026-08-20 10:00:00'),
+            'return_datetime' => Carbon::parse('2026-08-20 14:00:00'),
+            'departure_date' => '2026-08-20',
+            'departure_time' => '10:00',
+            'return_date' => '2026-08-20',
+            'return_time' => '14:00',
+            'passengers' => 4,
+            'trip_type' => 'one_way',
+            'assigned_provider_id' => $provider->id,
+            'assigned_aircraft_id' => $aircraft->id,
+            'assigned_aircraft_model' => $aircraft->model,
+            'currency' => 'USD',
+            'final_price' => 12100,
+            'status' => 'quoted',
+            'workflow_status' => 'cotizada',
+        ]);
+    }
+
+    private function createAcceptedQuote(SolicitudVuelo $flightRequest, Proveedor $provider, Aeronave $aircraft): Cotizacion
+    {
+        return Cotizacion::query()->create([
+            'flight_request_id' => $flightRequest->id,
+            'provider_id' => $provider->id,
+            'aircraft_id' => $aircraft->id,
+            'subtotal' => 10000,
+            'taxes' => 1600,
+            'fees' => 500,
+            'total' => 12100,
+            'currency' => 'USD',
+            'status' => 'accepted',
+            'expires_at' => now()->addDays(2),
+        ]);
+    }
+
+    private function previewPayload(string $departure = '2026-08-20 10:00:00', string $return = '2026-08-20 14:00:00'): array
+    {
+        return [
+            'origin' => 'MMMX',
+            'destination' => 'MMTO',
+            'departure_datetime' => $departure,
+            'return_datetime' => $return,
+            'passengers' => 4,
+            'trip_type' => 'one_way',
+        ];
+    }
+
+    private function invokePrivateWebhookMethod(string $methodName, object $payload): mixed
+    {
+        $method = new ReflectionMethod(StripeWebhookControlador::class, $methodName);
+        $method->setAccessible(true);
+
+        return $method->invoke(new StripeWebhookControlador(), $payload);
+    }
+}

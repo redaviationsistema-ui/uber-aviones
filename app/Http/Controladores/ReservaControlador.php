@@ -9,9 +9,11 @@ use App\Modelos\Cotizacion;
 use App\Modelos\Reserva;
 use App\Modelos\SolicitudVuelo;
 use App\Servicios\Aeronaves\AircraftAvailabilityService;
+use App\Servicios\Billing\FlightMembershipService;
 use App\Servicios\Contratos\ContratoPdfServicio;
 use App\Servicios\Contratos\ContratoReservaServicio;
 use App\Servicios\Contratos\DocuSignServicio;
+use App\Servicios\Operaciones\ReservationLifecycleService;
 use Barryvdh\DomPDF\Facade\Pdf;
 use JsonException;
 use Illuminate\Http\Exceptions\HttpResponseException;
@@ -25,7 +27,11 @@ use Throwable;
 
 class ReservaControlador extends ControladorBase
 {
-    public function __construct(private readonly AircraftAvailabilityService $aircraftAvailabilityService)
+    public function __construct(
+        private readonly AircraftAvailabilityService $aircraftAvailabilityService,
+        private readonly FlightMembershipService $flightMembershipService,
+        private readonly ReservationLifecycleService $reservationLifecycleService,
+    )
     {
     }
 
@@ -240,6 +246,7 @@ class ReservaControlador extends ControladorBase
             ])->save();
 
             $this->aircraftAvailabilityService->blockAircraftForPaidReservation($reservation->fresh(['flightRequest.legs', 'legs']));
+            $this->flightMembershipService->consumeBenefitsForReservation($reservation->fresh(['quote.flightRequest', 'quote.aircraft', 'client']));
         });
 
         return $reservation->fresh(['quote', 'aircraft', 'provider.user', 'flightRequest', 'payments']);
@@ -846,6 +853,56 @@ class ReservaControlador extends ControladorBase
             'contract' => $contract->fresh(),
             'payment_order' => $paymentOrder->fresh(),
             'reservation' => $reservation->fresh(['contract', 'payments']),
+        ]);
+    }
+
+    public function cancel(Request $request, mixed $reservation)
+    {
+        $reservation = $this->resolveReservation($reservation);
+        $this->authorizeReservationClient($request, $reservation);
+
+        $reservation->loadMissing(['flightRequest', 'latestPayment', 'contract', 'aircraft', 'provider']);
+        $data = $request->validate([
+            'reason' => ['nullable', 'string', 'max:1000'],
+        ]);
+
+        if (in_array(strtolower(trim((string) ($reservation->status ?? ''))), ['cancelled', 'canceled'], true)) {
+            return $this->ok([
+                'reservation' => $this->appendReservationStripeState($reservation->fresh(['flightRequest', 'payments', 'contract'])),
+                'flight_request' => $reservation->flightRequest
+                    ? $reservation->flightRequest->fresh(['reservation'])
+                    : null,
+            ]);
+        }
+
+        $flightRequest = $reservation->flightRequest;
+        abort_if(! $flightRequest, 409, 'La reserva no tiene una solicitud asociada para cancelarse.');
+
+        $effectiveDeparture = $flightRequest->departure_datetime
+            ?? $flightRequest->legs()->orderBy('departure_datetime')->value('departure_datetime');
+        $currentWorkflowStatus = strtolower(trim((string) ($flightRequest->workflow_status ?? '')));
+        $currentRequestStatus = strtolower(trim((string) ($flightRequest->status ?? '')));
+        $hasStarted = filled($effectiveDeparture) && now()->greaterThanOrEqualTo($effectiveDeparture);
+
+        abort_if(
+            $hasStarted
+                || in_array($currentWorkflowStatus, ['tracking_live', 'en curso', 'vuelo en curso'], true)
+                || in_array($currentRequestStatus, ['tracking_live', 'completed', 'finalizada'], true),
+            409,
+            'No puedes cancelar una reserva una vez iniciado el vuelo.'
+        );
+
+        $cancellationReason = trim((string) ($data['reason'] ?? '')) !== ''
+            ? trim((string) $data['reason'])
+            : 'Cancelada por el cliente desde el portal.';
+
+        $reservation = $this->reservationLifecycleService->cancelReservation($reservation, $cancellationReason, $request->user());
+
+        return $this->ok([
+            'reservation' => $this->appendReservationStripeState($reservation),
+            'flight_request' => $reservation->flightRequest
+                ? $reservation->flightRequest->fresh(['reservation'])
+                : null,
         ]);
     }
 

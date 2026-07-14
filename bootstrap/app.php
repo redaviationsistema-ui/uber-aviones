@@ -7,6 +7,8 @@ use App\Http\Intermediarios\TokenApiIntermediario;
 use App\Http\Intermediarios\AuditoriaIntermediario;
 use App\Consola\Comandos\ExpirarCotizacionesComando;
 use App\Consola\Comandos\ExpirarDemosComando;
+use App\Consola\Comandos\ExpirarAircraftHoldsComando;
+use App\Consola\Comandos\ExpirarSuscripcionesAeronavesComando;
 use App\Consola\Comandos\ExpirarSuscripcionesComando;
 use App\Consola\Comandos\LiberarPagosProveedorComando;
 use App\Http\Intermediarios\VerificarAccesoActivo;
@@ -22,6 +24,8 @@ use Illuminate\Foundation\Configuration\Middleware;
 use Illuminate\Http\Middleware\HandleCors;
 use Illuminate\Auth\AuthenticationException;
 use Illuminate\Http\Request;
+use Illuminate\Cache\RateLimiting\Limit;
+use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Validation\ValidationException;
 use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 
@@ -59,13 +63,33 @@ if (! function_exists('agregarCabecerasCorsApi')) {
         return $response;
     }
 }
-
 return Application::configure(basePath: dirname(__DIR__))
     ->withRouting(
          web: __DIR__.'/../routes/web.php',
         api: __DIR__.'/../routes/api.php',
         commands: __DIR__.'/../routes/console.php',
         health: '/up',
+        then: function () {
+            RateLimiter::for('auth.login', function (Request $request) {
+                return Limit::perMinute(5)->by(strtolower((string) $request->input('email')).'|'.$request->ip());
+            });
+
+            RateLimiter::for('auth.password-reset', function (Request $request) {
+                return Limit::perMinute(3)->by(strtolower((string) $request->input('email')).'|'.$request->ip());
+            });
+
+            RateLimiter::for('auth.password-reset-confirm', function (Request $request) {
+                return Limit::perMinute(5)->by(strtolower((string) $request->input('email')).'|'.$request->ip());
+            });
+
+            RateLimiter::for('auth.email-verification', function (Request $request) {
+                return Limit::perMinute(6)->by((string) $request->ip());
+            });
+
+            RateLimiter::for('auth.email-verification-notification', function (Request $request) {
+                return Limit::perMinute(3)->by((string) ($request->user()?->id ?: $request->ip()));
+            });
+        },
     )
     ->withBroadcasting(
         __DIR__.'/../routes/channels.php',
@@ -74,6 +98,8 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withCommands([
         ExpirarCotizacionesComando::class,
         ExpirarDemosComando::class,
+        ExpirarAircraftHoldsComando::class,
+        ExpirarSuscripcionesAeronavesComando::class,
         ExpirarSuscripcionesComando::class,
         LiberarPagosProveedorComando::class,
     ])
@@ -140,4 +166,3 @@ return Application::configure(basePath: dirname(__DIR__))
             ], $status));
         });
     })->create();
-

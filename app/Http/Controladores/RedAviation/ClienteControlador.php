@@ -224,7 +224,7 @@ class ClienteControlador extends ControladorBase
             ])
             ->whereIn('status', ['active', 'trial_active', 'aprobada', 'available', 'disponible'])
             ->when($passengers > 0, fn ($query) => $query->where('capacity', '>=', $passengers))
-            ->tap(fn ($query) => $this->aircraftAvailabilityService->excludeConflictingAircraft($query, $requestedStart, $requestedEnd))
+            ->tap(fn ($query) => $this->aircraftAvailabilityService->applyAvailabilityConstraints($query, $requestedStart, $requestedEnd))
             ->when($origin !== '', function ($query) use ($origin) {
                 $query->orderByRaw(
                     'case when upper(coalesce(base_airport, \'\')) = ? then 0 else 1 end',
@@ -394,7 +394,7 @@ class ClienteControlador extends ControladorBase
                 $query->whereNull('range_km')
                     ->orWhere('range_km', '>=', $maxLegDistanceKm);
             })
-            ->tap(fn ($query) => $this->aircraftAvailabilityService->excludeConflictingAircraft($query, $requestedStart, $requestedEnd))
+            ->tap(fn ($query) => $this->aircraftAvailabilityService->applyAvailabilityConstraints($query, $requestedStart, $requestedEnd))
             ->when(! empty($data['origin']), function ($query) use ($data) {
                 $origin = strtoupper(trim((string) $data['origin']));
                 $query->orderByRaw(

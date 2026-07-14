@@ -20,6 +20,28 @@ use Illuminate\Validation\Rule;
 
 class OperadorControlador extends ControladorBase
 {
+    private const PROVIDER_FORBIDDEN_AIRCRAFT_FIELDS = [
+        'provider_id',
+        'proveedor_id',
+        'status',
+        'is_active',
+        'estado',
+        'operational_status',
+        'billing_status',
+        'subscription_status',
+        'approved',
+        'review_status',
+        'validation_status',
+        'activated_at',
+        'subscription_started_at',
+        'subscription_ends_at',
+        'last_payment_at',
+        'stripe_*',
+        'billing_*',
+        'subscription_*',
+        'checkout_session_id',
+    ];
+
     private const DEFAULT_OPERATOR_AIRCRAFT_PAGE_SIZE = 24;
     private const MAX_OPERATOR_AIRCRAFT_PAGE_SIZE = 50;
 
@@ -107,13 +129,14 @@ class OperadorControlador extends ControladorBase
 
     public function storeAircraft(Request $request)
     {
-        abort_if(! $request->user()->provider_id, 422, 'El usuario proveedor no tiene provider_id asignado.');
+        $this->rejectForbiddenPayloadFields($request, self::PROVIDER_FORBIDDEN_AIRCRAFT_FIELDS, 'El proveedor no puede definir estados comerciales u operativos de la aeronave.');
+        $providerId = $this->resolvedProviderIdOrAbort($request);
 
         $data = $this->normalizeAircraftInput($request->validate($this->aircraftRules()));
         $user = $request->user()->loadMissing('activeSuscripcion.plan');
 
         $aeronave = Aeronave::create($data + [
-            'provider_id' => $request->user()->provider_id,
+            'provider_id' => $providerId,
             'status' => 'inactive',
             'billing_status' => 'pending_payment',
             'subscription_status' => 'inactive',
@@ -124,7 +147,7 @@ class OperadorControlador extends ControladorBase
             'aircraft' => $this->formatAircraftPayload(
                 $aeronave->fresh(['images', 'documents', 'suscripcionesAeronave' => fn ($q) => $q->where('status', 'active')->with('plan')->latest('id')]),
                 $user->activeSuscripcion?->plan,
-                Aeronave::where('provider_id', $request->user()->provider_id)->count(),
+                Aeronave::where('provider_id', $providerId)->count(),
                 true
             ),
             'message' => 'Aeronave registrada y enviada a revisión administrativa.',
@@ -138,9 +161,8 @@ class OperadorControlador extends ControladorBase
     {
         $user = $request->user()->loadMissing('activeSuscripcion.plan');
         $plan = $user->activeSuscripcion?->plan;
-        $providerId = $request->user()->provider_id;
+        $providerId = $this->resolvedProviderIdOrAbort($request);
         $perPage = min(max((int) $request->integer('per_page', self::DEFAULT_OPERATOR_AIRCRAFT_PAGE_SIZE), 1), self::MAX_OPERATOR_AIRCRAFT_PAGE_SIZE);
-        abort_if(! $providerId, 422, 'El usuario proveedor no tiene provider_id asignado.');
 
         $aircraft = Aeronave::query()
             ->select([
@@ -225,7 +247,7 @@ class OperadorControlador extends ControladorBase
 
     public function showAircraft(Request $request, Aeronave $aircraft)
     {
-        abort_if($aircraft->provider_id !== $request->user()->provider_id, 403);
+        abort_if($aircraft->provider_id !== $this->resolvedProviderIdOrAbort($request, 403), 403);
 
         $user = $request->user()->loadMissing('activeSuscripcion.plan');
 
@@ -238,7 +260,7 @@ class OperadorControlador extends ControladorBase
                     'suscripcionesAeronave' => fn ($q) => $q->where('status', 'active')->with('plan')->latest('id'),
                 ]),
                 $user->activeSuscripcion?->plan,
-                Aeronave::where('provider_id', $request->user()->provider_id)->count(),
+                Aeronave::where('provider_id', $this->resolvedProviderIdOrAbort($request))->count(),
                 true
             ),
         ]);
@@ -246,7 +268,8 @@ class OperadorControlador extends ControladorBase
 
     public function updateAircraft(Request $request, Aeronave $aircraft)
     {
-        abort_if($aircraft->provider_id !== $request->user()->provider_id, 403);
+        abort_if($aircraft->provider_id !== $this->resolvedProviderIdOrAbort($request, 403), 403);
+        $this->rejectForbiddenPayloadFields($request, self::PROVIDER_FORBIDDEN_AIRCRAFT_FIELDS, 'El proveedor no puede modificar estados comerciales u operativos de la aeronave.');
 
         $aircraft->update($this->normalizeAircraftInput($request->validate($this->aircraftRules(false, $aircraft)), $aircraft));
 
@@ -261,7 +284,7 @@ class OperadorControlador extends ControladorBase
                     'suscripcionesAeronave' => fn ($q) => $q->where('status', 'active')->with('plan')->latest('id'),
                 ]),
                 $user->activeSuscripcion?->plan,
-                Aeronave::where('provider_id', $request->user()->provider_id)->count(),
+                Aeronave::where('provider_id', $this->resolvedProviderIdOrAbort($request))->count(),
                 true
             ),
         ]);
@@ -278,7 +301,7 @@ class OperadorControlador extends ControladorBase
         ]);
 
         $aircraft = Aeronave::findOrFail($data['aircraft_id']);
-        abort_if($aircraft->provider_id !== $request->user()->provider_id, 403);
+        abort_if($aircraft->provider_id !== $this->resolvedProviderIdOrAbort($request, 403), 403);
 
         $availability = DisponibilidadAeronave::create($data);
 
@@ -287,8 +310,7 @@ class OperadorControlador extends ControladorBase
 
     public function requests(Request $request)
     {
-        $providerId = $request->user()->provider_id;
-        abort_if(! $providerId, 422, 'El usuario proveedor no tiene provider_id asignado.');
+        $providerId = $this->resolvedProviderIdOrAbort($request);
 
         $perPage = min(max((int) $request->integer('per_page', 20), 1), 100);
         $solicitudes = SolicitudVuelo::query()
@@ -374,8 +396,7 @@ class OperadorControlador extends ControladorBase
 
     public function accept(Request $request, SolicitudVuelo $flightRequest)
     {
-        $providerId = $request->user()->provider_id;
-        abort_if(! $providerId, 422, 'El usuario proveedor no tiene provider_id asignado.');
+        $providerId = $this->resolvedProviderIdOrAbort($request);
         $match = $flightRequest->matches()->where('provider_id', $providerId)->firstOrFail();
         $match->loadMissing('aircraft');
 
@@ -424,8 +445,7 @@ class OperadorControlador extends ControladorBase
 
     public function reject(Request $request, SolicitudVuelo $flightRequest)
     {
-        $providerId = $request->user()->provider_id;
-        abort_if(! $providerId, 422, 'El usuario proveedor no tiene provider_id asignado.');
+        $providerId = $this->resolvedProviderIdOrAbort($request);
         $match = $flightRequest->matches()->where('provider_id', $providerId)->firstOrFail();
         $match->update([
             'status' => 'rejected',
@@ -457,7 +477,7 @@ class OperadorControlador extends ControladorBase
 
     public function subscribeAircraft(Request $request, Aeronave $aircraft)
     {
-        abort_if($aircraft->provider_id !== $request->user()->provider_id, 403, 'No puedes suscribir aeronaves de otro proveedor.');
+        abort_if($aircraft->provider_id !== $this->resolvedProviderIdOrAbort($request, 403), 403, 'No puedes suscribir aeronaves de otro proveedor.');
         abort_if(! $request->user()->provider?->isApprovedForOperations(), 403, 'Proveedor pendiente de validacion por Admin.');
 
         $data = $request->validate([
@@ -485,7 +505,7 @@ class OperadorControlador extends ControladorBase
         ]);
 
         $user = $request->user()->loadMissing('activeSuscripcion.plan');
-        $count = Aeronave::where('provider_id', $request->user()->provider_id)->count();
+        $count = Aeronave::where('provider_id', $this->resolvedProviderIdOrAbort($request))->count();
 
         return $this->ok([
             'aircraft' => $this->formatAircraftPayload(
@@ -543,7 +563,6 @@ class OperadorControlador extends ControladorBase
             'repositioning_fee' => ['nullable', 'numeric', 'min:0'],
             'overnight_fee' => ['nullable', 'numeric', 'min:0'],
             'currency' => ['sometimes', 'string', 'size:3'],
-            'status' => ['sometimes', 'in:active,inactive,maintenance,blocked'],
             'security_filter' => ['nullable', 'string', 'max:50'],
             'security_score' => ['nullable', 'integer', 'min:0', 'max:100'],
             'airworthiness_status' => ['nullable', 'string', 'max:100'],

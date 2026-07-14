@@ -7,7 +7,11 @@ use App\Modelos\IdentityVerification;
 use App\Modelos\TokenApi;
 use App\Modelos\Proveedor;
 use App\Modelos\Usuario;
+use Illuminate\Auth\Events\PasswordReset;
+use Illuminate\Auth\Events\Verified;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Password;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -312,18 +316,100 @@ class AutenticacionControlador extends ControladorBase
             ->withoutCookie($this->authCookieName(), '/', env('SESSION_DOMAIN'));
     }
 
-    public function forgotPassword(Request $request)
+    public function forgotPassword(Request $request): JsonResponse
     {
-        $request->validate(['email' => ['required', 'email']]);
+        $data = $request->validate(['email' => ['required', 'email']]);
+
+        $status = Password::broker()->sendResetLink([
+            'email' => $data['email'],
+        ]);
+
+        $user = Usuario::query()->where('email', $data['email'])->first();
+        if ($user) {
+            $this->writeAuditEntry(
+                $user->id,
+                'password_reset_link_sent',
+                'auth',
+                'Se envio un enlace de recuperacion de contrasena.',
+                ['new_values' => ['email' => $data['email']]],
+                $request->ip(),
+                $request->userAgent(),
+            );
+        }
+
+        if ($status !== Password::RESET_LINK_SENT) {
+            return $this->ok(['message' => 'Si el correo existe, se enviaran instrucciones de recuperacion.']);
+        }
 
         return $this->ok(['message' => 'Si el correo existe, se enviaran instrucciones de recuperacion.']);
     }
 
-    public function verifyEmail(Request $request)
+    public function sendEmailVerificationNotification(Request $request): JsonResponse
     {
-        $request->user()->forceFill(['email_verified_at' => now()])->save();
+        $user = $request->user();
 
-        return $this->ok(['message' => 'Correo verificado correctamente.']);
+        if ($user->hasVerifiedEmail()) {
+            return $this->ok(['message' => 'El correo ya estaba verificado.']);
+        }
+
+        $user->sendEmailVerificationNotification();
+        $this->writeAudit($request, 'email_verification_link_sent', 'auth', 'Se envio un nuevo enlace de verificacion.', [
+            'new_values' => ['email' => $user->email],
+        ]);
+
+        return $this->ok(['message' => 'Enviamos un nuevo enlace de verificacion al correo registrado.']);
+    }
+
+    public function showResetPassword(Request $request, string $token): JsonResponse
+    {
+        $data = $request->validate([
+            'email' => ['required', 'email'],
+        ]);
+
+        $user = Usuario::query()->where('email', $data['email'])->first();
+        abort_if(! $user, 404, 'No encontramos un usuario para este enlace de recuperacion.');
+        abort_unless(Password::broker()->tokenExists($user, $token), 403, 'El enlace de recuperacion ya no es valido o expiro.');
+
+        return $this->ok([
+            'message' => 'Token de recuperacion valido.',
+            'token' => $token,
+            'email' => $data['email'],
+        ]);
+    }
+
+    public function verifyEmail(Request $request, int $id, string $hash): JsonResponse
+    {
+        abort_unless($request->hasValidSignature(), 403, 'El enlace de verificacion ya no es valido.');
+
+        $user = Usuario::query()->findOrFail($id);
+
+        abort_unless(hash_equals((string) $hash, sha1((string) $user->getEmailForVerification())), 403, 'El enlace de verificacion no corresponde a este usuario.');
+
+        if ($user->hasVerifiedEmail()) {
+            return $this->ok([
+                'message' => 'Correo verificado correctamente.',
+                'verified' => true,
+            ]);
+        }
+
+        if ($user->markEmailAsVerified()) {
+            event(new Verified($user));
+        }
+
+        $this->writeAuditEntry(
+            $user->id,
+            'email_verified',
+            'auth',
+            'Correo verificado correctamente.',
+            ['new_values' => ['email_verified_at' => $user->fresh()->email_verified_at]],
+            $request->ip(),
+            $request->userAgent(),
+        );
+
+        return $this->ok([
+            'message' => 'Correo verificado correctamente.',
+            'verified' => true,
+        ]);
     }
 
     public function updatePerfil(Request $request)
@@ -354,15 +440,49 @@ class AutenticacionControlador extends ControladorBase
         return $this->ok(['user' => $request->user()->fresh(['profile', 'provider', 'ownedProvider'])]);
     }
 
-    public function resetPassword(Request $request)
+    public function resetPassword(Request $request): JsonResponse
     {
-        $request->validate([
+        $data = $request->validate([
             'email' => ['required', 'email'],
             'token' => ['required', 'string'],
-            'password' => ['required', 'string', 'min:8'],
+            'password' => ['required', 'string', 'min:8', 'confirmed'],
         ]);
 
-        return $this->ok(['message' => 'Endpoint preparado para integrar broker de password reset.']);
+        $status = Password::broker()->reset(
+            $data,
+            function (Usuario $user, string $password): void {
+                $user->forceFill([
+                    'password' => $password,
+                    'remember_token' => Str::random(60),
+                ])->save();
+
+                $user->apiTokens()->delete();
+
+                event(new PasswordReset($user));
+            }
+        );
+
+        if ($status !== Password::PASSWORD_RESET) {
+            return response()->json([
+                'success' => false,
+                'message' => __($status),
+            ], 422);
+        }
+
+        $user = Usuario::query()->where('email', $data['email'])->first();
+        if ($user) {
+            $this->writeAuditEntry(
+                $user->id,
+                'password_reset_completed',
+                'auth',
+                'Contrasena restablecida correctamente.',
+                ['new_values' => ['email' => $data['email']]],
+                $request->ip(),
+                $request->userAgent(),
+            );
+        }
+
+        return $this->ok(['message' => 'Contrasena actualizada correctamente.']);
     }
 
     private function authenticatedResponse(Request $request, Usuario $user, int $status = 200, array $extra = [])
@@ -443,6 +563,8 @@ class AutenticacionControlador extends ControladorBase
             'id' => $user->id,
             'name' => $user->name,
             'email' => $user->email,
+            'email_verified_at' => $user->email_verified_at,
+            'has_verified_email' => $user->hasVerifiedEmail(),
             'phone' => $user->phone,
             'role' => $user->role,
             'operational_role' => $user->operational_role,

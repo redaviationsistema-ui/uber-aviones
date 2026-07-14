@@ -1,6 +1,7 @@
 <?php
 
 use Illuminate\Support\Facades\Route;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 
 Route::get('/', function () {
@@ -10,11 +11,33 @@ Route::get('/', function () {
 });
 
 Route::get('/health', function () {
+    $mailMailer = strtolower(trim((string) config('mail.default', '')));
+    $blockedMailers = collect(config('mail.production_blocked_mailers', ['log', 'array']))
+        ->map(fn ($mailer) => strtolower(trim((string) $mailer)))
+        ->filter()
+        ->values()
+        ->all();
+    $mailReady = ! (app()->environment('production') && in_array($mailMailer, $blockedMailers, true));
+
+    if (! $mailReady && ! app()->runningUnitTests()) {
+        Log::error('Mail production readiness check failed.', [
+            'mail_mailer' => $mailMailer,
+            'blocked_mailers' => $blockedMailers,
+            'environment' => app()->environment(),
+        ]);
+    }
+
     return response()->json([
-        'status' => 'ok',
+        'status' => $mailReady ? 'ok' : 'error',
         'app' => config('app.name'),
         'environment' => app()->environment(),
-    ]);
+        'checks' => [
+            'mail' => [
+                'ready' => $mailReady,
+                'mailer' => $mailMailer,
+            ],
+        ],
+    ], $mailReady ? 200 : 503);
 });
 
 Route::get('/public/storage/{path}', function (string $path) {

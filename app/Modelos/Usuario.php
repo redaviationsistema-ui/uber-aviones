@@ -7,6 +7,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
+use Illuminate\Contracts\Auth\MustVerifyEmail;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Illuminate\Support\Facades\Storage;
@@ -31,7 +32,7 @@ use Illuminate\Support\Facades\Storage;
  * @property-read \App\Modelos\Demo|null $demo
  * @property-read \App\Modelos\Suscripcion|null $activeSuscripcion
  */
-class Usuario extends Authenticatable
+class Usuario extends Authenticatable implements MustVerifyEmail
 {
     protected $table = 'users';
 
@@ -143,6 +144,11 @@ class Usuario extends Authenticatable
         return $this->hasMany(Suscripcion::class, 'user_id');
     }
 
+    public function flightMemberships(): HasMany
+    {
+        return $this->hasMany(FlightMembership::class, 'user_id');
+    }
+
     public function activeSuscripcion(): HasOne
     {
         return $this->hasOne(Suscripcion::class, 'user_id')
@@ -187,6 +193,16 @@ class Usuario extends Authenticatable
     public function identityVerifications(): HasMany
     {
         return $this->hasMany(IdentityVerification::class, 'user_id');
+    }
+
+    public function sendEmailVerificationNotification(): void
+    {
+        $this->notify(new \App\Notifications\Auth\VerifyEmailNotification());
+    }
+
+    public function sendPasswordResetNotification($token): void
+    {
+        $this->notify(new \App\Notifications\Auth\ResetPasswordNotification($token));
     }
 
     public function disponibilidadesSobrecargo(): HasMany
@@ -456,6 +472,19 @@ class Usuario extends Authenticatable
         return $this->resolvedProviderId();
     }
 
+    public function getProviderIdAttribute($value): ?int
+    {
+        if ($value) {
+            return (int) $value;
+        }
+
+        if ($this->relationLoaded('ownedProvider')) {
+            return $this->ownedProvider?->id;
+        }
+
+        return $value ? (int) $value : null;
+    }
+
     public function getBiometricSelfieUrlAttribute(): ?string
     {
         if (! $this->biometric_selfie_path) {
@@ -467,8 +496,9 @@ class Usuario extends Authenticatable
 
     public function resolvedProviderId(): ?int
     {
-        if ($this->provider_id) {
-            return (int) $this->provider_id;
+        $directProviderId = (int) ($this->getRawOriginal('provider_id') ?? 0);
+        if ($directProviderId > 0) {
+            return $directProviderId;
         }
 
         if ($this->relationLoaded('ownedProvider')) {

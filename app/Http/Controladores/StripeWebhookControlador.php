@@ -11,7 +11,10 @@ use App\Modelos\Suscripcion;
 use App\Modelos\SuscripcionAeronave;
 use App\Modelos\Usuario;
 use App\Servicios\Aeronaves\AircraftAvailabilityService;
+use App\Servicios\Billing\FlightMembershipService;
+use App\Servicios\Billing\ProviderAircraftSubscriptionService;
 use Carbon\Carbon;
+use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
@@ -24,10 +27,23 @@ use Throwable;
 class StripeWebhookControlador extends ControladorBase
 {
     private readonly AircraftAvailabilityService $aircraftAvailabilityService;
+    private readonly FlightMembershipService $flightMembershipService;
+    private readonly ProviderAircraftSubscriptionService $providerAircraftSubscriptionService;
 
-    public function __construct(?AircraftAvailabilityService $aircraftAvailabilityService = null)
+    private ?string $currentWebhookEventId = null;
+    private ?string $currentWebhookEventType = null;
+    private ?string $currentWebhookIpAddress = null;
+    private ?string $currentWebhookUserAgent = null;
+
+    public function __construct(
+        ?AircraftAvailabilityService $aircraftAvailabilityService = null,
+        ?FlightMembershipService $flightMembershipService = null,
+        ?ProviderAircraftSubscriptionService $providerAircraftSubscriptionService = null,
+    )
     {
         $this->aircraftAvailabilityService = $aircraftAvailabilityService ?? app(AircraftAvailabilityService::class);
+        $this->flightMembershipService = $flightMembershipService ?? app(FlightMembershipService::class);
+        $this->providerAircraftSubscriptionService = $providerAircraftSubscriptionService ?? app(ProviderAircraftSubscriptionService::class);
     }
 
     public function handle(Request $request)
@@ -50,6 +66,20 @@ class StripeWebhookControlador extends ControladorBase
                 'has_signature' => $signature !== '',
                 'secret_configured' => $secret !== '',
             ]);
+            $this->writeAuditEntry(
+                null,
+                'stripe_webhook_invalid_signature',
+                'reservation_payments',
+                'Stripe rechazo un webhook con firma invalida.',
+                ['new_values' => [
+                    'result' => 'rejected',
+                    'has_signature' => $signature !== '',
+                    'secret_configured' => $secret !== '',
+                    'error' => $exception->getMessage(),
+                ]],
+                $request->ip(),
+                $request->userAgent(),
+            );
             return response()->json([
                 'success' => false,
                 'message' => 'Webhook invalido',
@@ -61,66 +91,76 @@ class StripeWebhookControlador extends ControladorBase
             'event_type' => $event->type,
         ]);
 
-        $existing = DB::table('webhook_events')
-            ->where('provider', 'stripe')
-            ->where('event_id', $event->id)
-            ->first();
-
-        if ($existing && $existing->status === 'processed') {
-            return response()->json(['success' => true, 'received' => true]);
-        }
+        $this->currentWebhookEventId = (string) $event->id;
+        $this->currentWebhookEventType = (string) $event->type;
+        $this->currentWebhookIpAddress = $request->ip();
+        $this->currentWebhookUserAgent = $request->userAgent();
 
         $stripeCreatedAtUtc = Carbon::createFromTimestamp((int) $event->created)->utc();
         $stripeCreatedAtLocal = $stripeCreatedAtUtc->copy()->setTimezone(config('app.timezone', 'UTC'));
 
-        if (! $existing) {
-            DB::table('webhook_events')->insert([
-                'provider' => 'stripe',
-                'event_id' => $event->id,
-                'event_type' => $event->type,
-                'payload' => $payload,
-                'stripe_created_at_utc' => $stripeCreatedAtUtc,
-                'stripe_created_at_local' => $stripeCreatedAtLocal,
-                'status' => 'received',
-                'created_at' => now(),
-                'updated_at' => now(),
-            ]);
-        } else {
-            DB::table('webhook_events')
-                ->where('provider', 'stripe')
-                ->where('event_id', $event->id)
-                ->update([
-                    'stripe_created_at_utc' => $stripeCreatedAtUtc,
-                    'stripe_created_at_local' => $stripeCreatedAtLocal,
-                    'updated_at' => now(),
-                ]);
-        }
-
         try {
-            match ($event->type) {
-                'checkout.session.completed' => $this->handleCheckoutCompleted($event->data->object),
-                'checkout.session.async_payment_succeeded' => $this->handleCheckoutCompleted($event->data->object),
-                'checkout.session.expired' => $this->handleCheckoutExpired($event->data->object),
-                'payment_intent.succeeded' => $this->handlePaymentIntentSucceeded($event->data->object),
-                'payment_intent.payment_failed' => $this->handlePaymentFailed($event->data->object),
-                'payment_intent.canceled' => $this->handlePaymentCanceled($event->data->object),
-                'charge.refunded' => $this->handleChargeRefunded($event->data->object),
-                'invoice.payment_succeeded', 'invoice.paid' => $this->handleInvoicePaid($event->data->object),
-                'invoice.payment_failed' => $this->handleInvoicePaymentFailed($event->data->object),
-                'customer.subscription.updated' => $this->handleCustomerSubscriptionUpdated($event->data->object),
-                'customer.subscription.deleted' => $this->handleCustomerSubscriptionDeleted($event->data->object),
-                default => null,
-            };
+            DB::transaction(function () use ($event, $payload, $stripeCreatedAtUtc, $stripeCreatedAtLocal) {
+                try {
+                    DB::table('webhook_events')->insert([
+                        'provider' => 'stripe',
+                        'event_id' => $event->id,
+                        'event_type' => $event->type,
+                        'payload' => $payload,
+                        'stripe_created_at_utc' => $stripeCreatedAtUtc,
+                        'stripe_created_at_local' => $stripeCreatedAtLocal,
+                        'status' => 'received',
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+                } catch (QueryException $exception) {
+                    $existing = DB::table('webhook_events')
+                        ->where('provider', 'stripe')
+                        ->where('event_id', $event->id)
+                        ->first();
 
-            DB::table('webhook_events')
-                ->where('provider', 'stripe')
-                ->where('event_id', $event->id)
-                ->update([
-                    'status' => 'processed',
-                    'processed_at' => now(),
-                    'updated_at' => now(),
-                    'error_message' => null,
-                ]);
+                    if ($existing) {
+                        $this->auditWebhookAction(
+                            null,
+                            'stripe_webhook_duplicate_ignored',
+                            'Stripe ignoro un evento duplicado ya procesado.',
+                            [
+                                'result' => 'ignored',
+                                'event_status' => (string) $existing->status,
+                            ],
+                        );
+
+                        return;
+                    }
+
+                    throw $exception;
+                }
+
+                match ($event->type) {
+                    'checkout.session.completed' => $this->handleCheckoutCompleted($event->data->object),
+                    'checkout.session.async_payment_succeeded' => $this->handleCheckoutCompleted($event->data->object),
+                    'checkout.session.expired' => $this->handleCheckoutExpired($event->data->object),
+                    'payment_intent.succeeded' => $this->handlePaymentIntentSucceeded($event->data->object),
+                    'payment_intent.payment_failed' => $this->handlePaymentFailed($event->data->object),
+                    'payment_intent.canceled' => $this->handlePaymentCanceled($event->data->object),
+                    'charge.refunded' => $this->handleChargeRefunded($event->data->object),
+                    'invoice.payment_succeeded', 'invoice.paid' => $this->handleInvoicePaid($event->data->object),
+                    'invoice.payment_failed' => $this->handleInvoicePaymentFailed($event->data->object),
+                    'customer.subscription.updated' => $this->handleCustomerSubscriptionUpdated($event->data->object),
+                    'customer.subscription.deleted' => $this->handleCustomerSubscriptionDeleted($event->data->object),
+                    default => null,
+                };
+
+                DB::table('webhook_events')
+                    ->where('provider', 'stripe')
+                    ->where('event_id', $event->id)
+                    ->update([
+                        'status' => 'processed',
+                        'processed_at' => now(),
+                        'updated_at' => now(),
+                        'error_message' => null,
+                    ]);
+            });
         } catch (Throwable $exception) {
             Log::error('Stripe webhook fallo al procesarse.', [
                 'event_id' => $event->id,
@@ -145,7 +185,12 @@ class StripeWebhookControlador extends ControladorBase
     private function handleCheckoutCompleted(object $session): void
     {
         $metadata = $this->extractMetadata($session);
-        $context = $metadata['billing_context'] ?? null;
+        $context = $metadata['billing_context'] ?? $metadata['context'] ?? null;
+
+        if ($this->flightMembershipService->isFlightMembershipContext($metadata, (string) ($session->subscription ?? ''), (string) ($session->id ?? ''))) {
+            $this->handleFlightMembershipCheckoutCompleted($session, $metadata);
+            return;
+        }
 
         if ($context === 'client_access_subscription') {
             $this->handleClientAccessSubscriptionCheckoutCompleted($session, $metadata);
@@ -178,6 +223,16 @@ class StripeWebhookControlador extends ControladorBase
             Log::warning('Stripe checkout.session.completed sin flight_request_id.', [
                 'checkout_session_id' => (string) ($session->id ?? ''),
             ]);
+            $this->auditWebhookAction(
+                null,
+                'stripe_webhook_invalid_metadata',
+                'Stripe envio un checkout completado sin metadata valida de reserva.',
+                [
+                    'checkout_session_id' => (string) ($session->id ?? ''),
+                    'payment_intent_id' => (string) ($session->payment_intent ?? ''),
+                    'result' => 'ignored',
+                ],
+            );
             return;
         }
 
@@ -188,6 +243,17 @@ class StripeWebhookControlador extends ControladorBase
                 'payment_intent_id' => (string) ($session->payment_intent ?? ''),
                 'flight_request_id' => $flightRequestId,
             ]);
+            $this->auditWebhookAction(
+                null,
+                'stripe_webhook_invalid_metadata',
+                'Stripe envio un checkout completado para una solicitud inexistente.',
+                [
+                    'checkout_session_id' => (string) ($session->id ?? ''),
+                    'payment_intent_id' => (string) ($session->payment_intent ?? ''),
+                    'flight_request_id' => $flightRequestId,
+                    'result' => 'ignored',
+                ],
+            );
             return;
         }
 
@@ -233,6 +299,7 @@ class StripeWebhookControlador extends ControladorBase
 
             if ($reservation) {
                 $this->aircraftAvailabilityService->blockAircraftForPaidReservation($reservation->fresh(['flightRequest.legs', 'legs']));
+                $this->flightMembershipService->consumeBenefitsForReservation($reservation->fresh(['quote.flightRequest', 'quote.aircraft', 'client']));
             }
         });
 
@@ -245,6 +312,21 @@ class StripeWebhookControlador extends ControladorBase
             'booking_status' => 'confirmed',
             'status' => 'confirmed',
         ]);
+
+        $this->auditWebhookAction(
+            (int) $flightRequest->client_id,
+            'stripe_webhook_payment_confirmed',
+            'Stripe confirmo el pago de una reserva de cliente via checkout.session.completed.',
+            [
+                'flight_request_id' => $flightRequestId,
+                'reservation_id' => $flightRequest->reservation()->latest('id')->value('id'),
+                'checkout_session_id' => (string) ($session->id ?? ''),
+                'payment_intent_id' => (string) ($session->payment_intent ?? ''),
+                'payment_status' => 'paid',
+                'reservation_status' => 'confirmed',
+                'result' => 'applied',
+            ],
+        );
     }
 
     private function handleCheckoutExpired(object $session): void
@@ -321,7 +403,7 @@ class StripeWebhookControlador extends ControladorBase
     private function handlePaymentIntentSucceeded(object $paymentIntent): void
     {
         $metadata = $this->extractMetadata($paymentIntent);
-        $context = $metadata['billing_context'] ?? null;
+        $context = $metadata['billing_context'] ?? $metadata['context'] ?? null;
 
         if ($context === 'client_access') {
             $this->markAccessPaymentPaid(
@@ -343,6 +425,15 @@ class StripeWebhookControlador extends ControladorBase
             Log::warning('Stripe payment_intent.succeeded sin flight_request_id.', [
                 'payment_intent_id' => (string) ($paymentIntent->id ?? ''),
             ]);
+            $this->auditWebhookAction(
+                null,
+                'stripe_webhook_invalid_metadata',
+                'Stripe envio un payment_intent exitoso sin metadata valida de reserva.',
+                [
+                    'payment_intent_id' => (string) ($paymentIntent->id ?? ''),
+                    'result' => 'ignored',
+                ],
+            );
             return;
         }
 
@@ -352,6 +443,16 @@ class StripeWebhookControlador extends ControladorBase
                 'payment_intent_id' => (string) ($paymentIntent->id ?? ''),
                 'flight_request_id' => $flightRequestId,
             ]);
+            $this->auditWebhookAction(
+                null,
+                'stripe_webhook_invalid_metadata',
+                'Stripe envio un payment_intent exitoso para una solicitud inexistente.',
+                [
+                    'payment_intent_id' => (string) ($paymentIntent->id ?? ''),
+                    'flight_request_id' => $flightRequestId,
+                    'result' => 'ignored',
+                ],
+            );
             return;
         }
 
@@ -402,6 +503,7 @@ class StripeWebhookControlador extends ControladorBase
 
             if ($reservation) {
                 $this->aircraftAvailabilityService->blockAircraftForPaidReservation($reservation->fresh(['flightRequest.legs', 'legs']));
+                $this->flightMembershipService->consumeBenefitsForReservation($reservation->fresh(['quote.flightRequest', 'quote.aircraft', 'client']));
             }
         });
 
@@ -413,6 +515,21 @@ class StripeWebhookControlador extends ControladorBase
             'booking_status' => 'confirmed',
             'status' => 'confirmed',
         ]);
+
+        $this->auditWebhookAction(
+            (int) $flightRequest->client_id,
+            'stripe_webhook_payment_confirmed',
+            'Stripe confirmo el pago de una reserva de cliente via payment_intent.succeeded.',
+            [
+                'flight_request_id' => $flightRequestId,
+                'reservation_id' => $flightRequest->reservation()->latest('id')->value('id'),
+                'payment_intent_id' => (string) ($paymentIntent->id ?? ''),
+                'checkout_session_id' => (string) ($metadata['checkout_session_id'] ?? ''),
+                'payment_status' => 'paid',
+                'reservation_status' => 'confirmed',
+                'result' => 'applied',
+            ],
+        );
     }
 
     private function handlePaymentFailed(object $paymentIntent): void
@@ -499,10 +616,36 @@ class StripeWebhookControlador extends ControladorBase
             return;
         }
 
+        $flightRequestId = (int) ($metadata['flight_request_id'] ?? 0);
+        $refundedAmount = ((int) ($charge->amount_refunded ?? 0)) / 100;
+        $originalAmount = ((int) ($charge->amount ?? 0)) / 100;
+        $isPartialRefund = $refundedAmount > 0 && $originalAmount > 0 && $refundedAmount < $originalAmount;
+
+        if ($isPartialRefund) {
+            $clientId = SolicitudVuelo::query()
+                ->whereKey($flightRequestId)
+                ->value('client_id');
+
+            $this->auditWebhookAction(
+                userId: (int) ($clientId ?? 0),
+                action: 'stripe_webhook_partial_refund_ignored',
+                description: 'Stripe reporto un reembolso parcial fuera de alcance para reservas cliente.',
+                newValues: [
+                    'payment_intent_id' => (string) ($charge->payment_intent ?? ''),
+                    'flight_request_id' => $flightRequestId,
+                    'amount_refunded' => $refundedAmount,
+                    'amount' => $originalAmount,
+                    'result' => 'ignored',
+                ],
+            );
+
+            return;
+        }
+
         $this->markFlightRequestPaymentFailure(
             checkoutSessionId: '',
             paymentIntentId: (string) ($charge->payment_intent ?? ''),
-            flightRequestId: (int) ($metadata['flight_request_id'] ?? 0),
+            flightRequestId: $flightRequestId,
             status: 'refunded',
             paymentStatus: 'refunded',
             reason: 'Pago reembolsado en Stripe.',
@@ -512,6 +655,11 @@ class StripeWebhookControlador extends ControladorBase
     private function handleInvoicePaid(object $invoice): void
     {
         $metadata = $this->extractMetadata($invoice);
+        if ($this->flightMembershipService->isFlightMembershipContext($metadata, (string) ($invoice->subscription ?? ''), '')) {
+            $this->handleFlightMembershipInvoicePaid($invoice, $metadata);
+            return;
+        }
+
         if ($this->isClientAccessSubscriptionBillingContext($metadata)) {
             $this->handleClientAccessSubscriptionInvoicePaid($invoice, $metadata);
             return;
@@ -602,6 +750,11 @@ class StripeWebhookControlador extends ControladorBase
     private function handleInvoicePaymentFailed(object $invoice): void
     {
         $metadata = $this->extractMetadata($invoice);
+        if ($this->flightMembershipService->isFlightMembershipContext($metadata, (string) ($invoice->subscription ?? ''), '')) {
+            $this->handleFlightMembershipInvoiceFailed($invoice, $metadata);
+            return;
+        }
+
         if ($this->isClientAccessSubscriptionBillingContext($metadata)) {
             $this->handleClientAccessSubscriptionInvoiceFailed($invoice, $metadata);
             return;
@@ -840,6 +993,21 @@ class StripeWebhookControlador extends ControladorBase
         );
     }
 
+    private function handleFlightMembershipCheckoutCompleted(object $session, array $metadata): void
+    {
+        $this->flightMembershipService->syncCheckoutCompleted($session, $metadata);
+    }
+
+    private function handleFlightMembershipInvoicePaid(object $invoice, array $metadata): void
+    {
+        $this->flightMembershipService->handleInvoicePaid($invoice, $metadata);
+    }
+
+    private function handleFlightMembershipInvoiceFailed(object $invoice, array $metadata): void
+    {
+        $this->flightMembershipService->handleInvoicePaymentFailed($invoice, $metadata);
+    }
+
     private function handleAircraftBillingCheckoutCompleted(object $session, array $metadata): void
     {
         $payment = $this->findAircraftBillingPayment(
@@ -929,6 +1097,12 @@ class StripeWebhookControlador extends ControladorBase
         $metadata = $this->extractMetadata($subscriptionPayload);
         $providerSubscriptionId = (string) ($subscriptionPayload->id ?? '');
         $providerCustomerId = (string) ($subscriptionPayload->customer ?? '');
+
+        if ($this->flightMembershipService->isFlightMembershipContext($metadata, $providerSubscriptionId, '')) {
+            $this->flightMembershipService->handleSubscriptionUpdated($subscriptionPayload, $metadata);
+            return;
+        }
+
         $aircraftPayment = $this->findAircraftBillingPayment(
             paymentId: (int) ($metadata['aircraft_billing_payment_id'] ?? 0),
             providerSubscriptionId: $providerSubscriptionId,
@@ -1066,6 +1240,12 @@ class StripeWebhookControlador extends ControladorBase
         $metadata = $this->extractMetadata($subscriptionPayload);
         $providerSubscriptionId = (string) ($subscriptionPayload->id ?? '');
         $providerCustomerId = (string) ($subscriptionPayload->customer ?? '');
+
+        if ($this->flightMembershipService->isFlightMembershipContext($metadata, $providerSubscriptionId, '')) {
+            $this->flightMembershipService->handleSubscriptionDeleted($subscriptionPayload, $metadata);
+            return;
+        }
+
         $aircraftPayment = $this->findAircraftBillingPayment(
             paymentId: (int) ($metadata['aircraft_billing_payment_id'] ?? 0),
             providerSubscriptionId: $providerSubscriptionId,
@@ -1344,52 +1524,20 @@ class StripeWebhookControlador extends ControladorBase
         ?string $periodEnd,
         int $userId,
     ): void {
-        DB::transaction(function () use ($payment, $providerPaymentId, $providerCustomerId, $providerInvoiceId, $checkoutSessionId, $subscriptionId, $amount, $currency, $gatewayPayload, $periodStart, $periodEnd, $userId) {
-            $payment->update([
-                'status' => 'paid',
-                'provider_payment_id' => $providerPaymentId ?: $payment->provider_payment_id,
-                'provider_customer_id' => $providerCustomerId ?: $payment->provider_customer_id,
-                'provider_invoice_id' => $providerInvoiceId ?: $payment->provider_invoice_id,
-                'provider_checkout_id' => $checkoutSessionId ?: $payment->provider_checkout_id,
-                'provider_subscription_id' => $subscriptionId ?: $payment->provider_subscription_id,
-                'amount' => $amount > 0 ? $amount : $payment->amount,
-                'currency' => $currency ?: $payment->currency,
-                'billing_period_start' => $periodStart ?: $payment->billing_period_start,
-                'billing_period_end' => $periodEnd ?: $payment->billing_period_end,
-                'paid_at' => now(),
-                'gateway_response' => $gatewayPayload,
-            ]);
-
-            DB::table('aircraft')->where('id', $payment->aircraft_id)->update([
-                'billing_status' => 'active',
-                'billing_plan_id' => $payment->billing_plan_id,
-                'subscription_status' => 'active',
-                'subscription_started_at' => $periodStart ? Carbon::parse($periodStart)->startOfDay() : now(),
-                'subscription_ends_at' => $periodEnd ? Carbon::parse($periodEnd)->endOfDay() : now()->addMonth(),
-                'last_payment_at' => now(),
-                'status' => 'active',
-                'updated_at' => now(),
-            ]);
-
-            SuscripcionAeronave::updateOrCreate(
-                ['aircraft_id' => $payment->aircraft_id, 'plan_id' => $payment->billing_plan_id],
-                [
-                    'user_id' => $userId > 0 ? $userId : DB::table('providers')->where('id', $payment->provider_id)->value('user_id'),
-                    'status' => 'active',
-                    'payment_provider' => 'stripe',
-                    'payment_reference' => $subscriptionId ?: $payment->provider_subscription_id,
-                    'provider_checkout_id' => $checkoutSessionId ?: $payment->provider_checkout_id,
-                    'provider_subscription_id' => $subscriptionId ?: $payment->provider_subscription_id,
-                    'provider_customer_id' => $providerCustomerId ?: $payment->provider_customer_id,
-                    'provider_invoice_id' => $providerInvoiceId ?: $payment->provider_invoice_id,
-                    'paid_at' => now(),
-                    'starts_at' => $periodStart ? Carbon::parse($periodStart)->startOfDay() : now(),
-                    'ends_at' => $periodEnd ? Carbon::parse($periodEnd)->endOfDay() : now()->addMonth(),
-                    'cancelled_at' => null,
-                    'updated_at' => now(),
-                ]
-            );
-        });
+        $this->providerAircraftSubscriptionService->syncPaidSubscription(
+            payment: $payment,
+            providerPaymentId: $providerPaymentId,
+            providerCustomerId: $providerCustomerId,
+            providerInvoiceId: $providerInvoiceId,
+            checkoutSessionId: $checkoutSessionId,
+            subscriptionId: $subscriptionId,
+            amount: $amount,
+            currency: $currency,
+            gatewayPayload: $gatewayPayload,
+            periodStart: $periodStart,
+            periodEnd: $periodEnd,
+            userId: $userId,
+        );
     }
 
     private function syncAircraftBillingCheckoutState(
@@ -1403,44 +1551,17 @@ class StripeWebhookControlador extends ControladorBase
         string $subscriptionStatus,
         int $userId,
     ): void {
-        DB::transaction(function () use ($payment, $gatewayPayload, $providerCheckoutId, $providerSubscriptionId, $providerCustomerId, $providerInvoiceId, $providerPaymentId, $subscriptionStatus, $userId) {
-            $normalizedSubscriptionStatus = trim(strtolower($subscriptionStatus)) ?: 'pending';
-            $statusForPayment = in_array($normalizedSubscriptionStatus, ['past_due', 'unpaid', 'incomplete_expired', 'canceled'], true)
-                ? $normalizedSubscriptionStatus
-                : 'pending';
-
-            $payment->update([
-                'status' => $statusForPayment,
-                'provider_payment_id' => $providerPaymentId ?: $payment->provider_payment_id,
-                'provider_customer_id' => $providerCustomerId ?: $payment->provider_customer_id,
-                'provider_invoice_id' => $providerInvoiceId ?: $payment->provider_invoice_id,
-                'provider_checkout_id' => $providerCheckoutId ?: $payment->provider_checkout_id,
-                'provider_subscription_id' => $providerSubscriptionId ?: $payment->provider_subscription_id,
-                'gateway_response' => $gatewayPayload,
-            ]);
-
-            DB::table('aircraft')->where('id', $payment->aircraft_id)->update([
-                'billing_status' => in_array($normalizedSubscriptionStatus, ['past_due', 'unpaid', 'incomplete_expired'], true) ? 'past_due' : 'pending_payment',
-                'billing_plan_id' => $payment->billing_plan_id,
-                'subscription_status' => $normalizedSubscriptionStatus,
-                'updated_at' => now(),
-            ]);
-
-            SuscripcionAeronave::updateOrCreate(
-                ['aircraft_id' => $payment->aircraft_id, 'plan_id' => $payment->billing_plan_id],
-                [
-                    'user_id' => $userId > 0 ? $userId : DB::table('providers')->where('id', $payment->provider_id)->value('user_id'),
-                    'status' => $normalizedSubscriptionStatus,
-                    'payment_provider' => 'stripe',
-                    'payment_reference' => $providerSubscriptionId ?: ($providerPaymentId ?: $providerCheckoutId),
-                    'provider_checkout_id' => $providerCheckoutId ?: $payment->provider_checkout_id,
-                    'provider_subscription_id' => $providerSubscriptionId ?: $payment->provider_subscription_id,
-                    'provider_customer_id' => $providerCustomerId ?: $payment->provider_customer_id,
-                    'provider_invoice_id' => $providerInvoiceId ?: $payment->provider_invoice_id,
-                    'updated_at' => now(),
-                ]
-            );
-        });
+        $this->providerAircraftSubscriptionService->syncCheckoutState(
+            payment: $payment,
+            gatewayPayload: $gatewayPayload,
+            providerCheckoutId: $providerCheckoutId,
+            providerSubscriptionId: $providerSubscriptionId,
+            providerCustomerId: $providerCustomerId,
+            providerInvoiceId: $providerInvoiceId,
+            providerPaymentId: $providerPaymentId,
+            subscriptionStatus: $subscriptionStatus,
+            userId: $userId,
+        );
     }
 
     private function markAircraftBillingFailed(
@@ -1456,44 +1577,15 @@ class StripeWebhookControlador extends ControladorBase
             return;
         }
 
-        DB::transaction(function () use ($payment, $aircraftId, $subscriptionStatus, $gatewayPayload, $providerSubscriptionId, $providerCustomerId, $providerInvoiceId) {
-            if ($payment) {
-                $payment->update([
-                    'status' => $subscriptionStatus,
-                    'provider_subscription_id' => $providerSubscriptionId ?: $payment->provider_subscription_id,
-                    'provider_customer_id' => $providerCustomerId ?: $payment->provider_customer_id,
-                    'provider_invoice_id' => $providerInvoiceId ?: $payment->provider_invoice_id,
-                    'gateway_response' => $gatewayPayload,
-                ]);
-            }
-
-            $resolvedAircraftId = $aircraftId > 0 ? $aircraftId : (int) $payment?->aircraft_id;
-            if ($resolvedAircraftId > 0) {
-                DB::table('aircraft')->where('id', $resolvedAircraftId)->update([
-                    'billing_status' => in_array($subscriptionStatus, ['cancelled', 'canceled'], true) ? 'cancelled' : 'past_due',
-                    'subscription_status' => $subscriptionStatus,
-                    'updated_at' => now(),
-                ]);
-            }
-
-            if ($payment) {
-                SuscripcionAeronave::updateOrCreate(
-                    ['aircraft_id' => $payment->aircraft_id, 'plan_id' => $payment->billing_plan_id],
-                    [
-                        'user_id' => DB::table('providers')->where('id', $payment->provider_id)->value('user_id'),
-                        'status' => $subscriptionStatus,
-                        'payment_provider' => 'stripe',
-                        'payment_reference' => $providerSubscriptionId ?: ($payment->provider_subscription_id ?: $payment->provider_payment_id),
-                        'provider_checkout_id' => $payment->provider_checkout_id,
-                        'provider_subscription_id' => $providerSubscriptionId ?: $payment->provider_subscription_id,
-                        'provider_customer_id' => $providerCustomerId ?: $payment->provider_customer_id,
-                        'provider_invoice_id' => $providerInvoiceId ?: $payment->provider_invoice_id,
-                        'cancelled_at' => in_array($subscriptionStatus, ['cancelled', 'canceled'], true) ? now() : null,
-                        'updated_at' => now(),
-                    ]
-                );
-            }
-        });
+        $this->providerAircraftSubscriptionService->syncFailedSubscription(
+            payment: $payment,
+            aircraftId: $aircraftId,
+            subscriptionStatus: $subscriptionStatus,
+            gatewayPayload: $gatewayPayload,
+            providerSubscriptionId: $providerSubscriptionId,
+            providerCustomerId: $providerCustomerId,
+            providerInvoiceId: $providerInvoiceId,
+        );
     }
 
     private function handleAircraftBillingSubscriptionUpdated(
@@ -1519,48 +1611,19 @@ class StripeWebhookControlador extends ControladorBase
             return;
         }
 
-        if (in_array($status, ['active', 'trialing'], true)) {
-            $this->markAircraftBillingPaid(
-                payment: $payment,
-                providerPaymentId: '',
-                providerCustomerId: $customerId,
-                providerInvoiceId: '',
-                checkoutSessionId: $payment->provider_checkout_id ?? '',
-                subscriptionId: $subscriptionId,
-                amount: (float) $payment->amount,
-                currency: (string) $payment->currency,
-                gatewayPayload: json_decode(json_encode($subscriptionPayload), true),
-                periodStart: $periodStart,
-                periodEnd: $periodEnd,
-                userId: (int) ($metadata['user_id'] ?? 0),
-            );
-
-            return;
-        }
-
-        if ($status === 'past_due') {
-            $this->markAircraftBillingFailed(
-                payment: $payment,
-                aircraftId: (int) $payment->aircraft_id,
-                subscriptionStatus: 'past_due',
-                gatewayPayload: json_decode(json_encode($subscriptionPayload), true),
-                providerSubscriptionId: $subscriptionId,
-                providerCustomerId: $customerId,
-            );
-
-            return;
-        }
-
-        if (in_array($status, ['unpaid', 'incomplete_expired', 'paused'], true)) {
-            $this->markAircraftBillingFailed(
-                payment: $payment,
-                aircraftId: (int) $payment->aircraft_id,
-                subscriptionStatus: $status,
-                gatewayPayload: json_decode(json_encode($subscriptionPayload), true),
-                providerSubscriptionId: $subscriptionId,
-                providerCustomerId: $customerId,
-            );
-        }
+        $this->providerAircraftSubscriptionService->syncSubscriptionUpdate(
+            payment: $payment,
+            stripeStatus: $status,
+            customerId: $customerId,
+            periodStart: $periodStart,
+            periodEnd: $periodEnd,
+            cancelAtPeriodEnd: (bool) ($subscriptionPayload->cancel_at_period_end ?? false),
+            cancelledAt: ! empty($subscriptionPayload->canceled_at)
+                ? Carbon::createFromTimestamp((int) $subscriptionPayload->canceled_at)
+                : null,
+            payload: json_decode(json_encode($subscriptionPayload), true),
+            userId: (int) ($metadata['user_id'] ?? 0),
+        );
     }
 
     private function handleAircraftBillingSubscriptionDeleted(
@@ -1845,6 +1908,33 @@ class StripeWebhookControlador extends ControladorBase
         return Carbon::createFromTimestamp((int) $timestamp)->toDateString();
     }
 
+    private function auditWebhookAction(
+        ?int $userId,
+        string $action,
+        string $description,
+        array $newValues = [],
+        ?array $oldValues = null,
+    ): void {
+        $payload = array_filter([
+            'stripe_event_id' => $this->currentWebhookEventId,
+            'stripe_event_type' => $this->currentWebhookEventType,
+            ...$newValues,
+        ], static fn ($value) => $value !== null && $value !== '');
+
+        $this->writeAuditEntry(
+            $userId,
+            $action,
+            'reservation_payments',
+            $description,
+            [
+                'old_values' => $oldValues,
+                'new_values' => $payload,
+            ],
+            $this->currentWebhookIpAddress,
+            $this->currentWebhookUserAgent,
+        );
+    }
+
     private function markFlightRequestPaymentFailure(
         string $checkoutSessionId,
         ?string $paymentIntentId,
@@ -1862,6 +1952,16 @@ class StripeWebhookControlador extends ControladorBase
         } elseif ($paymentIntentId) {
             $paymentQuery->where('stripe_payment_intent_id', $paymentIntentId);
         } else {
+            $this->auditWebhookAction(
+                null,
+                'stripe_webhook_invalid_metadata',
+                'Stripe envio un evento de fallo sin referencias suficientes para ubicar la reserva.',
+                [
+                    'checkout_session_id' => $checkoutSessionId,
+                    'payment_intent_id' => $paymentIntentId,
+                    'result' => 'ignored',
+                ],
+            );
             return;
         }
 
@@ -1869,6 +1969,53 @@ class StripeWebhookControlador extends ControladorBase
         $flightRequest = $flightRequestId > 0
             ? SolicitudVuelo::find($flightRequestId)
             : ($payment?->flightRequest);
+        $reservation = $flightRequest?->reservation()->latest('id')->first() ?? $payment?->reservation;
+
+        if (! $payment && ! $flightRequest) {
+            $this->auditWebhookAction(
+                null,
+                'stripe_webhook_invalid_metadata',
+                'Stripe envio un evento de fallo para una reserva inexistente.',
+                [
+                    'checkout_session_id' => $checkoutSessionId,
+                    'payment_intent_id' => $paymentIntentId,
+                    'flight_request_id' => $flightRequestId,
+                    'result' => 'ignored',
+                ],
+            );
+            return;
+        }
+
+        $oldValues = [
+            'payment_status' => $payment?->status,
+            'flight_request_payment_status' => $flightRequest?->payment_status,
+            'flight_request_status' => $flightRequest?->status,
+            'workflow_status' => $flightRequest?->workflow_status,
+            'reservation_status' => $reservation?->status,
+        ];
+
+        $alreadyConfirmed = strtolower(trim((string) ($payment?->status ?? ''))) === 'paid'
+            || strtolower(trim((string) ($flightRequest?->payment_status ?? ''))) === 'paid'
+            || strtolower(trim((string) ($reservation?->status ?? ''))) === 'confirmed';
+
+        if ($paymentStatus !== 'refunded' && $alreadyConfirmed) {
+            $this->auditWebhookAction(
+                $payment?->user_id ?? $flightRequest?->client_id,
+                'stripe_webhook_out_of_order_ignored',
+                'Stripe envio un evento tardio que no pudo revertir un pago ya confirmado.',
+                [
+                    'checkout_session_id' => $checkoutSessionId,
+                    'payment_intent_id' => $paymentIntentId,
+                    'flight_request_id' => $flightRequest?->id,
+                    'reservation_id' => $reservation?->id,
+                    'attempted_payment_status' => $paymentStatus,
+                    'attempted_status' => $status,
+                    'result' => 'ignored',
+                ],
+                $oldValues,
+            );
+            return;
+        }
 
         if ($payment) {
             $payment->update([
@@ -1893,18 +2040,52 @@ class StripeWebhookControlador extends ControladorBase
                     ? $flightRequest->status
                     : 'reserved',
             ]);
-
-            $reservation = $flightRequest->reservation()->latest('id')->first();
-            if ($reservation && in_array($paymentStatus, ['cancelled', 'failed', 'refunded'], true)) {
-                $currentReservationStatus = strtolower(trim((string) ($reservation->status ?? '')));
-                if (! in_array($currentReservationStatus, ['cancelled', 'canceled', 'completed', 'finalizada'], true)) {
-                    $reservation->update([
-                        'status' => 'pending_payment',
-                    ]);
-                }
-
-                $this->aircraftAvailabilityService->releaseReservationBlock($reservation->fresh(['flightRequest', 'latestPayment']));
-            }
         }
+
+        if ($reservation && in_array($paymentStatus, ['cancelled', 'failed', 'refunded'], true)) {
+            $currentReservationStatus = strtolower(trim((string) ($reservation->status ?? '')));
+            if (! in_array($currentReservationStatus, ['cancelled', 'canceled', 'completed', 'finalizada'], true)) {
+                $reservation->update([
+                    'status' => 'pending_payment',
+                ]);
+            }
+
+            $this->aircraftAvailabilityService->releaseReservationBlock($reservation->fresh(['flightRequest', 'latestPayment']));
+        }
+
+        $newValues = [
+            'payment_id' => $payment?->id,
+            'flight_request_id' => $flightRequest?->id,
+            'reservation_id' => $reservation?->id,
+            'payment_status' => $payment?->fresh()?->status,
+            'flight_request_payment_status' => $flightRequest?->fresh()?->payment_status,
+            'flight_request_status' => $flightRequest?->fresh()?->status,
+            'workflow_status' => $flightRequest?->fresh()?->workflow_status,
+            'reservation_status' => $reservation?->fresh()?->status,
+            'reason' => $reason,
+            'result' => 'applied',
+        ];
+
+        $action = match ($paymentStatus) {
+            'failed' => 'stripe_webhook_payment_failed',
+            'cancelled' => 'stripe_webhook_payment_cancelled',
+            'refunded' => 'stripe_webhook_payment_refunded',
+            default => 'stripe_webhook_payment_updated',
+        };
+
+        $description = match ($paymentStatus) {
+            'failed' => 'Stripe marco un pago de reserva como fallido.',
+            'cancelled' => 'Stripe marco un pago de reserva como cancelado.',
+            'refunded' => 'Stripe marco un pago de reserva como reembolsado.',
+            default => 'Stripe actualizo el estado de un pago de reserva.',
+        };
+
+        $this->auditWebhookAction(
+            $payment?->user_id ?? $flightRequest?->client_id,
+            $action,
+            $description,
+            $newValues,
+            $oldValues,
+        );
     }
 }

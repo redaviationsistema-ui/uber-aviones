@@ -16,6 +16,7 @@ use App\Modelos\TramoReserva;
 use App\Modelos\TramoSolicitudVuelo;
 use App\Modelos\Usuario;
 use App\Servicios\Aeronaves\AircraftAvailabilityService;
+use App\Servicios\Billing\FlightMembershipService;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -23,7 +24,10 @@ use RuntimeException;
 
 class ReservationLifecycleService
 {
-    public function __construct(private readonly AircraftAvailabilityService $aircraftAvailabilityService)
+    public function __construct(
+        private readonly AircraftAvailabilityService $aircraftAvailabilityService,
+        private readonly FlightMembershipService $flightMembershipService,
+    )
     {
     }
 
@@ -148,6 +152,8 @@ class ReservationLifecycleService
                 $reservation->fresh(['flightRequest', 'latestPayment']),
                 'Bloqueo liberado por cancelacion de la reserva.'
             );
+
+            $this->flightMembershipService->reverseBenefitsForReservation($reservation, $cancellationReason);
 
             $operation = $flightRequest?->operaciones()->latest('id')->first();
             if ($operation) {
@@ -300,7 +306,7 @@ class ReservationLifecycleService
         $totalAircraft = (clone $aircraftQuery)->count();
 
         $activeBlocks = AircraftAvailabilityBlock::query()
-            ->where('status', 'active')
+            ->whereIn('status', ['active', 'booked'])
             ->where('start_datetime', '<', $todayEnd)
             ->where('end_datetime', '>', $todayStart)
             ->whereHas('aircraft', fn ($query) => $query->when($providerId, fn ($inner) => $inner->where('provider_id', $providerId)))
@@ -325,7 +331,7 @@ class ReservationLifecycleService
 
         $upcomingFlights = AircraftAvailabilityBlock::query()
             ->with(['aircraft.provider', 'reservation.client'])
-            ->where('status', 'active')
+            ->whereIn('status', ['active', 'booked'])
             ->where('start_datetime', '>=', now())
             ->whereHas('aircraft', fn ($query) => $query->when($providerId, fn ($inner) => $inner->where('provider_id', $providerId)))
             ->orderBy('start_datetime')

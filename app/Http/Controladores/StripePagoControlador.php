@@ -7,6 +7,7 @@ use App\Modelos\Pago;
 use App\Modelos\Reserva;
 use App\Modelos\SolicitudVuelo;
 use App\Servicios\Aeronaves\AircraftAvailabilityService;
+use App\Modelos\Cotizacion;
 use Illuminate\Http\RedirectResponse;
 use App\Servicios\Pagos\PaymentFeeCalculationServicio;
 use Illuminate\Http\JsonResponse;
@@ -15,6 +16,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
+use RuntimeException;
 use Stripe\Checkout\Session;
 use Stripe\PaymentIntent;
 use Stripe\Stripe;
@@ -52,6 +54,11 @@ class StripePagoControlador extends ControladorBase
         abort_if($flightRequest->client_id !== $request->user()->id, 403, 'No puedes confirmar el pago de esta solicitud.');
 
         $reservation = $this->ensureReservationForFlightRequest($flightRequest, $request->user()->id);
+        try {
+            $this->ensureReservationAircraftHold($flightRequest, $reservation, (int) $request->user()->id);
+        } catch (RuntimeException $exception) {
+            abort(409, $exception->getMessage());
+        }
 
         $checkoutSessionId = trim((string) ($data['checkout_session_id'] ?? ''));
         $paymentMethod = trim((string) ($data['payment_method'] ?? ''));
@@ -85,13 +92,22 @@ class StripePagoControlador extends ControladorBase
             }
         }
 
-        return $this->finalizeSuccessfulPayment(
+        $response = $this->finalizeSuccessfulPayment(
             flightRequest: $flightRequest,
             reservation: $reservation,
             paymentIntentId: $data['payment_intent_id'] ?? null,
             brandOverride: $data['brand'] ?? null,
             paymentMethod: $paymentMethod !== '' ? $paymentMethod : 'card',
         );
+
+        $this->auditStripeAction($request->user()->id, 'stripe_payment_confirmation_requested', 'Cliente solicito confirmar el pago Stripe de una solicitud.', [
+            'flight_request_id' => $flightRequest->id,
+            'reservation_id' => $reservation->id,
+            'payment_intent_id' => $data['payment_intent_id'] ?? null,
+            'checkout_session_id' => $data['checkout_session_id'] ?? null,
+        ], $request);
+
+        return $response;
     }
 
     public function confirmReservationPayment(Request $request, mixed $reservation)
@@ -150,13 +166,22 @@ class StripePagoControlador extends ControladorBase
             }
         }
 
-        return $this->finalizeSuccessfulPayment(
+        $response = $this->finalizeSuccessfulPayment(
             flightRequest: $flightRequest,
             reservation: $reservation,
             paymentIntentId: $data['payment_intent_id'] ?? null,
             brandOverride: $data['brand'] ?? null,
             paymentMethod: $paymentMethod !== '' ? $paymentMethod : 'card',
         );
+
+        $this->auditStripeAction($request->user()->id, 'stripe_payment_confirmation_requested', 'Cliente solicito confirmar el pago Stripe de una reserva.', [
+            'flight_request_id' => $flightRequest->id,
+            'reservation_id' => $reservation->id,
+            'payment_intent_id' => $data['payment_intent_id'] ?? null,
+            'checkout_session_id' => $data['checkout_session_id'] ?? null,
+        ], $request);
+
+        return $response;
     }
 
     public function createCheckout(Request $request)
@@ -187,6 +212,43 @@ class StripePagoControlador extends ControladorBase
         }
 
         $reservation = $this->ensureReservationForFlightRequest($flightRequest, $request->user()->id);
+        try {
+            $this->ensureReservationAircraftHold($flightRequest, $reservation, (int) $request->user()->id);
+        } catch (RuntimeException $exception) {
+            abort(409, $exception->getMessage());
+        }
+
+        $reusablePayment = $this->findStoredReservationStripePayment(
+            reservationId: (int) $reservation->id,
+            flightRequestId: (int) $flightRequest->id,
+        );
+
+        if ($reusablePayment && in_array((string) $reusablePayment->status, ['pending', 'processing'], true)) {
+            $existingCheckoutUrl = trim((string) (
+                data_get($reusablePayment->gateway_response, 'checkout_url')
+                ?? data_get($reusablePayment->gateway_response, 'url')
+                ?? data_get($reusablePayment->gateway_response, 'checkout_session.url')
+                ?? ''
+            ));
+            $existingSessionId = trim((string) ($reusablePayment->stripe_checkout_session_id ?: $reusablePayment->transaction_reference));
+
+            if ($existingCheckoutUrl !== '' && $existingSessionId !== '') {
+                $this->auditStripeAction($request->user()->id, 'stripe_checkout_reused', 'Se reutilizo una sesion pendiente de Stripe Checkout para evitar duplicados.', [
+                    'flight_request_id' => $flightRequest->id,
+                    'reservation_id' => $reservation->id,
+                    'payment_id' => $reusablePayment->id,
+                    'checkout_session_id' => $existingSessionId,
+                ], $request);
+
+                return $this->ok([
+                    'checkout_url' => $existingCheckoutUrl,
+                    'checkout_session_id' => $existingSessionId,
+                    'reservation_id' => $reservation->id,
+                    'payment_status' => (string) ($flightRequest->payment_status ?: $reusablePayment->status ?: 'pending'),
+                    'reused_checkout' => true,
+                ]);
+            }
+        }
 
         Stripe::setApiKey((string) config('services.stripe.secret'));
 
@@ -263,6 +325,13 @@ class StripePagoControlador extends ControladorBase
             );
         });
 
+        $this->auditStripeAction($request->user()->id, 'stripe_checkout_created', 'Se creo una sesion de Stripe Checkout para reserva de cliente.', [
+            'flight_request_id' => $flightRequest->id,
+            'reservation_id' => $reservation->id,
+            'checkout_session_id' => $session->id,
+            'amount' => $amount,
+        ], $request);
+
         return $this->ok([
             'checkout_url' => $session->url,
             'checkout_session_id' => $session->id,
@@ -297,6 +366,43 @@ class StripePagoControlador extends ControladorBase
         }
 
         $reservation = $this->ensureReservationForFlightRequest($flightRequest, $request->user()->id);
+        try {
+            $this->ensureReservationAircraftHold($flightRequest, $reservation, (int) $request->user()->id);
+        } catch (RuntimeException $exception) {
+            abort(409, $exception->getMessage());
+        }
+
+        $reusablePayment = $this->findStoredReservationStripePayment(
+            reservationId: (int) $reservation->id,
+            flightRequestId: (int) $flightRequest->id,
+        );
+
+        if ($reusablePayment && in_array((string) $reusablePayment->status, ['pending', 'processing'], true)) {
+            $existingCheckoutUrl = trim((string) (
+                data_get($reusablePayment->gateway_response, 'checkout_url')
+                ?? data_get($reusablePayment->gateway_response, 'url')
+                ?? data_get($reusablePayment->gateway_response, 'checkout_session.url')
+                ?? ''
+            ));
+            $existingSessionId = trim((string) ($reusablePayment->stripe_checkout_session_id ?: $reusablePayment->transaction_reference));
+
+            if ($existingCheckoutUrl !== '' && $existingSessionId !== '') {
+                $this->auditStripeAction($request->user()->id, 'stripe_checkout_reused', 'Se reutilizo una sesion pendiente de Stripe Checkout para evitar duplicados.', [
+                    'flight_request_id' => $flightRequest->id,
+                    'reservation_id' => $reservation->id,
+                    'payment_id' => $reusablePayment->id,
+                    'checkout_session_id' => $existingSessionId,
+                ], $request);
+
+                return $this->ok([
+                    'checkout_url' => $existingCheckoutUrl,
+                    'checkout_session_id' => $existingSessionId,
+                    'reservation_id' => $reservation->id,
+                    'payment_status' => (string) ($flightRequest->payment_status ?: $reusablePayment->status ?: 'pending'),
+                    'reused_checkout' => true,
+                ]);
+            }
+        }
 
         Stripe::setApiKey((string) config('services.stripe.secret'));
 
@@ -349,6 +455,13 @@ class StripePagoControlador extends ControladorBase
                 ],
             );
         });
+
+        $this->auditStripeAction($request->user()->id, 'stripe_payment_intent_created', 'Se creo un PaymentIntent de Stripe para reserva de cliente.', [
+            'flight_request_id' => $flightRequest->id,
+            'reservation_id' => $reservation->id,
+            'payment_intent_id' => $paymentIntent->id,
+            'amount' => $amount,
+        ], $request);
 
         return $this->ok([
             'client_secret' => $paymentIntent->client_secret,
@@ -414,6 +527,13 @@ class StripePagoControlador extends ControladorBase
                 ],
             );
         });
+
+        $this->auditStripeAction($request->user()->id, 'wire_payment_intent_created', 'Se genero una referencia de transferencia para reserva de cliente.', [
+            'flight_request_id' => $flightRequest->id,
+            'reservation_id' => $reservation->id,
+            'reference' => $reference,
+            'amount' => $amount,
+        ], $request);
 
         return $this->ok([
             'reservation_id' => $reservation->id,
@@ -519,6 +639,12 @@ class StripePagoControlador extends ControladorBase
                     flightRequestId: (int) ($flightRequest?->id ?? 0),
                     sessionId: $sessionId,
                 );
+                $this->auditStripeAction($userId, 'stripe_checkout_success_reconciled', 'Se reconcilio el retorno exitoso de Stripe Checkout.', [
+                    'session_id' => $sessionId,
+                    'reservation_id' => $reservation?->id,
+                    'flight_request_id' => $flightRequest?->id,
+                    'payment_id' => $payment?->id,
+                ], $request);
             }
 
             abort_if(
@@ -651,6 +777,13 @@ class StripePagoControlador extends ControladorBase
             $this->markCancelledCheckoutPayment($payment, $sessionId);
             $payment->refresh();
         }
+
+        $this->auditStripeAction($userId, 'stripe_checkout_cancelled', 'El cliente cancelo el flujo de Stripe Checkout.', [
+            'session_id' => $sessionId,
+            'payment_id' => $payment?->id,
+            'reservation_id' => $payment?->reservation_id,
+            'flight_request_id' => $payment?->flight_request_id,
+        ], $request);
 
         return $this->ok([
             'message' => 'Flujo de pago de reserva cancelado.',
@@ -871,6 +1004,32 @@ class StripePagoControlador extends ControladorBase
         ]);
     }
 
+    private function ensureReservationAircraftHold(SolicitudVuelo $flightRequest, Reserva $reservation, int $userId): void
+    {
+        $acceptedQuote = $this->resolveAcceptedQuoteForFlightRequest($flightRequest, $reservation);
+        if (! $acceptedQuote) {
+            return;
+        }
+
+        $this->aircraftAvailabilityService->holdAircraftForQuote($acceptedQuote->loadMissing(['flightRequest.legs', 'aircraft']), $userId, $reservation);
+    }
+
+    private function resolveAcceptedQuoteForFlightRequest(SolicitudVuelo $flightRequest, ?Reserva $reservation = null): ?Cotizacion
+    {
+        $quoteId = $reservation?->quote_id;
+        if ($quoteId) {
+            $quote = Cotizacion::query()->with('flightRequest.legs')->find($quoteId);
+            if ($quote) {
+                return $quote;
+            }
+        }
+
+        return $flightRequest->quotes()
+            ->where('status', 'accepted')
+            ->latest('id')
+            ->first();
+    }
+
     private function finalizeSuccessfulPayment(
         SolicitudVuelo $flightRequest,
         Reserva $reservation,
@@ -992,6 +1151,14 @@ class StripePagoControlador extends ControladorBase
             'payment_status' => 'paid',
             'booking_status' => 'confirmed',
             'status' => 'confirmed',
+        ]);
+
+        $this->auditStripeAction($flightRequest->client_id, 'stripe_payment_confirmed', 'Stripe confirmo el pago de la reserva del cliente.', [
+            'flight_request_id' => $flightRequest->id,
+            'reservation_id' => $reservation->id,
+            'payment_intent_id' => $paymentIntent->id,
+            'checkout_session_id' => $flightRequest->stripe_checkout_session_id ?: $paymentOrder?->stripe_checkout_session_id,
+            'payment_method' => $paymentMethod,
         ]);
 
         return $this->ok([
@@ -1133,6 +1300,15 @@ class StripePagoControlador extends ControladorBase
                     ]);
                 }
             });
+
+            $this->auditStripeAction($payment->user_id, 'stripe_checkout_pending_synced', 'Se sincronizo una sesion de Stripe Checkout aun pendiente.', [
+                'payment_id' => $payment->id,
+                'reservation_id' => $payment->reservation_id,
+                'flight_request_id' => $payment->flight_request_id,
+                'session_id' => $sessionId,
+                'session_status' => $session->status ?? null,
+                'payment_status' => $session->payment_status ?? null,
+            ]);
         }
     }
 
@@ -1164,6 +1340,13 @@ class StripePagoControlador extends ControladorBase
                 $this->aircraftAvailabilityService->releaseReservationBlock($reservation->fresh(['flightRequest', 'latestPayment']));
             }
         });
+
+        $this->auditStripeAction($payment->user_id, 'stripe_payment_cancelled', 'Se cancelo una orden Stripe pendiente de reserva.', [
+            'payment_id' => $payment->id,
+            'reservation_id' => $payment->reservation_id,
+            'flight_request_id' => $payment->flight_request_id,
+            'session_id' => $sessionId !== '' ? $sessionId : $payment->stripe_checkout_session_id,
+        ]);
     }
 
     private function ensureReservationAircraftAvailability(int $aircraftId, ?SolicitudVuelo $flightRequest): void
@@ -1377,5 +1560,23 @@ class StripePagoControlador extends ControladorBase
         }
 
         return null;
+    }
+
+    private function auditStripeAction(
+        ?int $userId,
+        string $action,
+        string $description,
+        array $newValues = [],
+        ?Request $request = null,
+    ): void {
+        $this->writeAuditEntry(
+            $userId,
+            $action,
+            'reservation_payments',
+            $description,
+            ['new_values' => $newValues],
+            $request?->ip(),
+            $request?->userAgent(),
+        );
     }
 }

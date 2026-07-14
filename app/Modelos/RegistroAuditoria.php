@@ -9,11 +9,32 @@ class RegistroAuditoria extends Model
 {
     protected $table = 'audit_logs';
 
-    protected $fillable = ['user_id', 'action', 'module', 'description', 'ip_address', 'user_agent', 'old_values', 'new_values'];
+    protected $fillable = [
+        'admin_user_id',
+        'user_id',
+        'action',
+        'module',
+        'entity',
+        'entity_id',
+        'reason',
+        'result',
+        'before',
+        'after',
+        'metadata',
+        'description',
+        'ip_address',
+        'user_agent',
+        'request_id',
+        'old_values',
+        'new_values',
+    ];
 
     protected function casts(): array
     {
         return [
+            'before' => 'array',
+            'after' => 'array',
+            'metadata' => 'array',
             'old_values' => 'array',
             'new_values' => 'array',
         ];

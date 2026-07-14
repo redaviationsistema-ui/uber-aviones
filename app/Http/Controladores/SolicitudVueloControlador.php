@@ -164,15 +164,7 @@ class SolicitudVueloControlador extends ControladorBase
                 }
             })
             ->whereHas('provider', fn ($query) => $query->where('approval_status', EstadoProveedor::Approved->value))
-            ->whereDoesntHave('availability', function ($query) use ($start, $end) {
-                $query->whereIn('status', [
-                    EstadoDisponibilidad::Occupied->value,
-                    EstadoDisponibilidad::Blocked->value,
-                    EstadoDisponibilidad::Maintenance->value,
-                ])
-                    ->where('start_datetime', '<', $end)
-                    ->where('end_datetime', '>', $start);
-            })
+            ->tap(fn ($query) => app(\App\Servicios\Aeronaves\AircraftAvailabilityService::class)->applyAvailabilityConstraints($query, $start, $end))
             ->limit(10)
             ->get();
 
@@ -209,5 +201,4 @@ class SolicitudVueloControlador extends ControladorBase
             ->first();
     }
 }
-
 

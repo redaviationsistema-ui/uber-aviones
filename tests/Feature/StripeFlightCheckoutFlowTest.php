@@ -78,6 +78,53 @@ class StripeFlightCheckoutFlowTest extends TestCase
         ]);
     }
 
+    public function test_create_checkout_reuses_existing_pending_session_instead_of_creating_another_one(): void
+    {
+        $this->seed();
+        $this->configureStripe();
+
+        $context = $this->createFlightPaymentContext(
+            checkoutSessionId: 'cs_test_reservation_reused',
+        );
+
+        Pago::query()->create([
+            'user_id' => $context['user']->id,
+            'reservation_id' => $context['reservation']->id,
+            'flight_request_id' => $context['flightRequest']->id,
+            'payment_type' => 'reservation',
+            'amount' => 15990,
+            'currency' => 'USD',
+            'provider' => 'stripe',
+            'transaction_reference' => 'cs_test_reservation_reused',
+            'stripe_checkout_session_id' => 'cs_test_reservation_reused',
+            'status' => 'pending',
+            'gateway_response' => [
+                'checkout_url' => 'https://checkout.stripe.com/c/pay/cs_test_reservation_reused',
+            ],
+        ]);
+
+        $sessionAlias = Mockery::mock('alias:Stripe\Checkout\Session');
+        $sessionAlias->shouldReceive('create')->never();
+
+        $response = $this
+            ->withHeader('Authorization', 'Bearer '.$context['token'])
+            ->postJson('/api/v1/cliente/stripe/checkout/create', [
+                'flight_request_id' => $context['flightRequest']->id,
+                'contact_email' => $context['user']->email,
+            ]);
+
+        $response
+            ->assertOk()
+            ->assertJsonPath('reused_checkout', true)
+            ->assertJsonPath('checkout_session_id', 'cs_test_reservation_reused')
+            ->assertJsonPath(
+                'checkout_url',
+                'https://checkout.stripe.com/c/pay/cs_test_reservation_reused',
+            );
+
+        $this->assertSame(1, Pago::query()->where('flight_request_id', $context['flightRequest']->id)->count());
+    }
+
     public function test_success_returns_checkout_url_for_pending_checkout_recovery(): void
     {
         $this->seed();

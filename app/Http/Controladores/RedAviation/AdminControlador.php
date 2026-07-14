@@ -8,6 +8,7 @@ use App\Modelos\AircraftAvailabilityBlock;
 use App\Modelos\BanderaAntiBroker;
 use App\Modelos\ContratoReserva;
 use App\Modelos\Demo;
+use App\Modelos\Cotizacion;
 use App\Modelos\Operacion;
 use App\Modelos\Proveedor;
 use App\Modelos\Rol;
@@ -21,6 +22,13 @@ use App\Modelos\Suscripcion;
 use App\Modelos\SuscripcionAeronave;
 use App\Modelos\Usuario;
 use App\Servicios\Aeronaves\AircraftAvailabilityService;
+use App\Servicios\Administracion\AdminAuditServicio;
+use App\Servicios\Administracion\AdminCotizacionesServicio;
+use App\Servicios\Administracion\AdminDashboardServicio;
+use App\Servicios\Administracion\AdminDocumentosServicio;
+use App\Servicios\Administracion\AdminReportesServicio;
+use App\Servicios\Administracion\AdminSettingsServicio;
+use App\Servicios\Administracion\AdminVuelosServicio;
 use App\Servicios\Operaciones\ReservationLifecycleService;
 use App\Servicios\RedAviation\KpiSaasServicio;
 use App\Servicios\RedAviation\VisibilidadServicio;
@@ -52,13 +60,243 @@ class AdminControlador extends ControladorBase
         private readonly ReservationLifecycleService $reservationLifecycleService,
         private readonly KpiSaasServicio $kpiSaasServicio,
         private readonly VisibilidadServicio $visibilidadServicio,
+        private readonly AdminDashboardServicio $adminDashboardServicio,
+        private readonly AdminAuditServicio $adminAuditServicio,
+        private readonly AdminSettingsServicio $adminSettingsServicio,
+        private readonly AdminReportesServicio $adminReportesServicio,
+        private readonly AdminCotizacionesServicio $adminCotizacionesServicio,
+        private readonly AdminVuelosServicio $adminVuelosServicio,
+        private readonly AdminDocumentosServicio $adminDocumentosServicio,
     )
     {
     }
 
-    public function dashboard()
+    public function dashboard(Request $request)
     {
-        return $this->ok(['kpis' => $this->kpiSaasServicio->resumen()]);
+        $filters = $request->validate([
+            'date_from' => ['nullable', 'date'],
+            'date_to' => ['nullable', 'date', 'after_or_equal:date_from'],
+            'currency' => ['nullable', 'string', 'max:10'],
+            'provider_id' => ['nullable', 'integer', 'exists:providers,id'],
+            'aircraft_id' => ['nullable', 'integer', 'exists:aircraft,id'],
+        ]);
+
+        return $this->ok($this->adminDashboardServicio->build($filters));
+    }
+
+    public function auditLogs(Request $request)
+    {
+        $filters = $request->validate([
+            'admin_user_id' => ['nullable', 'integer', 'exists:users,id'],
+            'action' => ['nullable', 'string', 'max:150'],
+            'module' => ['nullable', 'string', 'max:150'],
+            'entity' => ['nullable', 'string', 'max:150'],
+            'entity_id' => ['nullable', 'string', 'max:120'],
+            'result' => ['nullable', 'string', 'max:60'],
+            'date_from' => ['nullable', 'date'],
+            'date_to' => ['nullable', 'date', 'after_or_equal:date_from'],
+            'per_page' => ['nullable', 'integer', 'min:1', 'max:100'],
+        ]);
+
+        return $this->ok([
+            'audit_logs' => $this->adminAuditServicio->query($filters),
+        ]);
+    }
+
+    public function settings()
+    {
+        return $this->ok([
+            'settings' => $this->adminSettingsServicio->listVisible(),
+        ]);
+    }
+
+    public function updateSettings(Request $request)
+    {
+        $payload = $request->validate([
+            'settings' => ['required', 'array'],
+            'settings.*.key' => ['required', 'string', 'max:150'],
+            'settings.*.value' => ['nullable'],
+            'reason' => ['required', 'string', 'max:5000'],
+        ]);
+
+        $result = $this->adminSettingsServicio->updateMany($payload['settings'], $payload['reason']);
+
+        if (! empty($result['changes'])) {
+            $this->writeAudit(
+                $request,
+                'admin_settings_updated',
+                'admin_settings',
+                'Configuración administrativa actualizada.',
+                [
+                    'entity' => 'system_settings',
+                    'entity_id' => collect($result['changes'])->pluck('key')->implode(','),
+                    'reason' => $payload['reason'],
+                    'before' => collect($result['changes'])->mapWithKeys(fn (array $change) => [$change['key'] => $change['before']])->all(),
+                    'after' => collect($result['changes'])->mapWithKeys(fn (array $change) => [$change['key'] => $change['after']])->all(),
+                ],
+            );
+            Cache::flush();
+        }
+
+        return $this->ok([
+            'settings' => $result['settings'],
+            'changes' => $result['changes'],
+        ]);
+    }
+
+    public function reports(Request $request)
+    {
+        $filters = $request->validate([
+            'report_type' => ['nullable', 'string', 'max:80'],
+            'date_from' => ['nullable', 'date'],
+            'date_to' => ['nullable', 'date', 'after_or_equal:date_from'],
+            'status' => ['nullable', 'string', 'max:80'],
+            'currency' => ['nullable', 'string', 'max:10'],
+            'provider_id' => ['nullable', 'integer', 'exists:providers,id'],
+            'aircraft_id' => ['nullable', 'integer', 'exists:aircraft,id'],
+            'client_id' => ['nullable', 'integer', 'exists:users,id'],
+            'per_page' => ['nullable', 'integer', 'min:1', 'max:100'],
+        ]);
+
+        return $this->ok($this->adminReportesServicio->build($filters));
+    }
+
+    public function quotes(Request $request)
+    {
+        $filters = $request->validate([
+            'status' => ['nullable', 'string', 'max:80'],
+            'client_id' => ['nullable', 'integer', 'exists:users,id'],
+            'provider_id' => ['nullable', 'integer', 'exists:providers,id'],
+            'aircraft_id' => ['nullable', 'integer', 'exists:aircraft,id'],
+            'date_from' => ['nullable', 'date'],
+            'date_to' => ['nullable', 'date', 'after_or_equal:date_from'],
+            'origin' => ['nullable', 'string', 'max:50'],
+            'destination' => ['nullable', 'string', 'max:50'],
+            'per_page' => ['nullable', 'integer', 'min:1', 'max:100'],
+        ]);
+
+        return $this->ok([
+            'quotes' => $this->adminCotizacionesServicio->list($filters),
+        ]);
+    }
+
+    public function showQuote(Cotizacion $quote)
+    {
+        return $this->ok([
+            'quote' => $this->adminCotizacionesServicio->detail($quote),
+        ]);
+    }
+
+    public function flights(Request $request)
+    {
+        $filters = $request->validate([
+            'status' => ['nullable', 'string', 'max:80'],
+            'date_from' => ['nullable', 'date'],
+            'date_to' => ['nullable', 'date', 'after_or_equal:date_from'],
+            'provider_id' => ['nullable', 'integer', 'exists:providers,id'],
+            'aircraft_id' => ['nullable', 'integer', 'exists:aircraft,id'],
+            'client_id' => ['nullable', 'integer', 'exists:users,id'],
+            'crew_id' => ['nullable', 'integer', 'exists:users,id'],
+            'per_page' => ['nullable', 'integer', 'min:1', 'max:100'],
+        ]);
+
+        return $this->ok([
+            'flights' => $this->adminVuelosServicio->list($filters),
+        ]);
+    }
+
+    public function showFlight(SolicitudVuelo $flight)
+    {
+        return $this->ok([
+            'flight' => $this->adminVuelosServicio->detail($flight),
+        ]);
+    }
+
+    public function documents(Request $request)
+    {
+        $filters = $request->validate([
+            'review_status' => ['nullable', 'string', 'max:80'],
+            'expires_before' => ['nullable', 'date'],
+            'provider_id' => ['nullable', 'integer', 'exists:providers,id'],
+            'aircraft_id' => ['nullable', 'integer', 'exists:aircraft,id'],
+            'page' => ['nullable', 'integer', 'min:1'],
+            'per_page' => ['nullable', 'integer', 'min:1', 'max:100'],
+        ]);
+
+        return $this->ok([
+            'documents' => $this->adminDocumentosServicio->list($filters),
+        ]);
+    }
+
+    public function showDocument(string $document)
+    {
+        return $this->ok([
+            'document' => $this->adminDocumentosServicio->show($document),
+        ]);
+    }
+
+    public function approveDocument(Request $request, string $document)
+    {
+        $payload = $request->validate([
+            'reason' => ['required', 'string', 'max:5000'],
+        ]);
+
+        $result = $this->adminDocumentosServicio->approve($document, $payload['reason']);
+        $this->writeAudit($request, 'admin_document_approved', 'admin_documents', 'Documento aprobado por administración.', [
+            'entity' => 'document',
+            'entity_id' => $document,
+            'reason' => $payload['reason'],
+            'before' => $result['before'],
+            'after' => $result['after'],
+        ]);
+
+        return $this->ok($result);
+    }
+
+    public function rejectDocument(Request $request, string $document)
+    {
+        $payload = $request->validate([
+            'reason' => ['required', 'string', 'max:5000'],
+        ]);
+
+        $result = $this->adminDocumentosServicio->reject($document, $payload['reason']);
+        $this->writeAudit($request, 'admin_document_rejected', 'admin_documents', 'Documento rechazado por administración.', [
+            'entity' => 'document',
+            'entity_id' => $document,
+            'reason' => $payload['reason'],
+            'before' => $result['before'],
+            'after' => $result['after'],
+        ]);
+
+        return $this->ok($result);
+    }
+
+    public function requestDocumentCorrection(Request $request, string $document)
+    {
+        $payload = $request->validate([
+            'reason' => ['required', 'string', 'max:5000'],
+        ]);
+
+        $result = $this->adminDocumentosServicio->requestCorrection($document, $payload['reason']);
+        $this->writeAudit($request, 'admin_document_correction_requested', 'admin_documents', 'Corrección documental solicitada por administración.', [
+            'entity' => 'document',
+            'entity_id' => $document,
+            'reason' => $payload['reason'],
+            'before' => $result['before'],
+            'after' => $result['after'],
+        ]);
+
+        return $this->ok($result);
+    }
+
+    public function downloadDocument(Request $request, string $document)
+    {
+        $this->writeAudit($request, 'admin_document_downloaded', 'admin_documents', 'Descarga administrativa de documento sensible.', [
+            'entity' => 'document',
+            'entity_id' => $document,
+        ]);
+
+        return $this->adminDocumentosServicio->download($document);
     }
 
     public function aircraftCalendar(Request $request)

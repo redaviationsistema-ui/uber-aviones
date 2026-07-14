@@ -14,7 +14,12 @@ return [
     |
     */
 
-    'default' => env('MAIL_MAILER', 'log'),
+    'default' => env('MAIL_MAILER', 'smtp'),
+
+    'production_blocked_mailers' => [
+        'log',
+        'array',
+    ],
 
     /*
     |--------------------------------------------------------------------------

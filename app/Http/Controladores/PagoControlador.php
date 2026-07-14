@@ -33,15 +33,24 @@ class PagoControlador extends ControladorBase
         $reservation = $this->resolveReservation($reservation);
         abort_if($reservation->client_id !== $request->user()->id, 403, 'No puedes pagar esta reserva.');
         abort_if(! $this->reservationContractIsSigned($reservation), 409, 'Primero debes firmar el contrato.');
+        abort_if(in_array($reservation->status, ['confirmed', 'paid'], true), 409, 'La reserva ya fue confirmada por un evento oficial del sistema.');
 
         $data = $request->validate([
             'payment_method_id' => ['nullable', 'exists:payment_methods,id'],
-            'provider' => ['nullable', 'string', 'max:50'],
             'transaction_reference' => ['nullable', 'string', 'max:255'],
-            'status' => ['sometimes', 'in:pending,paid,failed,refunded'],
             'gateway_response' => ['nullable', 'array'],
             'failure_reason' => ['nullable', 'string'],
         ]);
+
+        $requestedStatePayload = [
+            'status' => $request->input('status'),
+            'payment_status' => $request->input('payment_status'),
+            'booking_status' => $request->input('booking_status'),
+            'confirmed' => $request->input('confirmed'),
+            'paid' => $request->input('paid'),
+            'approved' => $request->input('approved'),
+            'payment_order' => $request->input('payment_order'),
+        ];
 
         if (isset($data['payment_method_id'])) {
             abort_if(
@@ -60,12 +69,16 @@ class PagoControlador extends ControladorBase
         if ($payment) {
             $payment->update([
                 'payment_method_id' => $data['payment_method_id'] ?? $payment->payment_method_id,
-                'provider' => $data['provider'] ?? $payment->provider ?? 'manual',
+                'provider' => $payment->provider ?? 'manual',
                 'transaction_reference' => $data['transaction_reference'] ?? $payment->transaction_reference,
-                'status' => $data['status'] ?? 'paid',
-                'paid_at' => ($data['status'] ?? 'paid') === 'paid' ? now() : null,
+                'status' => 'pending',
+                'paid_at' => null,
                 'failure_reason' => $data['failure_reason'] ?? null,
-                'gateway_response' => $data['gateway_response'] ?? null,
+                'gateway_response' => array_filter([
+                    ...((array) ($data['gateway_response'] ?? [])),
+                    'submitted_via' => 'client_manual_payment',
+                    'requested_terminal_state_ignored' => array_filter($requestedStatePayload, fn ($value) => $value !== null && $value !== ''),
+                ], fn ($value) => $value !== null),
             ]);
         } else {
             $payment = Pago::create([
@@ -75,23 +88,30 @@ class PagoControlador extends ControladorBase
                 'payment_type' => 'reservation',
                 'amount' => $reservation->total_amount,
                 'currency' => $reservation->currency ?? 'USD',
-                'provider' => $data['provider'] ?? 'manual',
+                'provider' => 'manual',
                 'transaction_reference' => $data['transaction_reference'] ?? null,
-                'status' => $data['status'] ?? 'paid',
-                'paid_at' => ($data['status'] ?? 'paid') === 'paid' ? now() : null,
+                'status' => 'pending',
+                'paid_at' => null,
                 'failure_reason' => $data['failure_reason'] ?? null,
-                'gateway_response' => $data['gateway_response'] ?? null,
+                'gateway_response' => array_filter([
+                    ...((array) ($data['gateway_response'] ?? [])),
+                    'submitted_via' => 'client_manual_payment',
+                    'requested_terminal_state_ignored' => array_filter($requestedStatePayload, fn ($value) => $value !== null && $value !== ''),
+                ], fn ($value) => $value !== null),
             ]);
         }
 
-        if ($payment->status === 'paid') {
-            $reservation->update(['status' => 'confirmed', 'confirmed_at' => now()]);
-            $this->aircraftAvailabilityService->blockAircraftForPaidReservation($reservation->fresh(['flightRequest.legs', 'legs']));
-            $this->notifyAssignedCrew($reservation);
-        } elseif (in_array($payment->status, ['failed', 'refunded'], true)) {
-            $reservation->update(['status' => 'pending_payment']);
-            $this->aircraftAvailabilityService->releaseReservationBlock($reservation->fresh(['flightRequest', 'latestPayment']));
-        }
+        $reservation->update(['status' => 'pending_payment']);
+
+        $this->writeAudit($request, 'manual_payment_submitted', 'reservation_payments', 'Cliente registro una orden de pago manual pendiente de validacion.', [
+            'new_values' => [
+                'reservation_id' => $reservation->id,
+                'payment_id' => $payment->id,
+                'status' => $payment->status,
+                'transaction_reference' => $payment->transaction_reference,
+                'ignored_client_state' => array_filter($requestedStatePayload, fn ($value) => $value !== null && $value !== ''),
+            ],
+        ]);
 
         return $this->ok(['payment' => $payment->fresh(), 'reservation' => $reservation->fresh(['payments', 'contract'])], 201);
     }
@@ -117,6 +137,13 @@ class PagoControlador extends ControladorBase
 
         $reservation->update(['status' => 'pending_payment']);
         $this->aircraftAvailabilityService->releaseReservationBlock($reservation->fresh(['flightRequest', 'latestPayment']));
+        $this->writeAudit($request, 'payment_retry_requested', 'reservation_payments', 'Cliente solicito reintentar el pago.', [
+            'new_values' => [
+                'reservation_id' => $reservation->id,
+                'payment_id' => $payment->id,
+                'status' => 'pending',
+            ],
+        ]);
 
         return $this->ok([
             'payment' => $payment->fresh(),
