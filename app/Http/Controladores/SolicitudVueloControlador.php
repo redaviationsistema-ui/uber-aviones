@@ -163,7 +163,7 @@ class SolicitudVueloControlador extends ControladorBase
                     $query->orWhere('base_airport', $originCode);
                 }
             })
-            ->whereHas('provider', fn ($query) => $query->where('approval_status', EstadoProveedor::Approved->value))
+            ->whereHas('provider', fn ($query) => $query->approvedForOperations())
             ->tap(fn ($query) => app(\App\Servicios\Aeronaves\AircraftAvailabilityService::class)->applyAvailabilityConstraints($query, $start, $end))
             ->limit(10)
             ->get();

@@ -16,7 +16,9 @@ use App\Modelos\Reserva;
 use App\Modelos\Suscripcion;
 use App\Modelos\ConfiguracionSistema;
 use App\Modelos\Usuario;
+use App\Servicios\Providers\AdminProviderApprovalService;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -35,6 +37,12 @@ class AdministradorControlador extends ControladorBase
         'tax_address_proof',
         'operational_permit',
     ];
+
+    public function __construct(
+        private readonly AdminProviderApprovalService $adminProviderApprovalService,
+    )
+    {
+    }
 
     public function dashboard()
     {
@@ -387,86 +395,43 @@ class AdministradorControlador extends ControladorBase
 
     public function validateProveedor(Request $request, Proveedor $provider)
     {
-        $checklist = $this->providerValidationChecklist($provider->fresh(['user.profile', 'aircraft', 'companyDocuments']));
-        $missingLabels = collect($checklist)
-            ->where('complete', false)
-            ->pluck('label')
-            ->filter()
-            ->values()
-            ->all();
-
-        if ($missingLabels !== []) {
-            throw ValidationException::withMessages([
-                'validation' => [
-                    'No se puede validar todavia. Faltan requisitos obligatorios: '.implode(', ', $missingLabels).'.',
-                ],
-            ]);
-        }
-
         $data = $request->validate([
             'notes' => ['nullable', 'string', 'max:5000'],
             'admin_notes' => ['nullable', 'string', 'max:5000'],
             'sat_validation_status' => ['nullable', 'string', 'max:50'],
         ]);
 
-        $adminNotes = $data['admin_notes'] ?? $data['notes'] ?? null;
-        $previousState = $provider->only([
-            'admin_validation_status',
-            'operator_status',
-            'access_enabled',
-            'validated_at',
-            'admin_notes',
-        ]);
+        $result = $this->adminProviderApprovalService->approve($provider, $request->user(), $data, function (Proveedor $approvedProvider, array $context) use ($request) {
+            if (($context['noop'] ?? false) === true) {
+                return;
+            }
 
-        $provider->update([
-            'admin_validation_status' => 'approved',
-            'operator_status' => 'validated',
-            'approval_status' => 'approved',
-            'status' => 'approved',
-            'access_enabled' => true,
-            'sat_validation_status' => $data['sat_validation_status'] ?? ($provider->sat_validation_status ?: 'approved'),
-            'admin_notes' => $adminNotes,
-            'admin_validation_notes' => $adminNotes,
-            'validated_by' => $request->user()?->id,
-            'validated_at' => now(),
-            'admin_validated_by' => $request->user()?->id,
-            'admin_validated_at' => now(),
-            'rejected_by' => null,
-            'rejected_at' => null,
-            'rejection_reason' => null,
-            'changes_requested_by' => null,
-            'changes_requested_at' => null,
-            'changes_notes' => null,
-            'admin_rejected_by' => null,
-            'admin_rejected_at' => null,
-            'admin_changes_requested_by' => null,
-            'admin_changes_requested_at' => null,
-        ]);
-
-        $this->writeAudit(
-            $request,
-            'admin_operator_approved',
-            'provider_admin_validation',
-            'Operador validado por administracion.',
-            [
-                'old_values' => [
-                    ...$previousState,
-                    'provider_id' => $provider->id,
-                ],
-                'new_values' => [
-                    'provider_id' => $provider->id,
-                    'event_type' => 'admin_operator_approved',
-                    'title' => 'Operador validado por administracion',
-                    'description' => $provider->company_name ?: $provider->legal_name ?: 'Proveedor',
-                    'admin_notes' => $adminNotes,
-                    'access_enabled' => true,
-                    'admin_validation_status' => 'approved',
-                ],
-            ]
-        );
+            $this->writeAudit(
+                $request,
+                'admin_operator_approved',
+                'provider_admin_validation',
+                'Proveedor aprobado por administracion.',
+                [
+                    'old_values' => [
+                        ...($context['previous_state'] ?? []),
+                        'provider_id' => $approvedProvider->id,
+                    ],
+                    'new_values' => [
+                        'provider_id' => $approvedProvider->id,
+                        'event_type' => 'admin_operator_approved',
+                        'title' => 'Proveedor aprobado por administracion',
+                        'description' => $approvedProvider->company_name ?: $approvedProvider->legal_name ?: 'Proveedor',
+                        'admin_notes' => $context['admin_notes'] ?? null,
+                        'access_enabled' => true,
+                        'admin_validation_status' => 'approved',
+                        'operator_status' => 'active',
+                    ],
+                ]
+            );
+        });
 
         return $this->ok([
-            'provider' => $this->serializeProvider($provider->fresh(['user.profile', 'aircraft', 'companyDocuments'])),
+            'provider' => $this->serializeProvider($result['provider']),
         ]);
     }
 
@@ -478,65 +443,33 @@ class AdministradorControlador extends ControladorBase
             'changes_notes' => ['nullable', 'string', 'max:5000'],
         ]);
 
-        $changesNotes = trim((string) ($data['changes_notes'] ?? $data['notes'] ?? ''));
-        $adminNotes = trim((string) ($data['admin_notes'] ?? $data['notes'] ?? ''));
-        $previousState = $provider->only([
-            'admin_validation_status',
-            'operator_status',
-            'access_enabled',
-            'changes_requested_at',
-            'changes_notes',
-            'admin_notes',
-        ]);
-
-        $provider->update([
-            'admin_validation_status' => 'changes_required',
-            'operator_status' => 'changes_required',
-            'approval_status' => 'pending',
-            'status' => 'changes_required',
-            'access_enabled' => false,
-            'changes_requested_by' => $request->user()?->id,
-            'changes_requested_at' => now(),
-            'changes_notes' => $changesNotes,
-            'admin_notes' => $adminNotes,
-            'admin_validation_notes' => $adminNotes,
-            'validated_by' => null,
-            'validated_at' => null,
-            'rejected_by' => null,
-            'rejected_at' => null,
-            'rejection_reason' => null,
-            'admin_changes_requested_by' => $request->user()?->id,
-            'admin_changes_requested_at' => now(),
-            'admin_validated_by' => null,
-            'admin_validated_at' => null,
-            'admin_rejected_by' => null,
-            'admin_rejected_at' => null,
-        ]);
-
-        $this->writeAudit(
-            $request,
-            'admin_changes_requested',
-            'provider_admin_validation',
-            'Cambios solicitados por administracion.',
-            [
-                'old_values' => [
-                    ...$previousState,
-                    'provider_id' => $provider->id,
-                ],
-                'new_values' => [
-                    'provider_id' => $provider->id,
-                    'event_type' => 'admin_changes_requested',
-                    'title' => 'Cambios solicitados por administracion',
-                    'description' => $changesNotes,
-                    'admin_notes' => $adminNotes,
-                    'admin_validation_status' => 'changes_required',
-                    'access_enabled' => false,
-                ],
-            ]
-        );
+        $result = $this->adminProviderApprovalService->requestChanges($provider, $request->user(), $data, function (Proveedor $updatedProvider, array $context) use ($request) {
+            $this->writeAudit(
+                $request,
+                'admin_changes_requested',
+                'provider_admin_validation',
+                'Cambios solicitados por administracion.',
+                [
+                    'old_values' => [
+                        ...($context['previous_state'] ?? []),
+                        'provider_id' => $updatedProvider->id,
+                    ],
+                    'new_values' => [
+                        'provider_id' => $updatedProvider->id,
+                        'event_type' => 'admin_changes_requested',
+                        'title' => 'Cambios solicitados por administracion',
+                        'description' => $context['changes_notes'] ?? null,
+                        'admin_notes' => $context['admin_notes'] ?? null,
+                        'admin_validation_status' => 'changes_requested',
+                        'operator_status' => 'incomplete',
+                        'access_enabled' => false,
+                    ],
+                ]
+            );
+        });
 
         return $this->ok([
-            'provider' => $this->serializeProvider($provider->fresh(['user.profile', 'aircraft', 'companyDocuments'])),
+            'provider' => $this->serializeProvider($result['provider']),
         ]);
     }
 
@@ -548,65 +481,33 @@ class AdministradorControlador extends ControladorBase
             'rejection_reason' => ['nullable', 'string', 'max:5000'],
         ]);
 
-        $rejectionReason = trim((string) ($data['rejection_reason'] ?? $data['notes'] ?? ''));
-        $adminNotes = trim((string) ($data['admin_notes'] ?? $data['notes'] ?? ''));
-        $previousState = $provider->only([
-            'admin_validation_status',
-            'operator_status',
-            'access_enabled',
-            'rejected_at',
-            'rejection_reason',
-            'admin_notes',
-        ]);
-
-        $provider->update([
-            'admin_validation_status' => 'rejected',
-            'operator_status' => 'rejected',
-            'approval_status' => 'rejected',
-            'status' => 'rejected',
-            'access_enabled' => false,
-            'rejected_by' => $request->user()?->id,
-            'rejected_at' => now(),
-            'rejection_reason' => $rejectionReason,
-            'admin_notes' => $adminNotes,
-            'admin_validation_notes' => $adminNotes,
-            'validated_by' => null,
-            'validated_at' => null,
-            'changes_requested_by' => null,
-            'changes_requested_at' => null,
-            'changes_notes' => null,
-            'admin_rejected_by' => $request->user()?->id,
-            'admin_rejected_at' => now(),
-            'admin_validated_by' => null,
-            'admin_validated_at' => null,
-            'admin_changes_requested_by' => null,
-            'admin_changes_requested_at' => null,
-        ]);
-
-        $this->writeAudit(
-            $request,
-            'admin_operator_rejected',
-            'provider_admin_validation',
-            'Validacion administrativa cancelada.',
-            [
-                'old_values' => [
-                    ...$previousState,
-                    'provider_id' => $provider->id,
-                ],
-                'new_values' => [
-                    'provider_id' => $provider->id,
-                    'event_type' => 'admin_operator_rejected',
-                    'title' => 'Validacion cancelada por administracion',
-                    'description' => $rejectionReason,
-                    'admin_notes' => $adminNotes,
-                    'admin_validation_status' => 'rejected',
-                    'access_enabled' => false,
-                ],
-            ]
-        );
+        $result = $this->adminProviderApprovalService->reject($provider, $request->user(), $data, function (Proveedor $updatedProvider, array $context) use ($request) {
+            $this->writeAudit(
+                $request,
+                'admin_operator_rejected',
+                'provider_admin_validation',
+                'Proveedor rechazado por administracion.',
+                [
+                    'old_values' => [
+                        ...($context['previous_state'] ?? []),
+                        'provider_id' => $updatedProvider->id,
+                    ],
+                    'new_values' => [
+                        'provider_id' => $updatedProvider->id,
+                        'event_type' => 'admin_operator_rejected',
+                        'title' => 'Proveedor rechazado por administracion',
+                        'description' => $context['rejection_reason'] ?? null,
+                        'admin_notes' => $context['admin_notes'] ?? null,
+                        'admin_validation_status' => 'rejected',
+                        'operator_status' => 'rejected',
+                        'access_enabled' => false,
+                    ],
+                ]
+            );
+        });
 
         return $this->ok([
-            'provider' => $this->serializeProvider($provider->fresh(['user.profile', 'aircraft', 'companyDocuments'])),
+            'provider' => $this->serializeProvider($result['provider']),
         ]);
     }
 
@@ -1239,14 +1140,26 @@ class AdministradorControlador extends ControladorBase
     {
         $normalized = strtolower(trim((string) ($provider->admin_validation_status ?: '')));
         if ($normalized !== '') {
-            if ($normalized === 'expediente_incompleto') return 'draft';
-            return $normalized;
+            if (in_array($normalized, ['draft', 'pending_validation', 'pending_review', 'incomplete'], true)) {
+                return match (strtolower(trim((string) $provider->approval_status))) {
+                    'approved' => 'approved',
+                    'rejected' => 'rejected',
+                    'changes_requested', 'changes_required', 'suspended' => 'changes_requested',
+                    default => $normalized,
+                };
+            }
+
+            return match ($normalized) {
+                'expediente_incompleto' => 'draft',
+                'changes_requested', 'changes_required', 'suspended' => 'changes_requested',
+                default => $normalized,
+            };
         }
 
         return match (strtolower(trim((string) $provider->approval_status))) {
             'approved' => 'approved',
             'rejected' => 'rejected',
-            'suspended' => 'changes_required',
+            'changes_requested', 'changes_required', 'suspended' => 'changes_requested',
             default => ($provider->admin_review_submitted_at ? 'pending_review' : 'draft'),
         };
     }
@@ -1255,13 +1168,17 @@ class AdministradorControlador extends ControladorBase
     {
         $normalized = strtolower(trim((string) ($provider->operator_status ?: '')));
         if ($normalized !== '') {
-            return $normalized;
+            return match ($normalized) {
+                'validated', 'active' => 'active',
+                'changes_requested', 'changes_required' => 'incomplete',
+                default => $normalized,
+            };
         }
 
         return match ($adminValidationStatus ?: $this->resolveAdminValidationStatus($provider)) {
-            'approved' => 'validated',
+            'approved' => 'active',
             'rejected' => 'rejected',
-            'changes_required' => 'changes_required',
+            'changes_requested' => 'incomplete',
             'pending_review', 'pending_validation' => 'pending_review',
             default => 'incomplete',
         };
@@ -1388,7 +1305,6 @@ class AdministradorControlador extends ControladorBase
         $documentsApproved = $this->documentsAreApproved($legalDocuments);
         $pendingLegalDocumentLabels = $this->pendingDocumentLabels($legalDocuments);
         $satApproved = $this->providerHasApprovedSatValidation($provider, $documents);
-        $activeAircraft = $this->providerHasApprovedAircraft($provider);
         $requirementReviews = $this->providerRequirementReviews($provider);
 
         return array_map(function (array $item) use ($requirementReviews) {
@@ -1437,12 +1353,6 @@ class AdministradorControlador extends ControladorBase
                 'message' => 'Falta base operativa definida.',
             ],
             [
-                'key' => 'aircraft_active',
-                'label' => 'Aeronave activa o aprobada',
-                'complete' => $activeAircraft,
-                'message' => 'Se requiere al menos una aeronave activa o aprobada.',
-            ],
-            [
                 'key' => 'contact_complete',
                 'label' => 'Datos de contacto completos',
                 'complete' => $contactComplete,
@@ -1453,6 +1363,12 @@ class AdministradorControlador extends ControladorBase
                 'label' => 'Representante legal completo',
                 'complete' => filled($provider->representative_name),
                 'message' => 'Falta representante legal completo.',
+            ],
+            [
+                'key' => 'review_submitted',
+                'label' => 'Expediente enviado a revision',
+                'complete' => (bool) $provider->admin_review_submitted_at,
+                'message' => 'El proveedor aun no envia el expediente a revision administrativa.',
             ],
         ]);
     }

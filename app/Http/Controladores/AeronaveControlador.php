@@ -49,6 +49,18 @@ class AeronaveControlador extends ControladorBase
     {
     }
 
+
+    private function ensureProviderOperationalAccess(Request $request): void
+    {
+        if ($request->user()?->hasRole('admin')) {
+            return;
+        }
+
+        $provider = $request->user()?->provider ?: $request->user()?->ownedProvider;
+        abort_if(! $provider, 404, 'Proveedor no encontrado.');
+        abort_if(! $provider->isApprovedForOperations(), 403, 'Tu expediente esta en revision administrativa. El acceso operativo se habilita cuando un administrador aprueba completamente al proveedor.');
+    }
+
     private const AIRCRAFT_CATEGORIES = [
         'Helicoptero',
         'Turboprop',
@@ -155,6 +167,7 @@ class AeronaveControlador extends ControladorBase
         $providerId = $this->resolvedProviderIdOrAbort($request);
         $provider = $request->user()->provider ?: $request->user()->ownedProvider;
         abort_if(! $provider || (int) $provider->id !== $providerId, 422, 'El usuario proveedor no tiene provider_id asignado.');
+        $this->ensureProviderOperationalAccess($request);
 
         $data = $this->normalizeAircraftInput($request->validate($this->rules()));
         $aircraft = $provider->aircraft()->create($data + [
@@ -988,6 +1001,10 @@ class AeronaveControlador extends ControladorBase
         }
 
         abort_if($aircraft->provider_id !== $this->resolvedProviderIdOrAbort($request, 403), 403, 'No puedes gestionar esta aeronave.');
+
+        if (! $request->isMethod('get') && ! $request->isMethod('head')) {
+            $this->ensureProviderOperationalAccess($request);
+        }
     }
 
     private function formatPublicAircraftPayload(Aeronave $aircraft): array

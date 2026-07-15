@@ -497,6 +497,7 @@ class ProveedorControlador extends ControladorBase
     public function acceptRequest(Request $request, SolicitudVuelo $flightRequest)
     {
         $providerId = $this->resolvedProviderIdOrAbort($request, 404);
+        $this->ensureOperationalAccess($request);
 
         $match = $flightRequest->matches()->where('provider_id', $providerId)->first();
         $match?->loadMissing('aircraft');
@@ -529,6 +530,7 @@ class ProveedorControlador extends ControladorBase
     public function rejectRequest(Request $request, SolicitudVuelo $flightRequest)
     {
         $providerId = $this->resolvedProviderIdOrAbort($request, 404);
+        $this->ensureOperationalAccess($request);
 
         $flightRequest->matches()->where('provider_id', $providerId)->update([
             'status' => 'rejected',
@@ -705,6 +707,7 @@ class ProveedorControlador extends ControladorBase
     public function updateOperation(Request $request, Operacion $operation)
     {
         $providerId = $this->resolvedProviderIdOrAbort($request, 403);
+        $this->ensureOperationalAccess($request);
         abort_if($operation->provider_id !== $providerId, 403, 'No puedes actualizar esta operacion.');
 
         $data = $request->validate([
@@ -1108,6 +1111,7 @@ class ProveedorControlador extends ControladorBase
     public function storeIncident(Request $request)
     {
         $providerId = $this->resolvedProviderIdOrAbort($request, 404);
+        $this->ensureOperationalAccess($request);
 
         $data = $request->validate([
             'operation_id' => ['nullable', 'exists:operations,id'],
@@ -1159,6 +1163,7 @@ class ProveedorControlador extends ControladorBase
     public function updateIncident(Request $request, LineaTiempoOperacion $timeline)
     {
         $providerId = $this->resolvedProviderIdOrAbort($request, 403);
+        $this->ensureOperationalAccess($request);
         $timeline->loadMissing('operacion');
         abort_if(! $timeline->operacion || $timeline->operacion->provider_id !== $providerId, 403, 'No puedes editar esta incidencia.');
 
@@ -1334,6 +1339,7 @@ class ProveedorControlador extends ControladorBase
             'admin_rejected_at' => optional($provider?->admin_rejected_at)?->toISOString(),
             'admin_changes_requested_at' => optional($provider?->admin_changes_requested_at)?->toISOString(),
             'access_enabled' => $accessEnabled,
+            'can_register_aircraft' => $accessEnabled,
             'provider_validation_requirements' => $provider ? $this->providerRequirementReviews($provider) : [],
             'validation_requirements' => $checklist,
             'can_validate' => collect($checklist)->every(fn (array $item) => (bool) ($item['complete'] ?? false)),
@@ -1697,7 +1703,7 @@ class ProveedorControlador extends ControladorBase
                 return match ($approvalStatus) {
                     'approved' => 'approved',
                     'rejected' => 'rejected',
-                    'suspended' => 'changes_required',
+                    'changes_requested', 'changes_required', 'suspended' => 'changes_requested',
                     default => $normalized,
                 };
             }
@@ -1708,7 +1714,7 @@ class ProveedorControlador extends ControladorBase
         return match ($approvalStatus) {
             'approved' => 'approved',
             'rejected' => 'rejected',
-            'suspended' => 'changes_required',
+            'changes_requested', 'changes_required', 'suspended' => 'changes_requested',
             default => ($provider->admin_review_submitted_at ? 'pending_review' : 'draft'),
         };
     }
@@ -1717,13 +1723,17 @@ class ProveedorControlador extends ControladorBase
     {
         $normalized = strtolower(trim((string) ($provider->operator_status ?: '')));
         if ($normalized !== '') {
-            return $normalized;
+            return match ($normalized) {
+                'validated', 'active' => 'active',
+                'changes_requested', 'changes_required' => 'incomplete',
+                default => $normalized,
+            };
         }
 
         return match ($adminValidationStatus ?: $this->resolveAdminValidationStatus($provider)) {
-            'approved' => 'validated',
+            'approved' => 'active',
             'rejected' => 'rejected',
-            'changes_required' => 'changes_required',
+            'changes_requested' => 'incomplete',
             'pending_review', 'pending_validation' => 'pending_review',
             default => 'incomplete',
         };
@@ -1731,18 +1741,14 @@ class ProveedorControlador extends ControladorBase
 
     private function resolveProviderAccessEnabled(Proveedor $provider, ?string $adminValidationStatus = null): bool
     {
-        $approvalStatus = strtolower(trim((string) $provider->approval_status));
-        $resolvedAdminStatus = $adminValidationStatus ?: $this->resolveAdminValidationStatus($provider);
-
-        if ($approvalStatus === 'approved' && $resolvedAdminStatus === 'approved') {
-            return true;
-        }
-
         if ($provider->access_enabled !== null) {
             return (bool) $provider->access_enabled;
         }
 
-        return false;
+        $approvalStatus = strtolower(trim((string) $provider->approval_status));
+        $resolvedAdminStatus = $adminValidationStatus ?: $this->resolveAdminValidationStatus($provider);
+
+        return $approvalStatus === 'approved' && $resolvedAdminStatus === 'approved';
     }
 
     private function resolveSatValidationStatus(Proveedor $provider, array $taxData = []): string
@@ -1820,7 +1826,6 @@ class ProveedorControlador extends ControladorBase
         $legalDocuments = $this->providerLegalDocuments($documents);
         $documentsApproved = $this->documentsAreApproved($legalDocuments);
         $pendingLegalDocumentLabels = $this->pendingDocumentLabels($legalDocuments);
-        $activeAircraft = $this->providerHasApprovedAircraft($provider);
         $satApproved = $this->providerHasApprovedSatValidation($provider, $documents, $taxData);
         $contactComplete = filled($provider->company_phone) && filled($provider->company_email);
         $representativeComplete = filled($provider->representative_name) && filled($provider->representative_phone);
@@ -1872,12 +1877,6 @@ class ProveedorControlador extends ControladorBase
                 'message' => 'Falta base operativa definida.',
             ],
             [
-                'key' => 'aircraft_active',
-                'label' => 'Aeronave activa o aprobada',
-                'complete' => $activeAircraft,
-                'message' => 'Se requiere al menos una aeronave activa o aprobada.',
-            ],
-            [
                 'key' => 'contact_complete',
                 'label' => 'Datos de contacto completos',
                 'complete' => $contactComplete,
@@ -1889,6 +1888,12 @@ class ProveedorControlador extends ControladorBase
                 'complete' => $representativeComplete,
                 'message' => 'Falta representante legal completo.',
             ],
+            [
+                'key' => 'review_submitted',
+                'label' => 'Expediente enviado a revision',
+                'complete' => (bool) $provider->admin_review_submitted_at,
+                'message' => 'El proveedor aun no envia el expediente a revision administrativa.',
+            ],
         ]);
     }
 
@@ -1897,6 +1902,18 @@ class ProveedorControlador extends ControladorBase
         return is_array($provider->provider_validation_requirements)
             ? $provider->provider_validation_requirements
             : [];
+    }
+
+
+    private function ensureOperationalAccess(Request $request): void
+    {
+        if ($request->user()?->hasRole('admin')) {
+            return;
+        }
+
+        $provider = $request->user()?->provider ?: $request->user()?->ownedProvider;
+        abort_if(! $provider, 404, 'Proveedor no encontrado.');
+        abort_if(! $provider->isApprovedForOperations(), 403, 'Tu expediente sigue en revision administrativa. El acceso operativo se habilita cuando un administrador aprueba completamente al proveedor.');
     }
 
     private function formatOperationPayload(Operacion $operation): array

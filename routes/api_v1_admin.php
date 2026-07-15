@@ -42,6 +42,7 @@ Route::prefix('admin')->middleware(['auth.token', 'role:admin'])->group(function
     Route::post('/proveedores/{provider}/documentos/{document}/rejected', [AdministradorControlador::class, 'rejectProviderDocument']);
     Route::post('/proveedores/{provider}/requisitos/{requirement}/aprobar', [AdministradorControlador::class, 'approveProviderRequirement']);
     Route::post('/proveedores/{provider}/requisitos/{requirement}/rechazar', [AdministradorControlador::class, 'rejectProviderRequirement']);
+    Route::post('/providers/{provider}/approve', [AdministradorControlador::class, 'approveProveedor']);
     Route::post('/providers/{provider}/validate', [AdministradorControlador::class, 'validateProveedor']);
     Route::post('/providers/{provider}/request-changes', [AdministradorControlador::class, 'requestProviderChanges']);
     Route::post('/providers/{provider}/reject', [AdministradorControlador::class, 'rejectProviderValidation']);

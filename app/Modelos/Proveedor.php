@@ -155,15 +155,15 @@ class Proveedor extends Model
     {
         $resolvedStatus = self::normalizeStatusValue($this->resolvedApprovalStatus());
 
-        if ($resolvedStatus === 'approved') {
-            return true;
-        }
-
-        if (in_array($resolvedStatus, ['rejected', 'changes_required', 'suspended', 'pending_review', 'pending_validation', self::ADMIN_VALIDATION_DRAFT_STATUS, 'incomplete'], true)) {
+        if (in_array($resolvedStatus, ['rejected', 'changes_requested', 'changes_required', 'suspended', 'pending_review', 'pending_validation', self::ADMIN_VALIDATION_DRAFT_STATUS, 'incomplete'], true)) {
             return false;
         }
 
-        return (bool) $this->access_enabled;
+        if ($this->access_enabled !== null) {
+            return $resolvedStatus === 'approved' && (bool) $this->access_enabled;
+        }
+
+        return $resolvedStatus === 'approved';
     }
 
     public function scopeApprovedForOperations(Builder $query): Builder

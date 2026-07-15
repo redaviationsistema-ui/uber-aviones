@@ -68,6 +68,18 @@ class OperadorControlador extends ControladorBase
     {
     }
 
+
+    private function ensureOperationalProviderAccess(Request $request): void
+    {
+        if ($request->user()?->hasRole('admin')) {
+            return;
+        }
+
+        $provider = $request->user()?->provider ?: $request->user()?->ownedProvider;
+        abort_if(! $provider, 404, 'Proveedor no encontrado.');
+        abort_if(! $provider->isApprovedForOperations(), 403, 'Tu expediente sigue en revision administrativa. El acceso operativo se habilita cuando un administrador aprueba completamente al proveedor.');
+    }
+
     public function dashboard(Request $request)
     {
         $provider = $request->user()->provider;
@@ -108,6 +120,15 @@ class OperadorControlador extends ControladorBase
                 'margin_percent' => $provider?->margin_percent,
                 'fixed_fee' => $provider?->fixed_fee,
                 'approval_status' => $provider?->approval_status,
+                'admin_validation_status' => $provider?->admin_validation_status,
+                'operator_status' => $provider?->operator_status,
+                'access_enabled' => (bool) ($provider?->access_enabled ?? false),
+                'can_register_aircraft' => (bool) ($provider?->access_enabled ?? false),
+                'admin_review_submitted_at' => optional($provider?->admin_review_submitted_at)?->toISOString(),
+                'admin_notes' => $provider?->admin_notes ?? $provider?->admin_validation_notes ?? $provider?->notes,
+                'admin_validation_notes' => $provider?->admin_validation_notes ?? $provider?->admin_notes ?? $provider?->notes,
+                'changes_notes' => $provider?->changes_notes,
+                'rejection_reason' => $provider?->rejection_reason,
             ],
             'membership' => $plan ? [
                 'plan_id' => $plan->id,
@@ -129,6 +150,7 @@ class OperadorControlador extends ControladorBase
 
     public function storeAircraft(Request $request)
     {
+        $this->ensureOperationalProviderAccess($request);
         $this->rejectForbiddenPayloadFields($request, self::PROVIDER_FORBIDDEN_AIRCRAFT_FIELDS, 'El proveedor no puede definir estados comerciales u operativos de la aeronave.');
         $providerId = $this->resolvedProviderIdOrAbort($request);
 
@@ -268,6 +290,7 @@ class OperadorControlador extends ControladorBase
 
     public function updateAircraft(Request $request, Aeronave $aircraft)
     {
+        $this->ensureOperationalProviderAccess($request);
         abort_if($aircraft->provider_id !== $this->resolvedProviderIdOrAbort($request, 403), 403);
         $this->rejectForbiddenPayloadFields($request, self::PROVIDER_FORBIDDEN_AIRCRAFT_FIELDS, 'El proveedor no puede modificar estados comerciales u operativos de la aeronave.');
 
@@ -292,6 +315,7 @@ class OperadorControlador extends ControladorBase
 
     public function storeAvailability(Request $request)
     {
+        $this->ensureOperationalProviderAccess($request);
         $data = $request->validate([
             'aircraft_id' => ['required', 'exists:aircraft,id'],
             'start_datetime' => ['required', 'date'],
@@ -397,6 +421,7 @@ class OperadorControlador extends ControladorBase
     public function accept(Request $request, SolicitudVuelo $flightRequest)
     {
         $providerId = $this->resolvedProviderIdOrAbort($request);
+        $this->ensureOperationalProviderAccess($request);
         $match = $flightRequest->matches()->where('provider_id', $providerId)->firstOrFail();
         $match->loadMissing('aircraft');
 
@@ -446,6 +471,7 @@ class OperadorControlador extends ControladorBase
     public function reject(Request $request, SolicitudVuelo $flightRequest)
     {
         $providerId = $this->resolvedProviderIdOrAbort($request);
+        $this->ensureOperationalProviderAccess($request);
         $match = $flightRequest->matches()->where('provider_id', $providerId)->firstOrFail();
         $match->update([
             'status' => 'rejected',
@@ -478,7 +504,7 @@ class OperadorControlador extends ControladorBase
     public function subscribeAircraft(Request $request, Aeronave $aircraft)
     {
         abort_if($aircraft->provider_id !== $this->resolvedProviderIdOrAbort($request, 403), 403, 'No puedes suscribir aeronaves de otro proveedor.');
-        abort_if(! $request->user()->provider?->isApprovedForOperations(), 403, 'Proveedor pendiente de validacion por Admin.');
+        $this->ensureOperationalProviderAccess($request);
 
         $data = $request->validate([
             'plan_id' => ['nullable', 'exists:plans,id'],

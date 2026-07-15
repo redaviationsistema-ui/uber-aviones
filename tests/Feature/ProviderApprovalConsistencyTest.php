@@ -22,6 +22,7 @@ class ProviderApprovalConsistencyTest extends TestCase
             'approval_status' => 'pending',
             'admin_validation_status' => 'approved',
             'status' => 'pending',
+            'access_enabled' => true,
         ]);
 
         $rejectedByAdmin = $this->createProvider([
@@ -59,6 +60,7 @@ class ProviderApprovalConsistencyTest extends TestCase
             'approval_status' => 'pending',
             'admin_validation_status' => 'approved',
             'status' => 'pending',
+            'access_enabled' => true,
         ]);
 
         $aircraft = $this->createAircraft($provider, [
@@ -95,6 +97,7 @@ class ProviderApprovalConsistencyTest extends TestCase
             'approval_status' => 'pending',
             'admin_validation_status' => 'approved',
             'status' => 'pending',
+            'access_enabled' => true,
         ]);
 
         $aircraft = $this->createAircraft($provider, [
@@ -126,6 +129,7 @@ class ProviderApprovalConsistencyTest extends TestCase
             'approval_status' => 'pending',
             'admin_validation_status' => 'approved',
             'status' => 'pending',
+            'access_enabled' => true,
         ]);
 
         $aircraft = $this->createAircraft($provider, [
@@ -172,6 +176,7 @@ class ProviderApprovalConsistencyTest extends TestCase
             'approval_status' => 'pending',
             'admin_validation_status' => 'approved',
             'status' => 'pending',
+            'access_enabled' => true,
         ]);
 
         $aircraft = $this->createAircraft($provider, [
