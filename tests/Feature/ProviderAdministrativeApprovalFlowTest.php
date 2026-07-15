@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Modelos\DocumentoEmpresa;
+use App\Modelos\Perfil;
 use App\Modelos\Proveedor;
 use App\Modelos\TokenApi;
 use App\Modelos\Usuario;
@@ -41,6 +42,36 @@ class ProviderAdministrativeApprovalFlowTest extends TestCase
         ]);
     }
 
+    public function test_legal_representative_requirement_uses_captured_name_even_without_representative_phone(): void
+    {
+        $this->seed();
+
+        $admin = $this->createAdmin();
+        $provider = $this->createProviderForReview([
+            'representative_name' => 'Laura Campos',
+            'representative_phone' => null,
+        ]);
+        $this->attachRequiredApprovedDocuments($provider);
+
+        $detailResponse = $this->withToken(TokenApi::issue($admin))
+            ->getJson('/api/v1/admin/providers/'.$provider->id.'/detail')
+            ->assertOk();
+
+        $representativeRequirement = collect($detailResponse->json('provider.validation_requirements', []))
+            ->firstWhere('key', 'legal_representative_complete');
+
+        $this->assertNotNull($representativeRequirement);
+        $this->assertTrue((bool) ($representativeRequirement['complete'] ?? false));
+
+        $this->withToken(TokenApi::issue($admin))
+            ->postJson('/api/v1/admin/providers/'.$provider->id.'/approve', [
+                'admin_notes' => 'Aprobado con representante legal capturado.',
+            ])
+            ->assertOk()
+            ->assertJsonPath('provider.approval_status', 'approved')
+            ->assertJsonPath('provider.access_enabled', true);
+    }
+
     public function test_admin_cannot_approve_incomplete_provider_and_receives_missing_requirements(): void
     {
         $this->seed();
@@ -62,6 +93,63 @@ class ProviderAdministrativeApprovalFlowTest extends TestCase
             'approval_status' => 'pending',
             'access_enabled' => false,
         ]);
+    }
+
+    public function test_provider_can_submit_review_and_persist_submitted_timestamp(): void
+    {
+        $this->seed();
+
+        [$user, $provider] = $this->createProviderContext([
+            'rfc' => 'PRV010101AAA',
+            'sat_validation_status' => 'approved',
+        ]);
+        $this->attachRequiredApprovedDocuments($provider);
+
+        $before = $provider->fresh();
+        $this->assertNull($before->admin_review_submitted_at);
+
+        $response = $this->withToken(TokenApi::issue($user))
+            ->post('/api/v1/proveedor/empresa/enviar-revision');
+
+        $response->assertOk()
+            ->assertJsonPath('company.admin_validation_status', 'pending_review');
+
+        $after = $provider->fresh();
+        $this->assertNotNull($after->admin_review_submitted_at);
+        $this->assertSame('pending_review', $after->admin_validation_status);
+        $this->assertSame('pending_review', $after->operator_status);
+    }
+
+    public function test_provider_updates_after_submission_do_not_clear_review_timestamp(): void
+    {
+        $this->seed();
+
+        [$user, $provider] = $this->createProviderContext([
+            'rfc' => 'PRV010101AAA',
+            'sat_validation_status' => 'approved',
+            'admin_review_submitted_at' => now(),
+            'admin_validation_status' => 'pending_review',
+            'operator_status' => 'pending_review',
+            'status' => 'pending_review',
+        ]);
+
+        $submittedAt = $provider->admin_review_submitted_at?->toISOString();
+
+        $this->withToken(TokenApi::issue($user))
+            ->putJson('/api/v1/proveedor/empresa', [
+                'legal_name' => 'Proveedor Base SA de CV Actualizado',
+                'commercial_name' => 'Proveedor Base',
+                'company_name' => 'Proveedor Base',
+                'rfc' => 'PRV010101AAA',
+                'company_phone' => '5550001111',
+                'company_email' => 'proveedor-base@test.dev',
+                'base_airport' => 'MMMX',
+                'address' => 'Toluca Centro 123',
+                'representative_name' => 'Base Legal',
+            ])
+            ->assertOk();
+
+        $this->assertSame($submittedAt, $provider->fresh()->admin_review_submitted_at?->toISOString());
     }
 
     public function test_admin_can_request_changes_and_keep_operational_access_blocked(): void
@@ -206,6 +294,40 @@ class ProviderAdministrativeApprovalFlowTest extends TestCase
             ->assertForbidden();
     }
 
+    public function test_admin_provider_payloads_include_normalized_status_summary(): void
+    {
+        $this->seed();
+
+        $admin = $this->createAdmin();
+        $provider = $this->createProviderForReview([
+            'approval_status' => 'approved',
+            'admin_validation_status' => 'approved',
+            'operator_status' => 'active',
+            'status' => 'approved',
+            'access_enabled' => true,
+        ]);
+        $this->attachRequiredApprovedDocuments($provider);
+
+        $listResponse = $this->withToken(TokenApi::issue($admin))
+            ->getJson('/api/v1/admin/providers')
+            ->assertOk();
+
+        $listProvider = collect($listResponse->json('providers.data', []))
+            ->firstWhere('provider_id', $provider->id);
+
+        $this->assertNotNull($listProvider);
+        $this->assertSame('approved', $listProvider['provider_status_summary']['status'] ?? null);
+        $this->assertSame(6, $listProvider['provider_status_summary']['document_summary']['approved'] ?? null);
+        $this->assertSame('no_aircraft', $listProvider['provider_status_summary']['fleet_summary']['status'] ?? null);
+
+        $this->withToken(TokenApi::issue($admin))
+            ->getJson('/api/v1/admin/providers/'.$provider->id.'/detail')
+            ->assertOk()
+            ->assertJsonPath('provider.provider_status_summary.status', 'approved')
+            ->assertJsonPath('provider.provider_status_summary.progress', 100)
+            ->assertJsonPath('provider.provider_status_summary.document_summary.total', 6);
+    }
+
     private function createAdmin(): Usuario
     {
         $admin = Usuario::factory()->create([
@@ -250,6 +372,15 @@ class ProviderAdministrativeApprovalFlowTest extends TestCase
             'email' => sprintf('provider.%s@test.dev', uniqid()),
         ]);
         $user->syncRoles([Usuario::ROLE_PROVIDER], Usuario::ROLE_PROVIDER);
+
+        Perfil::query()->create([
+            'user_id' => $user->id,
+            'address' => 'Toluca Centro 123',
+            'base_airport' => 'MMMX',
+            'tax_data' => [
+                'legal_representative' => 'Base Legal',
+            ],
+        ]);
 
         $provider = Proveedor::query()->create([
             'user_id' => $user->id,

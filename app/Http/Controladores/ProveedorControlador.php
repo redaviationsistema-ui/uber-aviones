@@ -31,6 +31,8 @@ use Illuminate\Validation\ValidationException;
 
 class ProveedorControlador extends ControladorBase
 {
+    private const MEXICAN_RFC_PATTERN = '/^([A-Z&Ñ]{3,4})\d{6}[A-Z0-9]{3}$/u';
+
     private const APPROVED_DOCUMENT_STATUSES = ['approved', 'aprobado', 'aprobada', 'vigente', 'validado'];
 
     private const APPROVED_AIRCRAFT_STATUSES = ['active', 'trial_active', 'inactive', 'approved', 'aprobada', 'aprobado'];
@@ -132,7 +134,6 @@ class ProveedorControlador extends ControladorBase
             'company_phone' => ['nullable', 'string', 'max:50'],
             'company_email' => ['nullable', 'email', 'max:255'],
             'base_airport' => ['nullable', 'string', 'max:20'],
-            'status' => ['nullable', 'string', 'max:50'],
             'phone' => ['nullable', 'string', 'max:50'],
             'email' => ['nullable', 'email', 'max:255', Rule::unique('users', 'email')->ignore($user->id)],
             'address' => ['nullable', 'string', 'max:255'],
@@ -148,7 +149,6 @@ class ProveedorControlador extends ControladorBase
             'jet_a_price' => ['nullable', 'numeric', 'min:0'],
             'margin_percent' => ['nullable', 'numeric', 'min:0'],
             'fixed_fee' => ['nullable', 'numeric', 'min:0'],
-            'admin_notes' => ['nullable', 'string'],
             'documents' => ['nullable', 'array'],
             'documents.*.name' => ['nullable', 'string', 'max:255'],
             'documents.*.state' => ['nullable', 'string', 'max:100'],
@@ -201,7 +201,6 @@ class ProveedorControlador extends ControladorBase
             'company_phone' => $data['company_phone'] ?? $data['phone'] ?? $provider->company_phone,
             'company_email' => $data['company_email'] ?? $data['email'] ?? $provider->company_email,
             'base_airport' => $data['base_airport'] ?? $profile->base_airport ?? $provider->base_airport,
-            'status' => $data['status'] ?? $provider->status ?? $provider->approval_status,
             'representative_name' => $data['representative_name'] ?? $data['legal_representative'] ?? $provider->representative_name,
             'representative_phone' => $data['representative_phone'] ?? $provider->representative_phone,
             'birth_date' => $data['birth_date'] ?? $profile->birth_date ?? $provider->birth_date,
@@ -213,7 +212,6 @@ class ProveedorControlador extends ControladorBase
             'jet_a_price' => $data['jet_a_price'] ?? $provider->jet_a_price,
             'margin_percent' => $data['margin_percent'] ?? $provider->margin_percent,
             'fixed_fee' => $data['fixed_fee'] ?? $provider->fixed_fee,
-            'notes' => $data['admin_notes'] ?? $provider->notes,
         ]);
 
         $user->update(array_filter([
@@ -315,6 +313,7 @@ class ProveedorControlador extends ControladorBase
             'admin_changes_requested_by' => null,
             'admin_changes_requested_at' => null,
         ]);
+        $provider->refresh();
         $this->writeAudit($request, 'submit_review', 'provider_company', 'Proveedor enviado a revision administrativa.', [
             'new_values' => [
                 'provider_id' => $provider->id,
@@ -1291,6 +1290,7 @@ class ProveedorControlador extends ControladorBase
         $satValidationStatus = $provider ? $this->resolveSatValidationStatus($provider, $taxData) : (filled($taxData['rfc'] ?? null) ? 'approved' : 'pending');
         $checklist = $provider ? $this->companyValidationChecklist($provider, $documents, $taxData) : [];
         $accessEnabled = $provider ? $this->resolveProviderAccessEnabled($provider, $adminValidationStatus) : false;
+        $providerStatusSummary = $provider ? $this->buildProviderStatusSummary($provider, $checklist, $documents) : null;
 
         return [
             'id' => $provider?->id,
@@ -1343,6 +1343,7 @@ class ProveedorControlador extends ControladorBase
             'provider_validation_requirements' => $provider ? $this->providerRequirementReviews($provider) : [],
             'validation_requirements' => $checklist,
             'can_validate' => collect($checklist)->every(fn (array $item) => (bool) ($item['complete'] ?? false)),
+            'provider_status_summary' => $providerStatusSummary,
             'documents' => $documents,
             'company_documents' => $documents,
             'legal_documents' => $documents,
@@ -1761,6 +1762,32 @@ class ProveedorControlador extends ControladorBase
         return filled($provider->rfc ?: ($taxData['rfc'] ?? null)) ? 'approved' : 'pending';
     }
 
+    private function normalizeMexicanRfc(?string $value): string
+    {
+        return Str::of((string) ($value ?? ''))
+            ->trim()
+            ->upper()
+            ->replace(' ', '')
+            ->value();
+    }
+
+    private function providerRequirementWasApproved(array $reviews, string $key): bool
+    {
+        $review = $reviews[$key] ?? null;
+        $status = strtolower(trim((string) ($review['status'] ?? '')));
+
+        return in_array($status, ['approved', 'aprobado', 'aprobada', 'validated', 'validado', 'validada'], true);
+    }
+
+    private function providerHasValidRfc(Proveedor $provider, array $taxData = [], array $requirementReviews = []): bool
+    {
+        if ($this->providerRequirementWasApproved($requirementReviews, 'rfc_valid')) {
+            return true;
+        }
+
+        return preg_match(self::MEXICAN_RFC_PATTERN, $this->normalizeMexicanRfc($provider->rfc ?: ($taxData['rfc'] ?? null))) === 1;
+    }
+
     private function providerSatDocuments(array $documents): array
     {
         return array_values(array_filter($documents, fn (array $document) => ($document['definition_key'] ?? '') === 'sat_certificate'));
@@ -1801,8 +1828,12 @@ class ProveedorControlador extends ControladorBase
             ->all();
     }
 
-    private function providerHasApprovedSatValidation(Proveedor $provider, array $documents, array $taxData = []): bool
+    private function providerHasApprovedSatValidation(Proveedor $provider, array $documents, array $taxData = [], array $requirementReviews = []): bool
     {
+        if ($this->providerRequirementWasApproved($requirementReviews, 'sat_validation')) {
+            return true;
+        }
+
         $satDocuments = $this->providerSatDocuments($documents);
         if ($satDocuments !== []) {
             return $this->documentsAreApproved($satDocuments);
@@ -1822,14 +1853,17 @@ class ProveedorControlador extends ControladorBase
 
     private function companyValidationChecklist(Proveedor $provider, array $documents, array $taxData = []): array
     {
-        $companyIdentityComplete = filled($provider->company_name) && filled($provider->commercial_name) && filled($provider->legal_name);
+        $requirementReviews = $this->providerRequirementReviews($provider);
+        $address = $provider->user?->profile?->address;
+        $companyIdentityComplete = filled($provider->commercial_name) && filled($provider->legal_name ?: $provider->company_name) && filled($address);
         $legalDocuments = $this->providerLegalDocuments($documents);
         $documentsApproved = $this->documentsAreApproved($legalDocuments);
         $pendingLegalDocumentLabels = $this->pendingDocumentLabels($legalDocuments);
-        $satApproved = $this->providerHasApprovedSatValidation($provider, $documents, $taxData);
+        $satApproved = $this->providerHasApprovedSatValidation($provider, $documents, $taxData, $requirementReviews);
         $contactComplete = filled($provider->company_phone) && filled($provider->company_email);
-        $representativeComplete = filled($provider->representative_name) && filled($provider->representative_phone);
-        $requirementReviews = $this->providerRequirementReviews($provider);
+        $representativeName = $provider->representative_name ?: ($taxData['legal_representative'] ?? null);
+        $representativeComplete = filled($representativeName);
+        $validRfc = $this->providerHasValidRfc($provider, $taxData, $requirementReviews);
 
         return array_map(function (array $item) use ($requirementReviews) {
             $review = $requirementReviews[$item['key']] ?? null;
@@ -1853,7 +1887,7 @@ class ProveedorControlador extends ControladorBase
             [
                 'key' => 'rfc_valid',
                 'label' => 'RFC valido',
-                'complete' => filled($provider->rfc ?: ($taxData['rfc'] ?? null)),
+                'complete' => $validRfc,
                 'message' => 'Falta RFC valido del operador.',
             ],
             [
@@ -1873,7 +1907,7 @@ class ProveedorControlador extends ControladorBase
             [
                 'key' => 'base_operativa',
                 'label' => 'Base operativa definida',
-                'complete' => filled($provider->base_airport),
+                'complete' => filled($provider->base_airport ?: $provider->user?->profile?->base_airport),
                 'message' => 'Falta base operativa definida.',
             ],
             [
@@ -1902,6 +1936,249 @@ class ProveedorControlador extends ControladorBase
         return is_array($provider->provider_validation_requirements)
             ? $provider->provider_validation_requirements
             : [];
+    }
+
+    private function providerAircraftMetrics(Proveedor $provider): array
+    {
+        $provider->loadMissing('aircraft');
+        $collection = $provider->aircraft ?? collect();
+        $active = $collection->filter(fn (Aeronave $item) => in_array(strtolower(trim((string) $item->status)), ['active', 'trial_active'], true))->count();
+        $trial = $collection->filter(fn (Aeronave $item) => strtolower(trim((string) $item->status)) === 'trial_active')->count();
+        $pending = $collection->filter(fn (Aeronave $item) => ! in_array(strtolower(trim((string) $item->status)), ['active', 'trial_active'], true))->count();
+
+        return [
+            'aircraft' => $collection->count(),
+            'active' => $active,
+            'pending' => $pending,
+            'trial' => $trial,
+        ];
+    }
+
+    private function buildProviderStatusSummary(Proveedor $provider, array $checklist = [], iterable $documents = []): array
+    {
+        $documentSummary = $this->providerDocumentSummary($documents, $checklist);
+        $fleetSummary = $this->providerFleetSummary($this->providerAircraftMetrics($provider));
+        $status = $this->resolveProviderPrimaryStatus($provider, $checklist, $documentSummary);
+        $completedChecks = collect($checklist)->filter(fn (array $item) => (bool) ($item['complete'] ?? false))->count();
+        $totalChecks = count($checklist);
+
+        return [
+            'status' => $status,
+            'label' => $this->providerStatusLabel($status),
+            'description' => $this->providerStatusDescription($status),
+            'progress' => $totalChecks > 0 ? (int) round(($completedChecks / $totalChecks) * 100) : 0,
+            'document_summary' => $documentSummary,
+            'fleet_summary' => $fleetSummary,
+            'missing_requirements' => collect($checklist)
+                ->filter(fn (array $item) => ! (bool) ($item['complete'] ?? false))
+                ->map(fn (array $item) => (string) ($item['label'] ?? 'Requisito'))
+                ->values()
+                ->all(),
+        ];
+    }
+
+    private function providerDocumentSummary(iterable $documents, array $checklist = []): array
+    {
+        $normalizedDocuments = collect($documents)
+            ->map(fn (array $document) => [
+                'slot' => trim((string) ($document['document_slot'] ?? $document['definition_key'] ?? '')),
+                'status' => strtolower(trim((string) ($document['status'] ?? $document['state'] ?? ''))),
+            ])
+            ->filter(fn (array $item) => $item['slot'] !== '')
+            ->unique('slot')
+            ->values();
+
+        $total = count(self::LEGAL_REQUIREMENT_DOCUMENT_KEYS) + 1;
+        $requiredKeys = ['sat_certificate', ...self::LEGAL_REQUIREMENT_DOCUMENT_KEYS];
+
+        if ($normalizedDocuments->isEmpty()) {
+            $legalRequirement = collect($checklist)->firstWhere('key', 'legal_documents_approved');
+            $satRequirement = collect($checklist)->firstWhere('key', 'sat_validation');
+            $legalApproved = (bool) ($legalRequirement['complete'] ?? false);
+            $satApproved = (bool) ($satRequirement['complete'] ?? false);
+
+            if ($legalApproved && $satApproved) {
+                return ['total' => $total, 'approved' => $total, 'pending' => 0, 'rejected' => 0, 'missing' => 0];
+            }
+        }
+
+        $approved = 0;
+        $rejected = 0;
+        $missing = 0;
+
+        foreach ($requiredKeys as $slot) {
+            $document = $normalizedDocuments->firstWhere('slot', $slot);
+            $status = strtolower(trim((string) ($document['status'] ?? '')));
+
+            if (in_array($status, self::APPROVED_DOCUMENT_STATUSES, true)) {
+                $approved++;
+                continue;
+            }
+
+            if (in_array($status, ['rejected', 'rechazado', 'rechazada', 'cancelled', 'canceled', 'cancelado', 'cancelada'], true)) {
+                $rejected++;
+                continue;
+            }
+
+            if (! $document) {
+                $missing++;
+            }
+        }
+
+        return [
+            'total' => $total,
+            'approved' => $approved,
+            'pending' => max($total - $approved - $rejected, 0),
+            'rejected' => $rejected,
+            'missing' => $missing,
+        ];
+    }
+
+    private function providerFleetSummary(array $aircraftMetrics): array
+    {
+        $total = (int) ($aircraftMetrics['aircraft'] ?? 0);
+        $active = (int) ($aircraftMetrics['active'] ?? 0);
+        $pending = (int) ($aircraftMetrics['pending'] ?? 0);
+        $trial = (int) ($aircraftMetrics['trial'] ?? 0);
+
+        $status = 'no_aircraft';
+        $label = 'Sin aeronaves';
+
+        if ($total > 0 && $active === 0) {
+            $status = 'pending_fleet';
+            $label = 'Flota pendiente';
+        } elseif ($total > 0 && $active === $total && $pending === 0 && $trial === 0) {
+            $status = 'active_fleet';
+            $label = 'Flota activa';
+        } elseif ($active > 0 && ($pending > 0 || $trial > 0 || $active < $total)) {
+            $status = 'mixed_fleet';
+            $label = 'Flota mixta';
+        }
+
+        return [
+            'total' => $total,
+            'active' => $active,
+            'pending' => $pending,
+            'trial' => $trial,
+            'status' => $status,
+            'label' => $label,
+        ];
+    }
+
+    private function resolveProviderPrimaryStatus(Proveedor $provider, array $checklist, array $documentSummary): string
+    {
+        $statuses = collect([
+            $provider->admin_validation_status,
+            $provider->approval_status,
+            $provider->status,
+            $provider->operator_status,
+        ])->map(fn ($value) => $this->normalizeProviderPrimaryStatusValue($value))
+            ->filter()
+            ->values()
+            ->all();
+
+        $hasRejectedRequirements = collect($checklist)
+            ->contains(fn (array $item) => $this->normalizeProviderRequirementResponseStatus($item['response_status'] ?? null) === 'rejected');
+        $hasRejectedDocuments = (int) ($documentSummary['rejected'] ?? 0) > 0;
+        $reviewSubmitted = (bool) $provider->admin_review_submitted_at;
+        $startedSignals = count(array_filter([
+            $provider->company_name,
+            $provider->commercial_name,
+            $provider->legal_name,
+            $provider->rfc,
+            $provider->user?->profile?->address,
+            $provider->base_airport ?: $provider->user?->profile?->base_airport,
+            $provider->company_phone,
+            $provider->company_email,
+            $provider->representative_name,
+            ((int) ($documentSummary['total'] ?? 0) - (int) ($documentSummary['missing'] ?? 0)) > 0 ? 'documents' : null,
+        ], fn ($value) => filled($value)));
+
+        if (in_array('suspended', $statuses, true)) {
+            return 'suspended';
+        }
+
+        if (in_array('rejected', $statuses, true)) {
+            return 'rejected';
+        }
+
+        if (in_array('observations', $statuses, true) || $hasRejectedRequirements || $hasRejectedDocuments) {
+            return 'observations';
+        }
+
+        if (in_array('approved', $statuses, true) || $this->resolveProviderAccessEnabled($provider, $this->resolveAdminValidationStatus($provider))) {
+            return 'approved';
+        }
+
+        if (in_array('under_review', $statuses, true)) {
+            return 'under_review';
+        }
+
+        if (in_array('submitted', $statuses, true) || ($reviewSubmitted && $statuses === [])) {
+            return 'submitted';
+        }
+
+        if ($startedSignals > 1 || collect($checklist)->contains(fn (array $item) => ! (bool) ($item['complete'] ?? false))) {
+            return 'incomplete';
+        }
+
+        return 'draft';
+    }
+
+    private function normalizeProviderPrimaryStatusValue(mixed $value): string
+    {
+        $normalized = Proveedor::normalizeStatusValue($value);
+
+        return match ($normalized) {
+            'approved', 'active', 'validated' => 'approved',
+            'rejected' => 'rejected',
+            'suspended' => 'suspended',
+            'changes_requested', 'changes_required', 'observations', 'needs_changes' => 'observations',
+            'pending_review', 'under_review' => 'under_review',
+            'pending_validation', 'submitted', 'sent', 'enviado' => 'submitted',
+            'incomplete', 'expediente_incompleto' => 'incomplete',
+            'draft' => 'draft',
+            default => '',
+        };
+    }
+
+    private function normalizeProviderRequirementResponseStatus(mixed $value): string
+    {
+        $normalized = Proveedor::normalizeStatusValue($value);
+
+        return match ($normalized) {
+            'approved', 'aprobado', 'aprobada', 'validated', 'validado', 'validada' => 'approved',
+            'rejected', 'rechazado', 'rechazada', 'cancelled', 'canceled', 'cancelado', 'cancelada' => 'rejected',
+            default => 'pending',
+        };
+    }
+
+    private function providerStatusLabel(string $status): string
+    {
+        return match ($status) {
+            'incomplete' => 'Expediente incompleto',
+            'submitted' => 'Enviado a revision',
+            'under_review' => 'En revision',
+            'observations' => 'Requiere correcciones',
+            'approved' => 'Aprobado',
+            'rejected' => 'Rechazado',
+            'suspended' => 'Suspendido',
+            default => 'Registro iniciado',
+        };
+    }
+
+    private function providerStatusDescription(string $status): string
+    {
+        return match ($status) {
+            'incomplete' => 'Faltan datos, documentos o validaciones obligatorias.',
+            'submitted' => 'El proveedor termino la captura y envio el expediente.',
+            'under_review' => 'El administrador esta revisando el expediente.',
+            'observations' => 'El administrador encontro datos o documentos que deben corregirse.',
+            'approved' => 'El expediente fue validado y aprobado por el administrador.',
+            'rejected' => 'El proveedor no cumple los requisitos.',
+            'suspended' => 'El proveedor aprobado fue suspendido administrativamente.',
+            default => 'El proveedor comenzo su registro, pero aun faltan varios datos obligatorios.',
+        };
     }
 
 

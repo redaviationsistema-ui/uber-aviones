@@ -12,6 +12,8 @@ use Illuminate\Validation\ValidationException;
 
 class AdminProviderApprovalService
 {
+    private const MEXICAN_RFC_PATTERN = '/^([A-Z&Ñ]{3,4})\d{6}[A-Z0-9]{3}$/u';
+
     private const APPROVED_DOCUMENT_STATUSES = ['approved', 'aprobado', 'aprobada', 'vigente', 'validado'];
 
     private const LEGAL_REQUIREMENT_DOCUMENT_KEYS = [
@@ -218,6 +220,7 @@ class AdminProviderApprovalService
         $documents = $provider->companyDocuments ?? collect();
         $legalDocuments = $this->providerLegalDocuments($documents);
         $pendingLegalDocumentLabels = $this->pendingDocumentLabels($legalDocuments);
+        $requirementReviews = is_array($provider->provider_validation_requirements) ? $provider->provider_validation_requirements : [];
 
         return [
             [
@@ -235,13 +238,13 @@ class AdminProviderApprovalService
             [
                 'key' => 'company_identity',
                 'label' => 'Datos generales completos',
-                'complete' => filled($provider->company_name) && filled($provider->commercial_name) && filled($provider->legal_name),
+                'complete' => filled($provider->commercial_name) && filled($provider->legal_name ?: $provider->company_name) && filled($provider->user?->profile?->address),
                 'message' => 'Faltan datos generales de la empresa.',
             ],
             [
                 'key' => 'legal_representative_complete',
                 'label' => 'Representante legal completo',
-                'complete' => filled($provider->representative_name) && filled($provider->representative_phone),
+                'complete' => filled($provider->representative_name ?: ($provider->user?->profile?->tax_data['legal_representative'] ?? null)),
                 'message' => 'Faltan datos del representante legal.',
             ],
             [
@@ -255,13 +258,14 @@ class AdminProviderApprovalService
             [
                 'key' => 'rfc_valid',
                 'label' => 'Informacion fiscal completa',
-                'complete' => filled($provider->rfc),
+                'complete' => $this->providerRequirementWasApproved($requirementReviews, 'rfc_valid')
+                    || preg_match(self::MEXICAN_RFC_PATTERN, $this->normalizeMexicanRfc($provider->rfc)) === 1,
                 'message' => 'Falta RFC valido del proveedor.',
             ],
             [
                 'key' => 'sat_validation',
                 'label' => 'Validacion fiscal aprobada',
-                'complete' => $this->providerHasApprovedSatValidation($provider, $documents),
+                'complete' => $this->providerHasApprovedSatValidation($provider, $documents, $requirementReviews),
                 'message' => 'La validacion SAT sigue pendiente.',
             ],
             [
@@ -273,7 +277,7 @@ class AdminProviderApprovalService
             [
                 'key' => 'base_operativa',
                 'label' => 'Base operativa definida',
-                'complete' => filled($provider->base_airport),
+                'complete' => filled($provider->base_airport ?: $provider->user?->profile?->base_airport),
                 'message' => 'Falta base operativa definida.',
             ],
             [
@@ -434,8 +438,29 @@ class AdminProviderApprovalService
             ->all();
     }
 
-    private function providerHasApprovedSatValidation(Proveedor $provider, iterable $documents): bool
+    private function normalizeMexicanRfc(?string $value): string
     {
+        return Str::of((string) ($value ?? ''))
+            ->trim()
+            ->upper()
+            ->replace(' ', '')
+            ->value();
+    }
+
+    private function providerRequirementWasApproved(array $reviews, string $key): bool
+    {
+        $review = $reviews[$key] ?? null;
+        $status = $this->normalizeStatus($review['status'] ?? '');
+
+        return in_array($status, ['approved', 'aprobado', 'aprobada', 'validated', 'validado', 'validada'], true);
+    }
+
+    private function providerHasApprovedSatValidation(Proveedor $provider, iterable $documents, array $requirementReviews = []): bool
+    {
+        if ($this->providerRequirementWasApproved($requirementReviews, 'sat_validation')) {
+            return true;
+        }
+
         $satDocuments = $this->providerSatDocuments($documents);
         if ($satDocuments !== []) {
             return $this->documentsAreApproved($satDocuments);
