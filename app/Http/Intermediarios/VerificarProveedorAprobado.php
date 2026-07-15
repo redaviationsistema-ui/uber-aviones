@@ -15,9 +15,18 @@ class VerificarProveedorAprobado
 
     public function handle(Request $request, Closure $next): Response
     {
-        $provider = $request->user()?->provider;
+        $user = $request->user();
+        $provider = $user?->provider ?: $user?->ownedProvider;
 
-        if (! $request->user()?->hasRole('admin') && ! $this->proveedorServicio->isApproved($provider)) {
+        if (! $user?->hasRole('admin') && ! $provider) {
+            return response()->json([
+                'success' => false,
+                'code' => 'PROVIDER_NOT_LINKED',
+                'message' => 'La sesion no tiene un proveedor vinculado.',
+            ], 403);
+        }
+
+        if (! $user?->hasRole('admin') && ! $this->proveedorServicio->isApproved($provider)) {
             return response()->json([
                 'success' => false,
                 'code' => 'PROVIDER_NOT_APPROVED',

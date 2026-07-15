@@ -529,8 +529,8 @@ class AutenticacionControlador extends ControladorBase
                 'activeSuscripcion.plan:id,name,code,billing_cycle,price_monthly,price_yearly,max_aircraft,max_users,has_priority,has_concierge,has_reports,is_enterprise',
             ]
             : [
-                'provider:id,user_id,company_name,commercial_name,legal_name,rfc,company_phone,company_email,base_airport,status,representative_name,representative_phone,birth_date,curp,nationality,document_type,document_number,document_expiration,approval_status,jet_a_price,margin_percent,fixed_fee,notes',
-                'ownedProvider:id,user_id,company_name,commercial_name,legal_name,rfc,company_phone,company_email,base_airport,status,representative_name,representative_phone,birth_date,curp,nationality,document_type,document_number,document_expiration,approval_status,jet_a_price,margin_percent,fixed_fee,notes',
+                'provider:id,user_id,company_name,commercial_name,legal_name,rfc,company_phone,company_email,base_airport,status,representative_name,representative_phone,birth_date,curp,nationality,document_type,document_number,document_expiration,approval_status,admin_validation_status,operator_status,access_enabled,admin_review_submitted_at,changes_notes,rejection_reason,jet_a_price,margin_percent,fixed_fee,notes',
+                'ownedProvider:id,user_id,company_name,commercial_name,legal_name,rfc,company_phone,company_email,base_airport,status,representative_name,representative_phone,birth_date,curp,nationality,document_type,document_number,document_expiration,approval_status,admin_validation_status,operator_status,access_enabled,admin_review_submitted_at,changes_notes,rejection_reason,jet_a_price,margin_percent,fixed_fee,notes',
                 'profile:id,user_id,company_name,business_type,country,city,base_airport,base_airport_id,address,avatar,avatar_url,tax_data,birth_date,nationality,document_type,document_number,document_expiration,identity_validation_required,ine_curp,ine_cic,ine_ocr,ine_scan_raw,ine_scan_status,ine_front_path,ine_back_path',
                 'profile.baseAirport:id,icao,iata,name',
                 'roles:id,code,name',
