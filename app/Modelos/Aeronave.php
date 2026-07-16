@@ -175,11 +175,7 @@ class Aeronave extends Model
 
     public function isAdministrativelyApproved(): bool
     {
-        if ($this->approved_at !== null) {
-            return true;
-        }
-
-        return self::normalizeStatusValue($this->status) === 'active';
+        return $this->approved_at !== null;
     }
 
     public function hasActiveBillingSubscription(): bool

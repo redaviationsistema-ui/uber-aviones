@@ -4,15 +4,41 @@ namespace App\Servicios\Billing;
 
 use App\Modelos\Aeronave;
 use App\Modelos\AircraftBillingPayment;
+use App\Modelos\DocumentoAeronave;
 use App\Modelos\SuscripcionAeronave;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 
 class ProviderAircraftSubscriptionService
 {
     public const ACTIVE_STRIPE_STATUSES = ['active', 'trialing'];
     public const INACTIVE_STRIPE_STATUSES = ['incomplete', 'incomplete_expired', 'past_due', 'unpaid', 'canceled', 'cancelled', 'paused', 'expired'];
+    private const APPROVED_DOCUMENT_STATUSES = ['approved', 'aprobado', 'aprobada', 'validated', 'validado', 'validada', 'vigente'];
+    private const REJECTED_DOCUMENT_STATUSES = ['rejected', 'rechazado', 'rechazada', 'cancelled', 'canceled', 'cancelado', 'cancelada'];
+    private const AIRCRAFT_REQUIRED_DOCUMENTS = [
+        [
+            'key' => 'airworthiness_certificate',
+            'label' => 'certificado de aeronavegabilidad',
+            'aliases' => ['airworthiness_certificate', 'airworthiness', 'certificate_of_airworthiness', 'proof_of_airworthiness'],
+        ],
+        [
+            'key' => 'registration',
+            'label' => 'matricula vigente',
+            'aliases' => ['registration', 'registration_certificate', 'aircraft_registration'],
+        ],
+        [
+            'key' => 'insurance',
+            'label' => 'poliza de seguro',
+            'aliases' => ['insurance', 'insurance_policy', 'aircraft_insurance'],
+        ],
+        [
+            'key' => 'maintenance',
+            'label' => 'programa o respaldo de mantenimiento',
+            'aliases' => ['maintenance', 'maintenance_program', 'maintenance_log', 'maintenance_records'],
+        ],
+    ];
 
     public function syncPaidSubscription(
         AircraftBillingPayment $payment,
@@ -31,6 +57,7 @@ class ProviderAircraftSubscriptionService
         DB::transaction(function () use ($payment, $providerPaymentId, $providerCustomerId, $providerInvoiceId, $checkoutSessionId, $subscriptionId, $amount, $currency, $gatewayPayload, $periodStart, $periodEnd, $userId) {
             $startsAt = $periodStart ? Carbon::parse($periodStart)->startOfDay() : now();
             $endsAt = $periodEnd ? Carbon::parse($periodEnd)->endOfDay() : now()->addMonth()->endOfDay();
+            $activation = $this->getAircraftActivationEvaluation((int) $payment->aircraft_id, 'active', $endsAt);
 
             $payment->update([
                 'status' => 'paid',
@@ -52,7 +79,7 @@ class ProviderAircraftSubscriptionService
                 billingPlanId: (int) $payment->billing_plan_id,
                 billingStatus: 'active',
                 subscriptionStatus: 'active',
-                status: $this->canAircraftBeActive('active', $endsAt) ? 'active' : 'inactive',
+                status: $activation['status'],
                 startsAt: $startsAt,
                 endsAt: $endsAt,
                 lastPaymentAt: now(),
@@ -72,6 +99,14 @@ class ProviderAircraftSubscriptionService
                 endsAt: $endsAt,
                 cancelledAt: null,
             );
+
+            Log::info('Pago de aeronave sincronizado.', [
+                'aircraft_id' => $payment->aircraft_id,
+                'payment_id' => $payment->id,
+                'provider_subscription_id' => $subscriptionId ?: $payment->provider_subscription_id,
+                'activation_code' => $activation['code'],
+                'missing_requirements' => $activation['missing_requirements'],
+            ]);
         });
     }
 
@@ -192,9 +227,12 @@ class ProviderAircraftSubscriptionService
         $normalizedStatus = $this->normalizeStripeStatus($stripeStatus, 'pending');
         $startsAt = $periodStart ? Carbon::parse($periodStart)->startOfDay() : null;
         $endsAt = $periodEnd ? Carbon::parse($periodEnd)->endOfDay() : null;
-        $aircraftStatus = $this->canAircraftBeActive($normalizedStatus, $endsAt) ? 'active' : 'inactive';
+        $activation = ($endsAt && in_array($normalizedStatus, self::ACTIVE_STRIPE_STATUSES, true))
+            ? $this->getAircraftActivationEvaluation((int) $payment->aircraft_id, $normalizedStatus, $endsAt)
+            : null;
+        $aircraftStatus = $activation['status'] ?? 'inactive';
 
-        DB::transaction(function () use ($payment, $normalizedStatus, $customerId, $startsAt, $endsAt, $cancelAtPeriodEnd, $cancelledAt, $payload, $userId, $aircraftStatus) {
+        DB::transaction(function () use ($payment, $normalizedStatus, $customerId, $startsAt, $endsAt, $cancelAtPeriodEnd, $cancelledAt, $payload, $userId, $aircraftStatus, $activation) {
             if ($endsAt && in_array($normalizedStatus, self::ACTIVE_STRIPE_STATUSES, true) && $this->canAircraftBeActive($normalizedStatus, $endsAt)) {
                 $payment->update([
                     'status' => 'paid',
@@ -217,12 +255,12 @@ class ProviderAircraftSubscriptionService
             $this->updateAircraftState(
                 aircraftId: (int) $payment->aircraft_id,
                 billingPlanId: (int) $payment->billing_plan_id,
-                billingStatus: $aircraftStatus === 'active' ? 'active' : $this->resolveBillingStatusFromSubscriptionStatus($normalizedStatus),
+                billingStatus: $this->canAircraftBeActive($normalizedStatus, $endsAt) ? 'active' : $this->resolveBillingStatusFromSubscriptionStatus($normalizedStatus),
                 subscriptionStatus: $normalizedStatus === 'canceled' ? 'cancelled' : $normalizedStatus,
                 status: $aircraftStatus,
                 startsAt: $startsAt,
                 endsAt: $endsAt,
-                lastPaymentAt: $aircraftStatus === 'active' ? now() : null,
+                lastPaymentAt: $this->canAircraftBeActive($normalizedStatus, $endsAt) ? now() : null,
             );
 
             $this->upsertSubscriptionRecord(
@@ -234,7 +272,7 @@ class ProviderAircraftSubscriptionService
                 providerSubscriptionId: $payment->provider_subscription_id,
                 providerCustomerId: $customerId ?: $payment->provider_customer_id,
                 providerInvoiceId: $payment->provider_invoice_id,
-                paidAt: $aircraftStatus === 'active' ? ($payment->paid_at ?: now()) : null,
+                paidAt: $this->canAircraftBeActive($normalizedStatus, $endsAt) ? ($payment->paid_at ?: now()) : null,
                 startsAt: $startsAt,
                 endsAt: $endsAt,
                 cancelledAt: $cancelledAt,
@@ -242,6 +280,15 @@ class ProviderAircraftSubscriptionService
                     'cancel_at_period_end' => $cancelAtPeriodEnd,
                 ],
             );
+
+            if ($activation) {
+                Log::info('Suscripcion de aeronave reevaluada.', [
+                    'aircraft_id' => $payment->aircraft_id,
+                    'payment_id' => $payment->id,
+                    'activation_code' => $activation['code'],
+                    'missing_requirements' => $activation['missing_requirements'],
+                ]);
+            }
         });
     }
 
@@ -416,6 +463,237 @@ class ProviderAircraftSubscriptionService
         return true;
     }
 
+    public function syncAircraftActivationRequirements(Aeronave $aircraft): bool
+    {
+        if (! $this->canAircraftBeActive((string) $aircraft->subscription_status, $aircraft->subscription_ends_at)) {
+            return false;
+        }
+
+        $evaluation = $this->getAircraftActivationEvaluation($aircraft, (string) $aircraft->subscription_status, $aircraft->subscription_ends_at);
+        $normalizedSubscriptionStatus = $this->normalizeStripeStatus((string) $aircraft->subscription_status, 'active');
+
+        $needsSync =
+            (string) $aircraft->status !== $evaluation['status']
+            || (string) $aircraft->billing_status !== 'active'
+            || $normalizedSubscriptionStatus !== (string) $aircraft->subscription_status;
+
+        if (! $needsSync) {
+            return false;
+        }
+
+        $this->updateAircraftState(
+            aircraftId: (int) $aircraft->id,
+            billingPlanId: (int) $aircraft->billing_plan_id,
+            billingStatus: 'active',
+            subscriptionStatus: $normalizedSubscriptionStatus,
+            status: $evaluation['status'],
+            startsAt: $aircraft->subscription_started_at,
+            endsAt: $aircraft->subscription_ends_at,
+            lastPaymentAt: $aircraft->last_payment_at,
+        );
+
+        Log::info('Estado comercial de aeronave reevaluado.', [
+            'aircraft_id' => $aircraft->id,
+            'activation_code' => $evaluation['code'],
+            'missing_requirements' => $evaluation['missing_requirements'],
+        ]);
+
+        return true;
+    }
+
+    public function buildAircraftBillingSnapshots(iterable $aircraftCollection): array
+    {
+        $aircraftItems = collect($aircraftCollection)
+            ->filter(fn ($aircraft) => $aircraft instanceof Aeronave)
+            ->values();
+
+        if ($aircraftItems->isEmpty()) {
+            return [];
+        }
+
+        $aircraftIds = $aircraftItems
+            ->map(fn (Aeronave $aircraft) => (int) $aircraft->id)
+            ->filter(fn (int $aircraftId) => $aircraftId > 0)
+            ->values();
+
+        $latestPayments = AircraftBillingPayment::query()
+            ->whereIn('aircraft_id', $aircraftIds)
+            ->orderByDesc('id')
+            ->get()
+            ->groupBy('aircraft_id')
+            ->map(fn ($payments) => $payments->first());
+
+        $latestSubscriptions = SuscripcionAeronave::query()
+            ->whereIn('aircraft_id', $aircraftIds)
+            ->orderByDesc('id')
+            ->get()
+            ->groupBy('aircraft_id')
+            ->map(fn ($subscriptions) => $subscriptions->first());
+
+        return $aircraftItems
+            ->mapWithKeys(function (Aeronave $aircraft) use ($latestPayments, $latestSubscriptions) {
+                $aircraftId = (int) $aircraft->id;
+
+                return [$aircraftId => $this->buildAircraftBillingSnapshot(
+                    aircraft: $aircraft,
+                    latestPayment: $latestPayments->get($aircraftId),
+                    latestSubscription: $latestSubscriptions->get($aircraftId),
+                )];
+            })
+            ->all();
+    }
+
+    public function buildAircraftBillingSnapshot(
+        Aeronave $aircraft,
+        ?AircraftBillingPayment $latestPayment = null,
+        ?SuscripcionAeronave $latestSubscription = null,
+    ): array {
+        $paymentStatus = $this->normalizeValue($latestPayment?->status);
+        $subscriptionStatus = $this->normalizeStripeStatus(
+            (string) ($latestSubscription?->status ?: $aircraft->subscription_status ?: 'inactive'),
+            'inactive',
+        );
+        $checkoutSessionId = (string) ($latestPayment?->provider_checkout_id ?? '');
+        $stripeSubscriptionId = (string) ($latestPayment?->provider_subscription_id ?: $latestSubscription?->provider_subscription_id ?: '');
+        $subscriptionEndsAt = $latestSubscription?->ends_at ?: $aircraft->subscription_ends_at;
+        $lastPaymentAt = $latestPayment?->paid_at ?: $latestSubscription?->paid_at ?: $aircraft->last_payment_at;
+        $hasPaymentRecord = $latestPayment instanceof AircraftBillingPayment || $latestSubscription instanceof SuscripcionAeronave;
+        $hasActiveSubscription = $this->canAircraftBeActive($subscriptionStatus, $subscriptionEndsAt);
+        $hasPendingCheckout = $checkoutSessionId !== ''
+            && in_array($paymentStatus, ['pending', 'open', 'requires_action', 'pending_payment', 'incomplete'], true);
+        $hasExpiredSubscription = in_array($subscriptionStatus, ['past_due', 'unpaid', 'expired', 'incomplete_expired'], true);
+        $hasCancelledSubscription = in_array($subscriptionStatus, ['cancelled', 'paused'], true);
+        $hasFailedPayment = in_array($paymentStatus, ['failed', 'rejected'], true);
+        $needsVerification = ! $hasActiveSubscription
+            && ! $hasPendingCheckout
+            && (
+                $paymentStatus === 'paid'
+                || ($checkoutSessionId !== '' && $stripeSubscriptionId !== '')
+                || ($checkoutSessionId !== '' && in_array($this->normalizeValue($aircraft->billing_status), ['pending_payment', 'pending', 'processing', 'active'], true))
+            );
+        $activationEvaluation = $hasActiveSubscription
+            ? $this->getAircraftActivationEvaluation($aircraft, $subscriptionStatus, $subscriptionEndsAt)
+            : null;
+        $canOperate = $hasActiveSubscription
+            && (($activationEvaluation['can_activate'] ?? false) === true)
+            && $this->normalizeValue($aircraft->status) === 'active';
+
+        $primaryAction = 'activate';
+        $billingStatus = 'unpaid';
+
+        if ($canOperate) {
+            $primaryAction = 'none';
+            $billingStatus = 'active';
+        } elseif ($hasActiveSubscription) {
+            $primaryAction = 'verify_payment';
+            $billingStatus = 'processing';
+        } elseif ($hasPendingCheckout) {
+            $primaryAction = 'continue_payment';
+            $billingStatus = 'pending';
+        } elseif ($needsVerification) {
+            $primaryAction = 'verify_payment';
+            $billingStatus = 'processing';
+        } elseif ($hasExpiredSubscription) {
+            $primaryAction = 'regularize_payment';
+            $billingStatus = $subscriptionStatus === 'expired' ? 'expired' : 'past_due';
+        } elseif ($hasCancelledSubscription || $hasFailedPayment) {
+            $primaryAction = 'regularize_payment';
+            $billingStatus = 'cancelled';
+        } elseif ($hasPaymentRecord) {
+            $primaryAction = 'regularize_payment';
+            $billingStatus = $this->resolveSnapshotBillingStatus($paymentStatus, $subscriptionStatus);
+        }
+
+        if (! $hasPaymentRecord) {
+            $subscriptionStatus = 'inactive';
+        }
+
+        return [
+            'aircraft_id' => (int) $aircraft->id,
+            'aircraft_name' => trim((string) ($aircraft->model ?: $aircraft->registration ?: 'Aeronave '.$aircraft->id)),
+            'billing_status' => $billingStatus,
+            'subscription_status' => $subscriptionStatus,
+            'payment_status' => $paymentStatus ?: ($hasActiveSubscription ? 'paid' : 'unpaid'),
+            'checkout_session_id' => $checkoutSessionId !== '' ? $checkoutSessionId : null,
+            'checkout_url' => $latestPayment?->gateway_response['checkout_url'] ?? null,
+            'stripe_subscription_id' => $stripeSubscriptionId !== '' ? $stripeSubscriptionId : null,
+            'last_payment_at' => $lastPaymentAt,
+            'subscription_ends_at' => $subscriptionEndsAt,
+            'has_pending_checkout' => $hasPendingCheckout,
+            'can_start_checkout' => $primaryAction === 'activate' || $primaryAction === 'regularize_payment',
+            'can_continue_checkout' => $primaryAction === 'continue_payment',
+            'can_verify_payment' => $primaryAction === 'verify_payment',
+            'can_operate' => $canOperate,
+            'primary_action' => $primaryAction,
+            'latest_payment_id' => $latestPayment?->id,
+            'provider_checkout_id' => $checkoutSessionId !== '' ? $checkoutSessionId : null,
+            'provider_subscription_id' => $stripeSubscriptionId !== '' ? $stripeSubscriptionId : null,
+            'activation_state' => $activationEvaluation,
+        ];
+    }
+
+    public function getAircraftActivationEvaluation(int|Aeronave $aircraft, string $subscriptionStatus, mixed $endsAt): array
+    {
+        $resolvedAircraft = $aircraft instanceof Aeronave
+            ? $aircraft->loadMissing('provider', 'documents')
+            : Aeronave::query()->with('provider', 'documents')->find($aircraft);
+
+        if (! $resolvedAircraft) {
+            return [
+                'can_activate' => false,
+                'status' => 'inactive',
+                'code' => 'aircraft_not_found',
+                'message' => 'No encontramos la aeronave para completar la activacion.',
+                'missing_requirements' => ['aeronave no encontrada'],
+            ];
+        }
+
+        if (! $this->canAircraftBeActive($subscriptionStatus, $endsAt)) {
+            return [
+                'can_activate' => false,
+                'status' => 'inactive',
+                'code' => 'payment_inactive',
+                'message' => 'El pago aun no confirma una suscripcion activa o la vigencia ya expiro.',
+                'missing_requirements' => [],
+            ];
+        }
+
+        $missingRequirements = [];
+
+        if (! $resolvedAircraft->provider?->isApprovedForOperations()) {
+            $missingRequirements[] = 'proveedor pendiente de aprobacion administrativa';
+        }
+
+        if (! $resolvedAircraft->approved_at) {
+            $missingRequirements[] = 'aeronave pendiente de aprobacion administrativa';
+        }
+
+        $documentEvaluation = $this->evaluateAircraftDocuments($resolvedAircraft);
+        if (! $documentEvaluation['approved']) {
+            $missingRequirements = [...$missingRequirements, ...$documentEvaluation['missing_requirements']];
+        }
+
+        $missingRequirements = array_values(array_unique(array_filter($missingRequirements)));
+
+        if ($missingRequirements !== []) {
+            return [
+                'can_activate' => false,
+                'status' => 'inactive',
+                'code' => 'pending_requirements',
+                'message' => 'Pago confirmado, pero la aeronave aun no cumple todos los requisitos de activacion.',
+                'missing_requirements' => $missingRequirements,
+            ];
+        }
+
+        return [
+            'can_activate' => true,
+            'status' => 'active',
+            'code' => 'ready',
+            'message' => 'La aeronave ya puede operar comercialmente.',
+            'missing_requirements' => [],
+        ];
+    }
+
     public function canAircraftBeActive(string $stripeStatus, mixed $endsAt): bool
     {
         $normalized = $this->normalizeStripeStatus($stripeStatus, 'inactive');
@@ -442,6 +720,98 @@ class ProviderAircraftSubscriptionService
         return $normalized === 'canceled' ? 'cancelled' : $normalized;
     }
 
+    private function evaluateAircraftDocuments(Aeronave $aircraft): array
+    {
+        $documents = $aircraft->documents ?? collect();
+        $missingRequirements = [];
+
+        foreach (self::AIRCRAFT_REQUIRED_DOCUMENTS as $requirement) {
+            $matchedDocuments = collect($documents)
+                ->filter(fn ($document) => $document instanceof DocumentoAeronave)
+                ->filter(fn (DocumentoAeronave $document) => in_array($this->resolveAircraftDocumentKey($document), $requirement['aliases'], true))
+                ->values();
+
+            if ($matchedDocuments->isEmpty()) {
+                $missingRequirements[] = sprintf('falta %s', $requirement['label']);
+                continue;
+            }
+
+            $hasApprovedCurrent = $matchedDocuments->contains(fn (DocumentoAeronave $document) => $this->isAircraftDocumentApproved($document) && ! $this->isAircraftDocumentExpired($document));
+            if ($hasApprovedCurrent) {
+                continue;
+            }
+
+            $hasExpired = $matchedDocuments->contains(fn (DocumentoAeronave $document) => $this->isAircraftDocumentExpired($document));
+            if ($hasExpired) {
+                $missingRequirements[] = sprintf('%s vencido', $requirement['label']);
+                continue;
+            }
+
+            $hasRejected = $matchedDocuments->contains(fn (DocumentoAeronave $document) => in_array($this->normalizeValue($document->status), self::REJECTED_DOCUMENT_STATUSES, true));
+            if ($hasRejected) {
+                $missingRequirements[] = sprintf('%s rechazado', $requirement['label']);
+                continue;
+            }
+
+            $missingRequirements[] = sprintf('%s pendiente de revision', $requirement['label']);
+        }
+
+        return [
+            'approved' => $missingRequirements === [],
+            'missing_requirements' => $missingRequirements,
+        ];
+    }
+
+    private function isAircraftDocumentApproved(DocumentoAeronave $document): bool
+    {
+        if ($document->verified_by_admin === true) {
+            return true;
+        }
+
+        return in_array($this->normalizeValue($document->status), self::APPROVED_DOCUMENT_STATUSES, true);
+    }
+
+    private function isAircraftDocumentExpired(DocumentoAeronave $document): bool
+    {
+        if ($this->normalizeValue($document->status) === 'expired') {
+            return true;
+        }
+
+        return $document->expires_at instanceof Carbon && $document->expires_at->isPast();
+    }
+
+    private function resolveAircraftDocumentKey(DocumentoAeronave $document): string
+    {
+        $candidates = [
+            data_get($document->metadata, 'definition_key'),
+            data_get($document->metadata, 'document_definition.id'),
+            data_get($document->metadata, 'document_type'),
+            data_get($document->metadata, 'document_category'),
+            $document->document_type,
+            $document->type,
+        ];
+
+        foreach ($candidates as $candidate) {
+            $normalized = $this->normalizeValue($candidate);
+            if ($normalized !== '') {
+                return $normalized;
+            }
+        }
+
+        return '';
+    }
+
+    private function normalizeValue(mixed $value): string
+    {
+        return Str::of((string) ($value ?? ''))
+            ->trim()
+            ->lower()
+            ->ascii()
+            ->replaceMatches('/[\s-]+/', '_')
+            ->replaceMatches('/_+/', '_')
+            ->value();
+    }
+
     private function resolveBillingStatusFromSubscriptionStatus(string $subscriptionStatus): string
     {
         return match ($this->normalizeStripeStatus($subscriptionStatus, 'pending')) {
@@ -452,6 +822,35 @@ class ProviderAircraftSubscriptionService
             'incomplete', 'incomplete_expired', 'paused' => 'pending_payment',
             default => 'pending_payment',
         };
+    }
+
+    private function resolveSnapshotBillingStatus(string $paymentStatus, string $subscriptionStatus): string
+    {
+        if (in_array($subscriptionStatus, ['past_due', 'unpaid'], true) || in_array($paymentStatus, ['past_due', 'unpaid'], true)) {
+            return 'past_due';
+        }
+
+        if ($subscriptionStatus === 'expired' || $paymentStatus === 'expired') {
+            return 'expired';
+        }
+
+        if (in_array($subscriptionStatus, ['cancelled', 'paused'], true) || $paymentStatus === 'cancelled') {
+            return 'cancelled';
+        }
+
+        if (in_array($paymentStatus, ['failed', 'rejected'], true)) {
+            return 'cancelled';
+        }
+
+        if (in_array($paymentStatus, ['pending', 'open', 'requires_action', 'pending_payment', 'incomplete'], true)) {
+            return 'pending';
+        }
+
+        if ($paymentStatus === 'paid' || in_array($subscriptionStatus, self::ACTIVE_STRIPE_STATUSES, true)) {
+            return 'processing';
+        }
+
+        return 'unpaid';
     }
 
     private function updateAircraftState(
@@ -518,7 +917,7 @@ class ProviderAircraftSubscriptionService
             'updated_at' => now(),
         ];
 
-        $subscription = SuscripcionAeronave::updateOrCreate($attributes, array_filter($values, function ($value, $key) {
+        SuscripcionAeronave::updateOrCreate($attributes, array_filter($values, function ($value, $key) {
             return $value !== null || in_array($key, ['paid_at', 'starts_at', 'ends_at', 'cancelled_at'], true);
         }, ARRAY_FILTER_USE_BOTH));
 

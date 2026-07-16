@@ -152,9 +152,15 @@ class AeronaveControlador extends ControladorBase
         }
 
         $aircraft = $query->latest()->paginate($perPage);
+        $billingSnapshots = $this->providerAircraftSubscriptionService->buildAircraftBillingSnapshots($aircraft->getCollection());
         $aircraft->setCollection(
             $aircraft->getCollection()->map(
-                fn (Aeronave $item) => $this->formatAircraftPayload($item, $providerPlan, $providerAircraftCount)
+                fn (Aeronave $item) => $this->formatAircraftPayload(
+                    $item,
+                    $providerPlan,
+                    $providerAircraftCount,
+                    $billingSnapshots[(int) $item->id] ?? null,
+                )
             )
         );
 
@@ -172,7 +178,7 @@ class AeronaveControlador extends ControladorBase
         $data = $this->normalizeAircraftInput($request->validate($this->rules()));
         $aircraft = $provider->aircraft()->create($data + [
             'status' => 'inactive',
-            'billing_status' => 'pending_payment',
+            'billing_status' => 'unpaid',
             'subscription_status' => 'inactive',
             'currency' => $data['currency'] ?? 'USD',
         ]);
@@ -193,7 +199,8 @@ class AeronaveControlador extends ControladorBase
 
         return $this->ok([
             'aircraft' => $this->formatAircraftPayload(
-                $aircraft->fresh(['provider.user.activeSuscripcion.plan', 'availability', 'documents', 'images'])
+                $aircraft->fresh(['provider.user.activeSuscripcion.plan', 'availability', 'documents', 'images']),
+                billingSnapshot: $this->providerAircraftSubscriptionService->buildAircraftBillingSnapshot($aircraft->fresh(['provider', 'documents'])),
             ),
             'message' => 'Aeronave registrada y enviada a revisión administrativa.',
             'review_status' => 'pending_review',
@@ -210,7 +217,8 @@ class AeronaveControlador extends ControladorBase
 
         return $this->ok([
             'aircraft' => $this->formatAircraftPayload(
-                $aircraft->load(['provider.user.activeSuscripcion.plan', 'images', 'availability', 'documents'])
+                $aircraft->load(['provider.user.activeSuscripcion.plan', 'images', 'availability', 'documents']),
+                billingSnapshot: $this->providerAircraftSubscriptionService->buildAircraftBillingSnapshot($aircraft->loadMissing(['provider', 'documents'])),
             ),
         ]);
     }
@@ -930,7 +938,12 @@ class AeronaveControlador extends ControladorBase
         ];
     }
 
-    private function formatAircraftPayload(Aeronave $aircraft, mixed $planOverride = null, ?int $providerAircraftCountOverride = null): array
+    private function formatAircraftPayload(
+        Aeronave $aircraft,
+        mixed $planOverride = null,
+        ?int $providerAircraftCountOverride = null,
+        ?array $billingSnapshot = null,
+    ): array
     {
         $providerUser = $aircraft->provider?->user;
         $plan = $planOverride ?? $providerUser?->activeSuscripcion?->plan;
@@ -941,6 +954,9 @@ class AeronaveControlador extends ControladorBase
         $monthlyPerAircraft = $providerAircraftCount > 0 && $monthlyBase > 0
             ? round($monthlyBase / $providerAircraftCount, 2)
             : null;
+        $resolvedBillingSnapshot = $billingSnapshot ?? $this->providerAircraftSubscriptionService->buildAircraftBillingSnapshot(
+            $aircraft->loadMissing(['provider', 'documents'])
+        );
         $images = $aircraft->images
             ->sortBy([
                 ['is_main', 'desc'],
@@ -985,12 +1001,22 @@ class AeronaveControlador extends ControladorBase
             'approved_at' => $aircraft->approved_at,
             'approved' => $aircraft->isAdministrativelyApproved(),
             'review_status' => $aircraft->resolvedReviewStatus(),
-            'billing_status' => $aircraft->billing_status,
+            'billing_status' => $resolvedBillingSnapshot['billing_status'] ?? $aircraft->billing_status,
             'billing_plan_id' => $aircraft->billing_plan_id,
-            'subscription_status' => $aircraft->subscription_status,
+            'subscription_status' => $resolvedBillingSnapshot['subscription_status'] ?? $aircraft->subscription_status,
             'subscription_started_at' => $aircraft->subscription_started_at,
-            'subscription_ends_at' => $aircraft->subscription_ends_at,
-            'last_payment_at' => $aircraft->last_payment_at,
+            'subscription_ends_at' => $resolvedBillingSnapshot['subscription_ends_at'] ?? $aircraft->subscription_ends_at,
+            'last_payment_at' => $resolvedBillingSnapshot['last_payment_at'] ?? $aircraft->last_payment_at,
+            'payment_status' => $resolvedBillingSnapshot['payment_status'] ?? null,
+            'checkout_session_id' => $resolvedBillingSnapshot['checkout_session_id'] ?? null,
+            'stripe_subscription_id' => $resolvedBillingSnapshot['stripe_subscription_id'] ?? null,
+            'has_pending_checkout' => $resolvedBillingSnapshot['has_pending_checkout'] ?? false,
+            'can_start_checkout' => $resolvedBillingSnapshot['can_start_checkout'] ?? true,
+            'can_continue_checkout' => $resolvedBillingSnapshot['can_continue_checkout'] ?? false,
+            'can_verify_payment' => $resolvedBillingSnapshot['can_verify_payment'] ?? false,
+            'can_operate' => $resolvedBillingSnapshot['can_operate'] ?? false,
+            'primary_action' => $resolvedBillingSnapshot['primary_action'] ?? 'activate',
+            'billing_state' => $resolvedBillingSnapshot,
         ];
     }
 

@@ -17,6 +17,7 @@ use App\Modelos\RegistroAuditoria;
 use App\Modelos\Reserva;
 use App\Modelos\Usuario;
 use App\Servicios\Aeronaves\AircraftAvailabilityService;
+use App\Servicios\Billing\ProviderAircraftSubscriptionService;
 use App\Servicios\ReintentoCoincidenciaSolicitudServicio;
 use App\Servicios\RedAviation\VisibilidadServicio;
 use Illuminate\Http\Request;
@@ -48,6 +49,7 @@ class ProveedorControlador extends ControladorBase
     public function __construct(
         private readonly ReintentoCoincidenciaSolicitudServicio $reintentoServicio,
         private readonly VisibilidadServicio $visibilidadServicio,
+        private readonly ProviderAircraftSubscriptionService $providerAircraftSubscriptionService,
     )
     {
     }
@@ -564,6 +566,11 @@ class ProveedorControlador extends ControladorBase
     public function payments(Request $request)
     {
         $providerId = $this->resolvedProviderIdOrAbort($request, 404);
+        $providerAircraft = Aeronave::query()
+            ->with(['provider', 'documents'])
+            ->where('provider_id', $providerId)
+            ->get(['id', 'provider_id', 'model', 'registration', 'status', 'approved_at', 'billing_status', 'billing_plan_id', 'subscription_status', 'subscription_started_at', 'subscription_ends_at', 'last_payment_at']);
+        $billingSnapshots = $this->providerAircraftSubscriptionService->buildAircraftBillingSnapshots($providerAircraft);
 
         $aircraftPayments = AircraftBillingPayment::query()
             ->with(['aircraft:id,registration,model,base_airport', 'billingPlan:id,code,name,amount,currency'])
@@ -612,6 +619,7 @@ class ProveedorControlador extends ControladorBase
                     'receipt' => $payment->transaction_reference,
                     'notes' => $payment->notes,
                 ]),
+            'aircraft_billing' => array_values($billingSnapshots),
             'aircraft_payments' => $aircraftPayments,
         ]);
     }
