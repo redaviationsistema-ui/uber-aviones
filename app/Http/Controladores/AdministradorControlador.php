@@ -21,6 +21,7 @@ use App\Servicios\Aeronaves\AircraftStateService;
 use App\Servicios\Providers\AdminProviderApprovalService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -700,9 +701,19 @@ class AdministradorControlador extends ControladorBase
 
     public function activateAeronave(Aeronave $aircraft)
     {
+        $requestStartedAt = microtime(true);
+        $validationStartedAt = microtime(true);
         $state = $this->aircraftStateService->evaluateAndSyncAircraftState($aircraft);
+        $validationMs = round((microtime(true) - $validationStartedAt) * 1000, 2);
 
         if (! ($state['activation']['can_activate'] ?? false)) {
+            Log::info('admin.aircraft_activation.rejected', [
+                'aircraft_id' => $aircraft->id,
+                'validation_ms' => $validationMs,
+                'total_ms' => round((microtime(true) - $requestStartedAt) * 1000, 2),
+                'missing_requirements' => $state['activation']['missing_requirements'] ?? [],
+            ]);
+
             return response()->json([
                 'success' => false,
                 'code' => 'AIRCRAFT_PENDING_REQUIREMENTS',
@@ -712,7 +723,8 @@ class AdministradorControlador extends ControladorBase
             ], 409);
         }
 
-        return DB::transaction(function () use ($aircraft, $state) {
+        $databaseStartedAt = microtime(true);
+        $activatedAircraft = DB::transaction(function () use ($aircraft) {
             $lockedAircraft = Aeronave::query()->lockForUpdate()->findOrFail($aircraft->id);
             $payload = [
                 'status' => 'active',
@@ -733,15 +745,34 @@ class AdministradorControlador extends ControladorBase
 
             $lockedAircraft->forceFill($payload)->save();
 
-            $refreshedState = $this->aircraftStateService->evaluateAndSyncAircraftState($lockedAircraft);
-            $refreshedAircraft = $lockedAircraft->fresh(['provider.user.profile', 'images', 'documents', 'availability']);
-
-            return $this->ok([
-                'message' => 'Aeronave activada correctamente.',
-                'aircraft' => $this->serializeAdminAircraftPayload($refreshedAircraft, $refreshedState),
-                'state' => $refreshedState,
-            ]);
+            return $lockedAircraft->fresh();
         });
+
+        $databaseMs = round((microtime(true) - $databaseStartedAt) * 1000, 2);
+        $totalMs = round((microtime(true) - $requestStartedAt) * 1000, 2);
+
+        Log::info('admin.aircraft_activation.completed', [
+            'aircraft_id' => $activatedAircraft->id,
+            'validation_and_readiness_ms' => $validationMs,
+            'database_update_ms' => $databaseMs,
+            'post_save_snapshot_ms' => 0,
+            'events_and_jobs_ms' => 0,
+            'total_before_response_ms' => $totalMs,
+        ]);
+
+        return $this->ok([
+            'message' => 'Aeronave activada correctamente.',
+            'aircraft' => [
+                ...$activatedAircraft->attributesToArray(),
+                'ready_to_quote' => true,
+                'ready_to_book' => true,
+            ],
+            'timing' => [
+                'validation_and_readiness_ms' => $validationMs,
+                'database_update_ms' => $databaseMs,
+                'total_before_response_ms' => $totalMs,
+            ],
+        ]);
     }
 
     public function deactivateAeronave(Aeronave $aircraft)
