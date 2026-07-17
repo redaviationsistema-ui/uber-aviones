@@ -75,6 +75,10 @@ class Aeronave extends Model
         'overnight_fee',
         'currency',
         'status',
+        'is_active',
+        'operational_status',
+        'validation_status',
+        'activated_at',
         'approved_at',
         'billing_status',
         'billing_plan_id',
@@ -117,7 +121,9 @@ class Aeronave extends Model
             'overnight_fee' => 'decimal:2',
             'billing_plan_id' => 'integer',
             'security_score' => 'integer',
+            'is_active' => 'boolean',
             'approved_at' => 'datetime',
+            'activated_at' => 'datetime',
             'subscription_started_at' => 'datetime',
             'subscription_ends_at' => 'datetime',
             'last_payment_at' => 'datetime',
@@ -187,7 +193,13 @@ class Aeronave extends Model
 
     public function isAdministrativelyApproved(): bool
     {
-        return $this->approved_at !== null;
+        if ($this->approved_at !== null) {
+            return true;
+        }
+
+        $explicitStatus = $this->resolvedApprovalStatus();
+
+        return in_array($explicitStatus, ['approved', 'aprobada', 'aprobado', 'active'], true);
     }
 
     public function hasActiveBillingSubscription(): bool
@@ -202,6 +214,54 @@ class Aeronave extends Model
     public function resolvedReviewStatus(): string
     {
         return $this->isAdministrativelyApproved() ? 'approved' : 'pending_review';
+    }
+
+    public function resolvedApprovalStatus(): string
+    {
+        $status = self::normalizeStatusValue($this->getAttribute('validation_status'));
+        if ($status !== '') {
+            return $status;
+        }
+
+        $status = self::normalizeStatusValue($this->getAttribute('approval_status'));
+        if ($status !== '') {
+            return $status;
+        }
+
+        return $this->approved_at !== null ? 'approved' : 'pending_review';
+    }
+
+    public function isOperationallyActive(): bool
+    {
+        if (array_key_exists('is_active', $this->getAttributes()) && $this->getAttribute('is_active') !== null) {
+            return (bool) $this->getAttribute('is_active');
+        }
+
+        $operationalStatus = self::normalizeStatusValue($this->getAttribute('operational_status'));
+        if ($operationalStatus !== '') {
+            return in_array($operationalStatus, ['active', 'activa'], true);
+        }
+
+        return self::normalizeStatusValue($this->status) === 'active';
+    }
+
+    public function resolvedOperationalStatus(): string
+    {
+        $operationalStatus = self::normalizeStatusValue($this->getAttribute('operational_status'));
+        if ($operationalStatus !== '') {
+            return $operationalStatus;
+        }
+
+        if (array_key_exists('is_active', $this->getAttributes()) && $this->getAttribute('is_active') !== null) {
+            return $this->getAttribute('is_active') ? 'active' : 'inactive';
+        }
+
+        $status = self::normalizeStatusValue($this->status);
+        if (in_array($status, ['active', 'inactive', 'blocked'], true)) {
+            return $status;
+        }
+
+        return 'inactive';
     }
 
     private static function normalizeStatusValue(mixed $value): string

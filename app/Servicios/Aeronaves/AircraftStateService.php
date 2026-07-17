@@ -98,7 +98,7 @@ class AircraftStateService
         $pricingState = $this->buildPricingState($resolvedAircraft);
         $reviewState = $this->buildReviewState($resolvedAircraft, $documentsState);
         $activationState = $this->buildActivationState($resolvedAircraft, $billing, $reviewState, $documentsState, $operationState, $pricingState);
-        $readyToQuote = (bool) ($activationState['can_activate'] ?? false) && ($activationState['commercial_status'] ?? '') === 'active';
+        $readyToQuote = (bool) ($activationState['requirements_complete'] ?? false) && ($activationState['is_active'] ?? false);
         $readyToBook = $readyToQuote;
         $paymentState = $this->buildPaymentState($billing);
 
@@ -138,34 +138,8 @@ class AircraftStateService
             $aircraft->refresh();
             $aircraft->load(['provider', 'documents', 'images', 'availability', 'baseAirport']);
 
-            $snapshot = $this->evaluate($aircraft, $billingSnapshot);
-            $normalizedStatus = $this->normalizeValue($aircraft->status);
-
-            $nextApprovedAt = ($snapshot['review']['approved'] ?? false) ? ($aircraft->approved_at ?: now()) : null;
-            $nextStatus = $normalizedStatus === 'blocked'
-                ? 'blocked'
-                : (($snapshot['activation']['can_activate'] ?? false) ? 'active' : 'inactive');
-
-            $changes = [];
-
-            if (($aircraft->approved_at?->toISOString() ?? null) !== ($nextApprovedAt?->toISOString() ?? null)) {
-                $changes['approved_at'] = $nextApprovedAt;
-            }
-
-            if ($normalizedStatus !== $nextStatus && $normalizedStatus !== 'blocked') {
-                $changes['status'] = $nextStatus;
-            }
-
-            if ($changes !== []) {
-                $this->forgetEvaluationCacheForAircraft($aircraftId);
-                $aircraft->forceFill($changes)->save();
-                $aircraft->refresh();
-                $aircraft->load(['provider', 'documents', 'images', 'availability', 'baseAirport']);
-            }
-
             $this->forgetEvaluationCacheForAircraft($aircraftId);
-
-            return $this->evaluate($aircraft);
+            return $this->evaluate($aircraft, $billingSnapshot);
         });
     }
 
@@ -182,15 +156,15 @@ class AircraftStateService
     private function buildReviewState(Aeronave $aircraft, array $documentsState): array
     {
         $providerApproved = (bool) $aircraft->provider?->isAdministrativelyApproved();
+        $aircraftApproved = (bool) $aircraft->isAdministrativelyApproved();
         $documentsRejected = (int) ($documentsState['rejected'] ?? 0) > 0;
         $documentsExpired = (int) ($documentsState['expired'] ?? 0) > 0;
-        $documentsValid = (bool) ($documentsState['valid'] ?? false);
 
-        if ($providerApproved && $documentsValid) {
+        if ($aircraftApproved) {
             return [
                 'status' => 'approved',
                 'approved' => true,
-                'provider_approved' => true,
+                'provider_approved' => $providerApproved,
                 'aircraft_approved' => true,
             ];
         }
@@ -326,47 +300,61 @@ class AircraftStateService
     private function buildActivationState(Aeronave $aircraft, array $billing, array $reviewState, array $documentsState, array $operationState, array $pricingState): array
     {
         $providerApproved = (bool) ($reviewState['provider_approved'] ?? false);
+        $aircraftApproved = (bool) ($reviewState['aircraft_approved'] ?? false);
         $paymentActive = $this->buildPaymentState($billing)['is_active'] ?? false;
         $missingRequirements = [];
         $normalizedStatus = $this->normalizeValue($aircraft->status);
+        $isBlocked = $normalizedStatus === 'blocked';
+        $isActive = $aircraft->isOperationallyActive();
 
         if (! $providerApproved) {
-            $missingRequirements[] = 'provider';
+            $missingRequirements[] = 'provider_not_approved';
+        }
+        if (! $aircraftApproved) {
+            $missingRequirements[] = 'aircraft_not_approved';
         }
         if (! ($documentsState['valid'] ?? false)) {
-            $missingRequirements[] = 'documents';
+            $missingRequirements[] = 'documents_pending';
         }
         if (! ($operationState['range_configured'] ?? false)) {
-            $missingRequirements[] = 'range';
+            $missingRequirements[] = 'range_missing';
         }
         if (! ($operationState['capacity_configured'] ?? false)) {
-            $missingRequirements[] = 'capacity';
+            $missingRequirements[] = 'capacity_missing';
         }
         if (! ($operationState['base_registered'] ?? false)) {
-            $missingRequirements[] = 'base';
+            $missingRequirements[] = 'base_missing';
         }
         if (! ($pricingState['complete'] ?? false)) {
-            $missingRequirements[] = 'pricing';
+            $missingRequirements[] = 'commercial_information_incomplete';
         }
         if (! $paymentActive) {
             $missingRequirements[] = 'payment_pending';
         }
 
+        $requirementsComplete = $missingRequirements === [];
         $commercialStatus = 'pending_requirements';
-        if ($normalizedStatus === 'blocked') {
+        if ($isBlocked) {
             $commercialStatus = 'blocked';
-        } elseif ($missingRequirements === []) {
+        } elseif ($isActive) {
             $commercialStatus = 'active';
+        } elseif (! $aircraftApproved) {
+            $commercialStatus = 'pending_approval';
         } elseif (! $paymentActive) {
             $commercialStatus = 'pending_payment';
+        } elseif ($requirementsComplete) {
+            $commercialStatus = 'inactive';
         }
 
         return [
-            'is_active' => $normalizedStatus === 'active' && $missingRequirements === [],
-            'can_activate' => $normalizedStatus !== 'blocked' && $missingRequirements === [],
+            'is_active' => $isActive,
+            'can_activate' => ! $isBlocked && ! $isActive && $requirementsComplete,
+            'can_deactivate' => $isActive,
+            'requirements_complete' => $requirementsComplete,
             'commercial_status' => $commercialStatus,
             'missing_requirements' => array_values(array_unique($missingRequirements)),
             'provider_approved' => $providerApproved,
+            'aircraft_approved' => $aircraftApproved,
         ];
     }
 
