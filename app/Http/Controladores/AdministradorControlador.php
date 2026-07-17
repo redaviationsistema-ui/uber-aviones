@@ -6,6 +6,7 @@ use App\Modelos\Aeronave;
 use App\Modelos\RegistroAuditoria;
 use App\Modelos\Comision;
 use App\Modelos\Demo;
+use App\Modelos\DocumentoAeronave;
 use App\Modelos\DocumentoEmpresa;
 use App\Modelos\SolicitudVuelo;
 use App\Modelos\Pago;
@@ -16,6 +17,7 @@ use App\Modelos\Reserva;
 use App\Modelos\Suscripcion;
 use App\Modelos\ConfiguracionSistema;
 use App\Modelos\Usuario;
+use App\Servicios\Aeronaves\AircraftStateService;
 use App\Servicios\Providers\AdminProviderApprovalService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -51,6 +53,7 @@ class AdministradorControlador extends ControladorBase
 
     public function __construct(
         private readonly AdminProviderApprovalService $adminProviderApprovalService,
+        private readonly AircraftStateService $aircraftStateService,
     )
     {
     }
@@ -639,10 +642,17 @@ class AdministradorControlador extends ControladorBase
         return $this->requestProviderChanges($request, $provider);
     }
 
-    public function aircraft()
+    public function aircraft(Request $request)
     {
+        $filters = $request->validate([
+            'provider_id' => ['nullable', 'integer', 'exists:providers,id'],
+        ]);
+
+        $providerId = (int) ($filters['provider_id'] ?? 0);
+
         $aircraft = Aeronave::query()
-            ->with(['provider.user.profile', 'availability'])
+            ->with(['provider.user.profile', 'availability', 'images', 'documents'])
+            ->when($providerId > 0, fn ($query) => $query->where('provider_id', $providerId))
             ->paginate(25);
 
         return $this->ok([
@@ -652,62 +662,81 @@ class AdministradorControlador extends ControladorBase
 
     public function showAeronave(Aeronave $aircraft)
     {
+        $state = $this->aircraftStateService->evaluateAndSyncAircraftState($aircraft);
+
         return $this->ok([
             'aircraft' => $this->serializeAdminAircraftPayload(
-                $aircraft->load(['provider.user.profile', 'images', 'documents', 'availability'])
+                $aircraft->load(['provider.user.profile', 'images', 'documents', 'availability']),
+                $state,
             ),
         ]);
     }
 
     public function blockAeronave(Aeronave $aircraft)
     {
-        $aircraft->update(['status' => 'blocked']);
+        $aircraft->update([
+            'status' => 'blocked',
+            'approved_at' => null,
+        ]);
+        $state = $this->aircraftStateService->evaluateAndSyncAircraftState($aircraft);
 
         return $this->ok([
             'aircraft' => $this->serializeAdminAircraftPayload(
-                $aircraft->fresh(['provider.user.profile', 'images', 'documents', 'availability'])
+                $aircraft->fresh(['provider.user.profile', 'images', 'documents', 'availability']),
+                $state,
             ),
         ]);
     }
 
     public function activateAeronave(Aeronave $aircraft)
     {
-        $provider = $aircraft->provider;
-        if (! $provider) {
+        $state = $this->aircraftStateService->evaluateAndSyncAircraftState($aircraft);
+
+        if (! ($state['activation']['can_activate'] ?? false)) {
             return response()->json([
                 'success' => false,
-                'code' => 'PROVIDER_NOT_FOUND',
-                'message' => 'No se encontró el proveedor asociado a la aeronave.',
-            ], 404);
+                'code' => 'AIRCRAFT_PENDING_REQUIREMENTS',
+                'message' => 'La aeronave no cumple todos los requisitos para activarse.',
+                'missing_requirements' => $this->aircraftActivationRequirementPayload($state),
+                'state' => $state,
+            ], 409);
         }
 
-        if (! $provider->isApprovedForOperations()) {
-            return response()->json([
-                'success' => false,
-                'code' => 'PROVIDER_NOT_APPROVED',
-                'message' => 'No se puede activar la aeronave porque el proveedor aún no está aprobado.',
-            ], 403);
-        }
+        return DB::transaction(function () use ($aircraft, $state) {
+            $lockedAircraft = Aeronave::query()->lockForUpdate()->findOrFail($aircraft->id);
+            $lockedAircraft->forceFill([
+                'status' => 'active',
+                'approved_at' => $lockedAircraft->approved_at ?: now(),
+            ])->save();
 
-        $aircraftStatus = Proveedor::normalizeStatusValue($aircraft->status ?? 'inactive');
-        if ($aircraftStatus !== 'inactive') {
-            return response()->json([
-                'success' => false,
-                'code' => 'AIRCRAFT_NOT_APPROVED',
-                'message' => 'No se puede activar la aeronave porque todavía no ha sido aprobada.',
-            ], 403);
-        }
+            $refreshedState = $this->aircraftStateService->evaluateAndSyncAircraftState($lockedAircraft);
+            $refreshedAircraft = $lockedAircraft->fresh(['provider.user.profile', 'images', 'documents', 'availability']);
 
-        $aircraft->update([
-            'approved_at' => $aircraft->approved_at ?: now(),
-            'status' => $aircraft->hasActiveBillingSubscription() ? 'active' : 'inactive',
-        ]);
+            return $this->ok([
+                'message' => 'Aeronave activada correctamente.',
+                'aircraft' => $this->serializeAdminAircraftPayload($refreshedAircraft, $refreshedState),
+                'state' => $refreshedState,
+            ]);
+        });
+    }
 
-        return $this->ok([
-            'aircraft' => $this->serializeAdminAircraftPayload(
-                $aircraft->fresh(['provider.user.profile', 'images', 'documents', 'availability'])
-            ),
-        ]);
+    public function deactivateAeronave(Aeronave $aircraft)
+    {
+        return DB::transaction(function () use ($aircraft) {
+            $lockedAircraft = Aeronave::query()->lockForUpdate()->findOrFail($aircraft->id);
+            $lockedAircraft->forceFill([
+                'status' => 'inactive',
+            ])->save();
+
+            $state = $this->aircraftStateService->evaluate($lockedAircraft->fresh(['provider.user.profile', 'images', 'documents', 'availability']));
+            $refreshedAircraft = $lockedAircraft->fresh(['provider.user.profile', 'images', 'documents', 'availability']);
+
+            return $this->ok([
+                'message' => 'Aeronave desactivada correctamente.',
+                'aircraft' => $this->serializeAdminAircraftPayload($refreshedAircraft, $state),
+                'state' => $state,
+            ]);
+        });
     }
 
     public function flightRequests()
@@ -1373,10 +1402,15 @@ class AdministradorControlador extends ControladorBase
             'base_airport' => $provider->base_airport,
             'representative_name' => $provider->representative_name,
             'representative_phone' => $provider->representative_phone,
+            'name' => $provider->commercial_name ?: $provider->company_name ?: $provider->legal_name,
             'approval_status' => $provider->approval_status,
             'admin_validation_status' => $this->resolveAdminValidationStatus($provider),
             'operator_status' => $this->resolveOperatorStatus($provider),
-            'status' => $provider->status,
+            'status' => $provider->resolvedApprovalStatus(),
+            'raw_status' => $provider->status,
+            'approved_at' => $provider->admin_validated_at ?: $provider->validated_at,
+            'is_approved' => $provider->isAdministrativelyApproved(),
+            'access_enabled' => $provider->access_enabled,
             'user' => $this->serializeProviderUserSummary($provider->user),
         ];
     }
@@ -1392,8 +1426,12 @@ class AdministradorControlador extends ControladorBase
         ];
     }
 
-    private function serializeAdminAircraftPayload(Aeronave $aircraft): array
+    private function serializeAdminAircraftPayload(Aeronave $aircraft, ?array $stateSnapshot = null): array
     {
+        $state = $stateSnapshot ?? $this->aircraftStateService->evaluate($aircraft);
+        $documents = $aircraft->relationLoaded('documents')
+            ? $this->deduplicateAircraftDocuments($aircraft->documents)->map(fn ($item) => $item->attributesToArray())->values()->all()
+            : [];
         $availability = $aircraft->relationLoaded('availability')
             ? $aircraft->availability->map(fn ($item) => $item->attributesToArray())->values()->all()
             : [];
@@ -1401,17 +1439,83 @@ class AdministradorControlador extends ControladorBase
         return [
             ...$aircraft->attributesToArray(),
             'approved_at' => $aircraft->approved_at,
-            'approved' => $aircraft->isAdministrativelyApproved(),
-            'review_status' => $aircraft->resolvedReviewStatus(),
+            'approved' => $state['review']['approved'] ?? $aircraft->isAdministrativelyApproved(),
+            'review_status' => $state['review']['status'] ?? $aircraft->resolvedReviewStatus(),
+            'approval' => [
+                'status' => $state['review']['status'] ?? $aircraft->resolvedReviewStatus(),
+                'label' => ($state['review']['approved'] ?? false) ? 'Aprobada' : 'Pendiente',
+                'is_approved' => (bool) ($state['review']['approved'] ?? $aircraft->isAdministrativelyApproved()),
+            ],
+            'operational' => [
+                'status' => ($state['activation']['commercial_status'] ?? null) === 'active' ? 'active' : 'inactive',
+                'label' => ($state['activation']['is_active'] ?? false) ? 'Activa' : 'Inactiva',
+                'is_active' => (bool) ($state['activation']['is_active'] ?? false),
+            ],
             'provider' => $this->serializeProviderInlineSummary($aircraft->provider),
-            'documents' => $aircraft->relationLoaded('documents')
-                ? $aircraft->documents->map(fn ($item) => $item->attributesToArray())->values()->all()
-                : [],
+            'documents' => $documents,
+            'documents_count' => count($documents),
             'images' => $aircraft->relationLoaded('images')
                 ? $aircraft->images->map(fn ($item) => $item->attributesToArray())->values()->all()
                 : [],
             'availability' => $availability,
+            'documents_state' => $state['documents'] ?? [],
+            'review' => $state['review'] ?? [],
+            'operation' => $state['operation'] ?? [],
+            'pricing' => $state['pricing'] ?? [],
+            'activation' => $state['activation'] ?? [],
+            'payment' => $state['payment'] ?? [],
+            'billing_state' => $state['billing'] ?? [],
+            'aircraft_state' => $state,
+            'ready_to_quote' => $state['ready_to_quote'] ?? false,
+            'ready_to_book' => $state['ready_to_book'] ?? false,
         ];
+    }
+
+    private function aircraftActivationRequirementPayload(array $state): array
+    {
+        return collect($state['activation']['missing_requirements'] ?? [])
+            ->filter(fn ($entry) => trim((string) $entry) !== '')
+            ->values()
+            ->map(fn ($entry) => [
+                'code' => (string) $entry,
+                'label' => match ((string) $entry) {
+                    'provider' => 'Proveedor no aprobado',
+                    'documents' => 'Documentacion obligatoria aprobada',
+                    'range' => 'Rango configurado',
+                    'capacity' => 'Capacidad configurada',
+                    'base' => 'Base operativa registrada',
+                    'pricing' => 'Informacion comercial incompleta',
+                    'payment_pending' => 'Pago pendiente',
+                    default => Str::headline(str_replace('_', ' ', (string) $entry)),
+                },
+            ])
+            ->all();
+    }
+
+    private function deduplicateAircraftDocuments(iterable $documents)
+    {
+        return collect($documents)
+            ->filter(fn ($document) => $document instanceof DocumentoAeronave)
+            ->sortByDesc(fn (DocumentoAeronave $document) => (int) $document->id)
+            ->unique(function (DocumentoAeronave $document) {
+                $aircraftId = (int) ($document->aircraft_id ?: 0);
+                $type = trim((string) ($document->document_type ?: $document->type ?: ''));
+                $storagePath = trim((string) ($document->storage_path ?: ''));
+                $documentUrl = trim((string) ($document->document_url ?: $document->file_url ?: ''));
+                $documentName = trim((string) ($document->document_name ?: ''));
+
+                if ($storagePath !== '') {
+                    return sprintf('storage:%d:%s:%s', $aircraftId, $type, $storagePath);
+                }
+
+                if ($documentUrl !== '') {
+                    return sprintf('url:%d:%s:%s', $aircraftId, $type, $documentUrl);
+                }
+
+                return sprintf('logical:%d:%s:%s', $aircraftId, $type, $documentName);
+            })
+            ->sortBy('id')
+            ->values();
     }
 
     private function resolveAdminValidationStatus(Proveedor $provider): string

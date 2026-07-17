@@ -7,6 +7,7 @@ use App\Modelos\Aeronave;
 use App\Modelos\AircraftBillingPayment;
 use App\Modelos\Proveedor;
 use App\Modelos\SuscripcionAeronave;
+use App\Servicios\Aeronaves\AircraftStateService;
 use App\Servicios\Billing\BillingPlanServicio;
 use App\Servicios\Billing\ProviderAircraftSubscriptionService;
 use Carbon\CarbonInterface;
@@ -22,6 +23,7 @@ class ProviderAircraftBillingControlador extends ControladorBase
     public function __construct(
         private readonly BillingPlanServicio $billingPlanServicio,
         private readonly ProviderAircraftSubscriptionService $providerAircraftSubscriptionService,
+        private readonly AircraftStateService $aircraftStateService,
     )
     {
     }
@@ -242,11 +244,20 @@ class ProviderAircraftBillingControlador extends ControladorBase
             return [$reusablePayment->fresh('billingPlan'), (string) $session->url, (string) $session->id, false];
         });
 
+        $state = $this->aircraftStateService->evaluateAndSyncAircraftState((int) $aircraft->id);
+        $refreshedAircraft = Aeronave::query()
+            ->with(['provider', 'documents', 'images', 'availability'])
+            ->findOrFail($aircraft->id);
+
         return $this->ok([
             'payment' => $payment,
             'checkout_url' => $checkoutUrl,
             'checkout_session_id' => $checkoutSessionId,
             'reused_checkout' => $reusedCheckout,
+            'aircraft' => $this->buildAircraftBillingPayload($refreshedAircraft, $state, $payment, null),
+            'state' => $state,
+            'billing_state' => $state['billing'] ?? [],
+            'activation_state' => $state['activation'] ?? [],
         ], $reusedCheckout ? 200 : 201);
     }
 
@@ -254,10 +265,6 @@ class ProviderAircraftBillingControlador extends ControladorBase
     {
         $providerId = $this->resolvedProviderIdOrAbort($request, 403);
         abort_if((int) $aircraft->provider_id !== (int) $providerId, 403, 'No puedes consultar esta aeronave.');
-        $this->providerAircraftSubscriptionService->syncAircraftStateIfExpired($aircraft);
-        $this->providerAircraftSubscriptionService->syncAircraftActivationRequirements($aircraft);
-        $aircraft->refresh();
-
         $data = $request->validate([
             'session_id' => ['nullable', 'string'],
         ]);
@@ -301,33 +308,58 @@ class ProviderAircraftBillingControlador extends ControladorBase
             $latestPayment,
             $subscription,
         );
+        $state = $this->aircraftStateService->evaluateAndSyncAircraftState((int) $aircraft->id, $billingState);
+        $refreshedAircraft = Aeronave::query()
+            ->with(['provider', 'documents', 'images', 'availability'])
+            ->findOrFail($aircraft->id);
 
         return $this->ok([
-            'aircraft' => [
-                'id' => $aircraft->id,
-                'registration' => $aircraft->registration,
-                'model' => $aircraft->model,
-                'status' => $aircraft->status,
-                'approved_at' => $aircraft->approved_at,
-                'approved' => $aircraft->isAdministrativelyApproved(),
-                'review_status' => $aircraft->resolvedReviewStatus(),
-                'billing_status' => $billingState['billing_status'] ?? $aircraft->billing_status,
-                'billing_plan_id' => $aircraft->billing_plan_id,
-                'subscription_status' => $billingState['subscription_status'] ?? $aircraft->subscription_status,
-                'subscription_started_at' => $aircraft->subscription_started_at,
-                'subscription_ends_at' => $billingState['subscription_ends_at'] ?? $aircraft->subscription_ends_at,
-                'last_payment_at' => $billingState['last_payment_at'] ?? $aircraft->last_payment_at,
-                'payment_reference' => $subscription?->payment_reference ?: $latestPayment?->provider_subscription_id ?: $latestPayment?->provider_payment_id,
-                'provider_checkout_id' => $billingState['checkout_session_id'] ?? $latestPayment?->provider_checkout_id,
-                'provider_customer_id' => $latestPayment?->provider_customer_id,
-                'provider_subscription_id' => $billingState['stripe_subscription_id'] ?? $latestPayment?->provider_subscription_id ?: $subscription?->provider_subscription_id,
-                'provider_invoice_id' => $latestPayment?->provider_invoice_id ?: $subscription?->provider_invoice_id,
-            ],
-            'billing_state' => $billingState,
-            'activation_state' => $activationState,
+            'aircraft' => $this->buildAircraftBillingPayload($refreshedAircraft, $state, $latestPayment, $subscription),
+            'billing_state' => $state['billing'] ?? $billingState,
+            'activation_state' => $state['activation'] ?? $activationState,
             'latest_payment' => $latestPayment,
+            'state' => $state,
             'subscription' => $subscription,
         ]);
+    }
+
+    private function buildAircraftBillingPayload(
+        Aeronave $aircraft,
+        array $state,
+        ?AircraftBillingPayment $latestPayment = null,
+        ?SuscripcionAeronave $subscription = null,
+    ): array {
+        $billingState = $state['billing'] ?? [];
+        $reviewState = $state['review'] ?? [];
+
+        return [
+            'id' => $aircraft->id,
+            'registration' => $aircraft->registration,
+            'model' => $aircraft->model,
+            'status' => $aircraft->status,
+            'approved_at' => $aircraft->approved_at,
+            'approved' => (bool) ($reviewState['approved'] ?? false),
+            'review_status' => $reviewState['status'] ?? $aircraft->resolvedReviewStatus(),
+            'billing_status' => $billingState['status'] ?? $aircraft->billing_status,
+            'billing_plan_id' => $aircraft->billing_plan_id,
+            'subscription_status' => $billingState['subscription_status'] ?? $aircraft->subscription_status,
+            'subscription_started_at' => $aircraft->subscription_started_at,
+            'subscription_ends_at' => $billingState['subscription_ends_at'] ?? $aircraft->subscription_ends_at,
+            'last_payment_at' => $billingState['last_payment_at'] ?? $aircraft->last_payment_at,
+            'payment_reference' => $subscription?->payment_reference ?: $latestPayment?->provider_subscription_id ?: $latestPayment?->provider_payment_id,
+            'provider_checkout_id' => $billingState['checkout_session_id'] ?? $latestPayment?->provider_checkout_id,
+            'provider_customer_id' => $latestPayment?->provider_customer_id,
+            'provider_subscription_id' => $billingState['stripe_subscription_id'] ?? $latestPayment?->provider_subscription_id ?: $subscription?->provider_subscription_id,
+            'provider_invoice_id' => $latestPayment?->provider_invoice_id ?: $subscription?->provider_invoice_id,
+            'documents_state' => $state['documents'] ?? [],
+            'operation' => $state['operation'] ?? [],
+            'pricing' => $state['pricing'] ?? [],
+            'matching' => $state['matching'] ?? [],
+            'activation' => $state['activation'] ?? [],
+            'aircraft_state' => $state,
+            'ready_to_quote' => $state['ready_to_quote'] ?? false,
+            'ready_to_book' => $state['ready_to_book'] ?? false,
+        ];
     }
 
     public function payments(Request $request)

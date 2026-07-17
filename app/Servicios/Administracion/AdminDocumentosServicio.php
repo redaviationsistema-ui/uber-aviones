@@ -2,17 +2,24 @@
 
 namespace App\Servicios\Administracion;
 
+use App\Modelos\Aeronave;
 use App\Modelos\DocumentoAeronave;
 use App\Modelos\DocumentoEmpresa;
-use App\Modelos\Usuario;
+use App\Servicios\Aeronaves\AircraftStateService;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\ValidationException;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class AdminDocumentosServicio
 {
+    public function __construct(
+        private readonly AircraftStateService $aircraftStateService,
+    ) {
+    }
+
     public function list(array $filters = []): LengthAwarePaginator
     {
         $records = collect()
@@ -90,18 +97,74 @@ class AdminDocumentosServicio
 
         if ($type === 'provider') {
             $before = ['status' => $document->status, 'notes' => $document->notes];
-            $document->update(['status' => $status, 'notes' => $reason]);
-            return ['type' => $type, 'before' => $before, 'after' => ['status' => $document->status, 'notes' => $document->notes], 'document' => $this->serializeProviderDocument($document->fresh())];
+            DB::transaction(function () use ($document, $status, $reason): void {
+                $document->update(['status' => $status, 'notes' => $reason]);
+            });
+
+            return [
+                'type' => $type,
+                'before' => $before,
+                'after' => ['status' => $document->status, 'notes' => $document->notes],
+                'document' => $this->serializeProviderDocument($document->fresh()),
+            ];
         }
 
-        $before = ['status' => $document->status, 'notes' => $document->notes, 'verified_by_admin' => $document->verified_by_admin];
-        $document->update([
-            'status' => $status,
-            'notes' => $reason,
-            'verified_by_admin' => $status === 'approved',
-        ]);
+        $before = [
+            'status' => $document->status,
+            'notes' => $document->notes,
+            'verified_by_admin' => $document->verified_by_admin,
+            'metadata' => $document->metadata,
+        ];
 
-        return ['type' => $type, 'before' => $before, 'after' => ['status' => $document->status, 'notes' => $document->notes, 'verified_by_admin' => $document->verified_by_admin], 'document' => $this->serializeAircraftDocument($document->fresh())];
+        DB::transaction(function () use ($document, $status, $reason): void {
+            $metadata = is_array($document->metadata) ? $document->metadata : [];
+            $reviewedBy = (int) (auth()->id() ?: 0);
+            $reviewedAt = now()->toIso8601String();
+
+            $metadata['admin_review'] = [
+                'status' => $status,
+                'reason' => $reason,
+                'reviewed_by' => $reviewedBy > 0 ? $reviewedBy : null,
+                'reviewed_at' => $reviewedAt,
+            ];
+
+            if ($status === 'approved') {
+                $metadata['admin_review']['approved_at'] = $reviewedAt;
+            }
+
+            if (in_array($status, ['rejected', 'changes_requested'], true)) {
+                $metadata['admin_review']['rejected_at'] = $reviewedAt;
+            }
+
+            $document->update([
+                'status' => $status,
+                'notes' => $reason,
+                'verified_by_admin' => $status === 'approved',
+                'metadata' => $metadata,
+            ]);
+        });
+
+        $state = $this->aircraftStateService->evaluateAndSyncAircraftState((int) $document->aircraft_id);
+        $aircraft = Aeronave::query()->find($document->aircraft_id);
+
+        return [
+            'type' => $type,
+            'before' => $before,
+            'after' => [
+                'status' => $document->status,
+                'notes' => $document->notes,
+                'verified_by_admin' => $document->verified_by_admin,
+                'metadata' => $document->metadata,
+            ],
+            'document' => $this->serializeAircraftDocument($document->fresh()),
+            'aircraft' => [
+                'id' => $aircraft?->id,
+                'status' => $aircraft?->status,
+                'approved' => (bool) ($state['review']['approved'] ?? false),
+                'review_status' => $state['review']['status'] ?? null,
+            ],
+            'state' => $state,
+        ];
     }
 
     private function providerDocuments(array $filters): Collection

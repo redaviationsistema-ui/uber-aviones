@@ -8,6 +8,7 @@ use App\Modelos\DisponibilidadAeronave;
 use App\Modelos\DocumentoAeronave;
 use App\Modelos\ImagenAeronave;
 use App\Servicios\Aeronaves\AircraftAvailabilityService;
+use App\Servicios\Aeronaves\AircraftStateService;
 use App\Servicios\Billing\ProviderAircraftSubscriptionService;
 use Carbon\Carbon;
 use Illuminate\Http\UploadedFile;
@@ -45,6 +46,7 @@ class AeronaveControlador extends ControladorBase
     public function __construct(
         private readonly ProviderAircraftSubscriptionService $providerAircraftSubscriptionService,
         private readonly AircraftAvailabilityService $aircraftAvailabilityService,
+        private readonly AircraftStateService $aircraftStateService,
     )
     {
     }
@@ -160,6 +162,7 @@ class AeronaveControlador extends ControladorBase
                     $providerPlan,
                     $providerAircraftCount,
                     $billingSnapshots[(int) $item->id] ?? null,
+                    $this->aircraftStateService->evaluate($item, $billingSnapshots[(int) $item->id] ?? null),
                 )
             )
         );
@@ -182,6 +185,7 @@ class AeronaveControlador extends ControladorBase
             'subscription_status' => 'inactive',
             'currency' => $data['currency'] ?? 'USD',
         ]);
+        $state = $this->aircraftStateService->evaluateAndSyncAircraftState($aircraft);
 
         $this->writeAudit($request, 'create', 'provider_aircraft', 'Aeronave registrada por proveedor.', [
             'new_values' => [
@@ -198,13 +202,11 @@ class AeronaveControlador extends ControladorBase
         ]);
 
         return $this->ok([
-            'aircraft' => $this->formatAircraftPayload(
-                $aircraft->fresh(['provider.user.activeSuscripcion.plan', 'availability', 'documents', 'images']),
-                billingSnapshot: $this->providerAircraftSubscriptionService->buildAircraftBillingSnapshot($aircraft->fresh(['provider', 'documents'])),
-            ),
+            'aircraft' => $this->buildProviderAircraftResponse($aircraft, $state),
+            'state' => $state,
             'message' => 'Aeronave registrada y enviada a revisión administrativa.',
-            'review_status' => 'pending_review',
-            'status' => 'inactive',
+            'review_status' => $state['review']['status'] ?? 'pending_review',
+            'status' => $state['activation']['commercial_status'] ?? 'inactive',
             'redirect_to' => '/provider/aircraft/'.$aircraft->id.'/billing',
         ], 201);
     }
@@ -212,14 +214,11 @@ class AeronaveControlador extends ControladorBase
     public function show(Request $request, Aeronave $aircraft)
     {
         $this->authorizeProveedorAeronave($request, $aircraft);
-        $this->providerAircraftSubscriptionService->syncAircraftStateIfExpired($aircraft);
-        $aircraft->refresh();
+        $state = $this->aircraftStateService->evaluateAndSyncAircraftState($aircraft);
 
         return $this->ok([
-            'aircraft' => $this->formatAircraftPayload(
-                $aircraft->load(['provider.user.activeSuscripcion.plan', 'images', 'availability', 'documents']),
-                billingSnapshot: $this->providerAircraftSubscriptionService->buildAircraftBillingSnapshot($aircraft->loadMissing(['provider', 'documents'])),
-            ),
+            'aircraft' => $this->buildProviderAircraftResponse($aircraft, $state),
+            'state' => $state,
         ]);
     }
 
@@ -229,7 +228,10 @@ class AeronaveControlador extends ControladorBase
         $this->rejectForbiddenPayloadFields($request, self::PROVIDER_FORBIDDEN_AIRCRAFT_FIELDS, 'El proveedor no puede modificar estados comerciales u operativos de la aeronave.');
         $previousState = $aircraft->only(['model', 'registration', 'base_airport', 'status', 'updated_at']);
 
-        $aircraft->update($this->normalizeAircraftInput($request->validate($this->rules(false, $aircraft)), $aircraft));
+        DB::transaction(function () use ($aircraft, $request): void {
+            $aircraft->update($this->normalizeAircraftInput($request->validate($this->rules(false, $aircraft)), $aircraft));
+        });
+        $state = $this->aircraftStateService->evaluateAndSyncAircraftState($aircraft);
 
         $this->writeAudit($request, 'update', 'provider_aircraft', 'Aeronave actualizada por proveedor.', [
             'old_values' => [
@@ -251,9 +253,8 @@ class AeronaveControlador extends ControladorBase
         ]);
 
         return $this->ok([
-            'aircraft' => $this->formatAircraftPayload(
-                $aircraft->fresh(['provider.user.activeSuscripcion.plan', 'images', 'availability', 'documents'])
-            ),
+            'aircraft' => $this->buildProviderAircraftResponse($aircraft, $state),
+            'state' => $state,
         ]);
     }
 
@@ -278,8 +279,13 @@ class AeronaveControlador extends ControladorBase
         $aircraft = Aeronave::findOrFail($data['aircraft_id']);
         $this->authorizeProveedorAeronave($request, $aircraft);
 
+        $availability = DB::transaction(fn () => DisponibilidadAeronave::create($data));
+        $state = $this->aircraftStateService->evaluateAndSyncAircraftState($aircraft);
+
         return $this->ok([
-            'availability' => DisponibilidadAeronave::create($data),
+            'availability' => $availability,
+            'aircraft' => $this->buildProviderAircraftResponse($aircraft, $state),
+            'state' => $state,
         ], 201);
     }
 
@@ -377,9 +383,13 @@ class AeronaveControlador extends ControladorBase
             throw $exception;
         }
 
+        $state = $this->aircraftStateService->evaluateAndSyncAircraftState($aircraft);
+
         return $this->ok([
             'image' => $image,
             'images' => $aircraft->fresh('images')->images,
+            'aircraft' => $this->buildProviderAircraftResponse($aircraft, $state),
+            'state' => $state,
             'path' => $path,
             'url' => $imageUrl,
         ], 201);
@@ -448,14 +458,12 @@ class AeronaveControlador extends ControladorBase
             ]);
         });
 
+        $state = $this->aircraftStateService->evaluateAndSyncAircraftState($aircraft);
+
         return $this->ok([
             'image' => $image,
-            'aircraft' => $this->formatAircraftPayload($aircraft->fresh([
-                'provider.user.activeSuscripcion.plan',
-                'images',
-                'availability',
-                'documents',
-            ])),
+            'aircraft' => $this->buildProviderAircraftResponse($aircraft, $state),
+            'state' => $state,
         ]);
     }
 
@@ -471,8 +479,13 @@ class AeronaveControlador extends ControladorBase
         }
 
         $image->delete();
+        $state = $this->aircraftStateService->evaluateAndSyncAircraftState($aircraft);
 
-        return $this->ok(['message' => 'Imagen eliminada.']);
+        return $this->ok([
+            'message' => 'Imagen eliminada.',
+            'aircraft' => $this->buildProviderAircraftResponse($aircraft, $state),
+            'state' => $state,
+        ]);
     }
 
     public function storeDocument(Request $request, Aeronave $aircraft)
@@ -509,6 +522,7 @@ class AeronaveControlador extends ControladorBase
         }
 
         if (! empty($createdDocuments)) {
+            $state = $this->aircraftStateService->evaluateAndSyncAircraftState($aircraft);
             $this->writeAudit($request, 'upload', 'provider_aircraft_document', 'Documento de aeronave cargado.', [
                 'new_values' => [
                     'provider_id' => $aircraft->provider_id,
@@ -523,6 +537,8 @@ class AeronaveControlador extends ControladorBase
             return $this->ok([
                 'documents' => $createdDocuments,
                 'document' => $createdDocuments[0],
+                'aircraft' => $this->buildProviderAircraftResponse($aircraft, $state),
+                'state' => $state,
                 'uploaded' => count($createdDocuments),
                 'url' => $createdDocuments[0]->document_url,
             ], 201);
@@ -543,6 +559,7 @@ class AeronaveControlador extends ControladorBase
             'notes' => $data['notes'] ?? null,
         ]);
 
+        $state = $this->aircraftStateService->evaluateAndSyncAircraftState($aircraft);
         $this->writeAudit($request, 'upload', 'provider_aircraft_document', 'Documento de aeronave cargado.', [
             'new_values' => [
                 'provider_id' => $aircraft->provider_id,
@@ -556,6 +573,8 @@ class AeronaveControlador extends ControladorBase
 
         return $this->ok([
             'document' => $document,
+            'aircraft' => $this->buildProviderAircraftResponse($aircraft, $state),
+            'state' => $state,
             'uploaded' => 1,
             'url' => $document->document_url,
         ], 201);
@@ -564,22 +583,79 @@ class AeronaveControlador extends ControladorBase
     public function destroyDocument(Request $request, Aeronave $aircraft, DocumentoAeronave $document)
     {
         $this->authorizeProveedorAeronave($request, $aircraft);
-        abort_if($document->aircraft_id !== $aircraft->id, 404);
+        if ((int) $document->aircraft_id !== (int) $aircraft->id) {
+            return response()->json([
+                'success' => false,
+                'message' => 'El documento no pertenece a esta aeronave.',
+            ], 422);
+        }
 
-        $paths = array_filter([
+        $documentId = (int) $document->id;
+        $aircraftId = (int) $aircraft->id;
+        $storageDisk = trim((string) ($document->storage_disk ?: 's3')) ?: 's3';
+        $paths = array_values(array_unique(array_filter([
             $document->storage_path,
             $document->thumbnail_path,
             $this->resolveS3Path($document->document_url ?: $document->file_url),
             $this->resolveS3Path($document->thumbnail_url ?: ''),
+        ])));
+
+        DB::transaction(function () use ($request, $document, $paths, $storageDisk, $aircraftId, $documentId): void {
+            $storage = Storage::disk($storageDisk);
+
+            foreach ($paths as $path) {
+                try {
+                    if ($storage->exists($path)) {
+                        $storage->delete($path);
+                        continue;
+                    }
+
+                    Log::warning('No se encontro el archivo fisico del documento de aeronave al eliminarlo.', [
+                        'document_id' => $documentId,
+                        'aircraft_id' => $aircraftId,
+                        'disk' => $storageDisk,
+                        'path' => $path,
+                    ]);
+                } catch (\Throwable $exception) {
+                    Log::warning('No se pudo eliminar un archivo asociado al documento de aeronave.', [
+                        'document_id' => $documentId,
+                        'aircraft_id' => $aircraftId,
+                        'disk' => $storageDisk,
+                        'path' => $path,
+                        'error' => $exception->getMessage(),
+                    ]);
+                }
+            }
+
+            $document->delete();
+
+            $this->writeAudit($request, 'delete', 'provider_aircraft_document', 'Documento de aeronave eliminado.', [
+                'new_values' => [
+                    'provider_id' => $document->provider_id,
+                    'aircraft_id' => $aircraftId,
+                    'document_id' => $documentId,
+                    'event_type' => 'aircraft_document_deleted',
+                    'title' => 'Documento de aeronave eliminado',
+                    'description' => $document->document_name ?: $document->document_type ?: 'Documento',
+                ],
+                'metadata' => [
+                    'storage_disk' => $storageDisk,
+                    'paths' => $paths,
+                ],
+            ]);
+        });
+
+        $state = $this->aircraftStateService->evaluateAndSyncAircraftState($aircraft);
+
+        return $this->ok([
+            'message' => 'Documento eliminado correctamente.',
+            'data' => [
+                'document_id' => $documentId,
+                'aircraft_id' => $aircraftId,
+            ],
+            'aircraft' => $this->buildProviderAircraftResponse($aircraft, $state),
+            'state' => $state,
         ]);
-
-        if ($paths) {
-            Storage::disk('s3')->delete(array_values(array_unique($paths)));
-        }
-
-        $document->delete();
-
-        return $this->ok(['message' => 'Documento eliminado.']);
     }
 
     public function downloadDocument(Request $request, Aeronave $aircraft, DocumentoAeronave $document)
@@ -640,22 +716,35 @@ class AeronaveControlador extends ControladorBase
     {
         $this->authorizeProveedorAeronave($request, $availability->aircraft);
 
-        $availability->update($request->validate([
-            'start_datetime' => ['sometimes', 'date'],
-            'end_datetime' => ['sometimes', 'date', 'after:start_datetime'],
-            'status' => ['sometimes', 'in:available,occupied,blocked,maintenance'],
-            'notes' => ['nullable', 'string'],
-        ]));
+        DB::transaction(function () use ($availability, $request): void {
+            $availability->update($request->validate([
+                'start_datetime' => ['sometimes', 'date'],
+                'end_datetime' => ['sometimes', 'date', 'after:start_datetime'],
+                'status' => ['sometimes', 'in:available,occupied,blocked,maintenance'],
+                'notes' => ['nullable', 'string'],
+            ]));
+        });
+        $state = $this->aircraftStateService->evaluateAndSyncAircraftState($availability->aircraft);
 
-        return $this->ok(['availability' => $availability->fresh()]);
+        return $this->ok([
+            'availability' => $availability->fresh(),
+            'aircraft' => $this->buildProviderAircraftResponse($availability->aircraft, $state),
+            'state' => $state,
+        ]);
     }
 
     public function destroyAvailability(Request $request, DisponibilidadAeronave $availability)
     {
         $this->authorizeProveedorAeronave($request, $availability->aircraft);
+        $aircraft = $availability->aircraft;
         $availability->delete();
+        $state = $this->aircraftStateService->evaluateAndSyncAircraftState($aircraft);
 
-        return $this->ok(['message' => 'Disponibilidad eliminada.']);
+        return $this->ok([
+            'message' => 'Disponibilidad eliminada.',
+            'aircraft' => $this->buildProviderAircraftResponse($aircraft, $state),
+            'state' => $state,
+        ]);
     }
 
 
@@ -943,6 +1032,7 @@ class AeronaveControlador extends ControladorBase
         mixed $planOverride = null,
         ?int $providerAircraftCountOverride = null,
         ?array $billingSnapshot = null,
+        ?array $stateSnapshot = null,
     ): array
     {
         $providerUser = $aircraft->provider?->user;
@@ -957,6 +1047,7 @@ class AeronaveControlador extends ControladorBase
         $resolvedBillingSnapshot = $billingSnapshot ?? $this->providerAircraftSubscriptionService->buildAircraftBillingSnapshot(
             $aircraft->loadMissing(['provider', 'documents'])
         );
+        $resolvedStateSnapshot = $stateSnapshot ?? $this->aircraftStateService->evaluate($aircraft, $resolvedBillingSnapshot);
         $images = $aircraft->images
             ->sortBy([
                 ['is_main', 'desc'],
@@ -964,6 +1055,8 @@ class AeronaveControlador extends ControladorBase
                 ['id', 'asc'],
             ])
             ->values();
+
+        $documents = $this->deduplicateAircraftDocuments($aircraft->documents);
 
         return [
             ...$aircraft->attributesToArray(),
@@ -977,7 +1070,7 @@ class AeronaveControlador extends ControladorBase
                 'company_name' => $aircraft->provider->company_name,
                 'commercial_name' => $aircraft->provider->commercial_name,
             ] : null,
-            'documents' => $aircraft->documents
+            'documents' => $documents
                 ->map(fn (DocumentoAeronave $document) => $this->formatAircraftDocumentPayload($document))
                 ->values(),
             'main_image' => $images->firstWhere('is_main', true)?->image_url ?? $images->first()?->image_url,
@@ -999,8 +1092,8 @@ class AeronaveControlador extends ControladorBase
                 'within_plan_limit' => $plan->max_aircraft ? $providerAircraftCount <= $plan->max_aircraft : true,
             ] : null,
             'approved_at' => $aircraft->approved_at,
-            'approved' => $aircraft->isAdministrativelyApproved(),
-            'review_status' => $aircraft->resolvedReviewStatus(),
+            'approved' => $resolvedStateSnapshot['review']['approved'] ?? $aircraft->isAdministrativelyApproved(),
+            'review_status' => $resolvedStateSnapshot['review']['status'] ?? $aircraft->resolvedReviewStatus(),
             'billing_status' => $resolvedBillingSnapshot['billing_status'] ?? $aircraft->billing_status,
             'billing_plan_id' => $aircraft->billing_plan_id,
             'subscription_status' => $resolvedBillingSnapshot['subscription_status'] ?? $aircraft->subscription_status,
@@ -1017,7 +1110,36 @@ class AeronaveControlador extends ControladorBase
             'can_operate' => $resolvedBillingSnapshot['can_operate'] ?? false,
             'primary_action' => $resolvedBillingSnapshot['primary_action'] ?? 'activate',
             'billing_state' => $resolvedBillingSnapshot,
+            'documents_state' => $resolvedStateSnapshot['documents'] ?? [],
+            'review' => $resolvedStateSnapshot['review'] ?? [],
+            'operation' => $resolvedStateSnapshot['operation'] ?? [],
+            'pricing' => $resolvedStateSnapshot['pricing'] ?? [],
+            'matching' => $resolvedStateSnapshot['matching'] ?? [],
+            'activation' => $resolvedStateSnapshot['activation'] ?? [],
+            'aircraft_state' => $resolvedStateSnapshot,
+            'ready_to_quote' => $resolvedStateSnapshot['ready_to_quote'] ?? false,
+            'ready_to_book' => $resolvedStateSnapshot['ready_to_book'] ?? false,
         ];
+    }
+
+    private function buildProviderAircraftResponse(Aeronave $aircraft, ?array $stateSnapshot = null): array
+    {
+        $refreshedAircraft = $aircraft->fresh([
+            'provider.user.activeSuscripcion.plan',
+            'provider',
+            'images',
+            'availability',
+            'documents',
+        ]);
+        $billingSnapshot = $this->providerAircraftSubscriptionService->buildAircraftBillingSnapshot(
+            $refreshedAircraft->loadMissing(['provider', 'documents'])
+        );
+
+        return $this->formatAircraftPayload(
+            $refreshedAircraft,
+            billingSnapshot: $billingSnapshot,
+            stateSnapshot: $stateSnapshot,
+        );
     }
 
     private function authorizeProveedorAeronave(Request $request, Aeronave $aircraft): void
@@ -1343,12 +1465,37 @@ class AeronaveControlador extends ControladorBase
                 $file->getClientOriginalName(),
                 (string) $file->getSize(),
                 (string) $file->getMimeType(),
-                (string) $file->getRealPath(),
             ]);
             $unique[$key] = $file;
         }
 
         return array_values($unique);
+    }
+
+    private function deduplicateAircraftDocuments(iterable $documents)
+    {
+        return collect($documents)
+            ->filter(fn ($document) => $document instanceof DocumentoAeronave)
+            ->sortByDesc(fn (DocumentoAeronave $document) => (int) $document->id)
+            ->unique(function (DocumentoAeronave $document) {
+                $aircraftId = (int) ($document->aircraft_id ?: 0);
+                $type = trim((string) ($document->document_type ?: $document->type ?: ''));
+                $storagePath = trim((string) ($document->storage_path ?: ''));
+                $documentUrl = trim((string) ($document->document_url ?: $document->file_url ?: ''));
+                $documentName = trim((string) ($document->document_name ?: ''));
+
+                if ($storagePath !== '') {
+                    return sprintf('storage:%d:%s:%s', $aircraftId, $type, $storagePath);
+                }
+
+                if ($documentUrl !== '') {
+                    return sprintf('url:%d:%s:%s', $aircraftId, $type, $documentUrl);
+                }
+
+                return sprintf('logical:%d:%s:%s', $aircraftId, $type, $documentName);
+            })
+            ->sortBy('id')
+            ->values();
     }
 
     private function resolveStoredFileUrl(string $disk, string $path): string

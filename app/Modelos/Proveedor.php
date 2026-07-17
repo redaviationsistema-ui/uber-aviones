@@ -151,6 +151,11 @@ class Proveedor extends Model
         return self::normalizeStatusValue($this->status);
     }
 
+    public function isAdministrativelyApproved(): bool
+    {
+        return self::normalizeStatusValue($this->resolvedApprovalStatus()) === 'approved';
+    }
+
     public function isApprovedForOperations(): bool
     {
         $resolvedStatus = self::normalizeStatusValue($this->resolvedApprovalStatus());
@@ -160,10 +165,10 @@ class Proveedor extends Model
         }
 
         if ($this->access_enabled !== null) {
-            return $resolvedStatus === 'approved' && (bool) $this->access_enabled;
+            return $this->isAdministrativelyApproved() && (bool) $this->access_enabled;
         }
 
-        return $resolvedStatus === 'approved';
+        return $this->isAdministrativelyApproved();
     }
 
     public function scopeApprovedForOperations(Builder $query): Builder

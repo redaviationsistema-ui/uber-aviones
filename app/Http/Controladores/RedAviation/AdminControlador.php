@@ -16,12 +16,14 @@ use App\Modelos\Aeronave;
 use App\Modelos\Pago;
 use App\Modelos\Reserva;
 use App\Modelos\CatalogoDisponibilidadEstatus;
+use App\Modelos\DocumentoAeronave;
 use App\Modelos\SolicitudVuelo;
 use App\Modelos\SobrecargoDisponibilidad;
 use App\Modelos\Suscripcion;
 use App\Modelos\SuscripcionAeronave;
 use App\Modelos\Usuario;
 use App\Servicios\Aeronaves\AircraftAvailabilityService;
+use App\Servicios\Aeronaves\AircraftStateService;
 use App\Servicios\Administracion\AdminAuditServicio;
 use App\Servicios\Administracion\AdminCotizacionesServicio;
 use App\Servicios\Administracion\AdminDashboardServicio;
@@ -40,6 +42,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
@@ -67,6 +70,7 @@ class AdminControlador extends ControladorBase
         private readonly AdminCotizacionesServicio $adminCotizacionesServicio,
         private readonly AdminVuelosServicio $adminVuelosServicio,
         private readonly AdminDocumentosServicio $adminDocumentosServicio,
+        private readonly AircraftStateService $aircraftStateService,
     )
     {
     }
@@ -223,8 +227,27 @@ class AdminControlador extends ControladorBase
             'per_page' => ['nullable', 'integer', 'min:1', 'max:100'],
         ]);
 
+        $startedAt = microtime(true);
+        Log::info('admin.documents.start', [
+            'provider_id' => isset($filters['provider_id']) ? (int) $filters['provider_id'] : null,
+            'aircraft_id' => isset($filters['aircraft_id']) ? (int) $filters['aircraft_id'] : null,
+            'per_page' => isset($filters['per_page']) ? (int) $filters['per_page'] : null,
+            'page' => isset($filters['page']) ? (int) $filters['page'] : null,
+            'admin_user_id' => optional($request->user())->id,
+        ]);
+
+        $documents = $this->adminDocumentosServicio->list($filters);
+
+        Log::info('admin.documents.query_done', [
+            'provider_id' => isset($filters['provider_id']) ? (int) $filters['provider_id'] : null,
+            'aircraft_id' => isset($filters['aircraft_id']) ? (int) $filters['aircraft_id'] : null,
+            'rows' => $documents->count(),
+            'total' => $documents->total(),
+            'elapsed_ms' => round((microtime(true) - $startedAt) * 1000, 2),
+        ]);
+
         return $this->ok([
-            'documents' => $this->adminDocumentosServicio->list($filters),
+            'documents' => $documents,
         ]);
     }
 
@@ -2613,20 +2636,104 @@ class AdminControlador extends ControladorBase
         });
     }
 
-    public function aircraftFleet()
+    public function aircraftFleet(Request $request)
     {
-        $aircraft = Aeronave::with([
+        $filters = $request->validate([
+            'provider_id' => ['nullable', 'integer', 'exists:providers,id'],
+            'per_page' => ['nullable', 'integer', 'min:1', 'max:100'],
+        ]);
+
+        $providerId = (int) ($filters['provider_id'] ?? 0);
+        $perPage = max(1, min(100, (int) ($filters['per_page'] ?? 40)));
+        $startedAt = microtime(true);
+
+        Log::info('admin.aircraft_fleet.start', [
+            'provider_id' => $providerId ?: null,
+            'per_page' => $perPage,
+            'admin_user_id' => optional($request->user())->id,
+        ]);
+
+        $query = Aeronave::query()
+            ->select([
+                'id',
+                'provider_id',
+                'model',
+                'manufacturer',
+                'category',
+                'model_year',
+                'registration',
+                'capacity',
+                'base_airport',
+                'base_airport_id',
+                'range_km',
+                'speed_kmh',
+                'coverage',
+                'amenities',
+                'hourly_rate',
+                'airport_expenses_usd',
+                'minimum_hours',
+                'minimum_route_price',
+                'climb_descent_minutes',
+                'operational_cost',
+                'fuel_burn_gph',
+                'engine_reserve_rate',
+                'insurance_rate',
+                'maintenance_rate',
+                'crew_rate',
+                'repositioning_fee',
+                'overnight_fee',
+                'currency',
+                'status',
+                'approved_at',
+                'billing_status',
+                'billing_plan_id',
+                'subscription_status',
+                'subscription_started_at',
+                'subscription_ends_at',
+                'last_payment_at',
+                'security_filter',
+                'security_score',
+                'airworthiness_status',
+                'last_maintenance_at',
+                'engine_run_at',
+                'captain_training_at',
+                'lodging_location',
+                'client_fbo',
+                'dispatch_center',
+                'dispatch_notes',
+                'security_notes',
+                'created_at',
+                'updated_at',
+            ])
+            ->with([
             'provider:id,user_id,company_name,commercial_name',
             'provider.user:id,name',
             'provider.user.profile:id,user_id,company_name',
+            'baseAirport:id,icao,iata',
             'documents',
             'images',
             'suscripcionesAeronave' => fn ($q) => $q->where('status', 'active')->with('plan')->latest('id'),
-        ])->latest()->paginate(40);
+            ])
+            ->when($providerId > 0, fn ($builder) => $builder->where('provider_id', $providerId))
+            ->latest();
+
+        Log::info('admin.aircraft_fleet.query_ready', [
+            'provider_id' => $providerId ?: null,
+        ]);
+
+        $aircraft = $query->paginate($perPage);
+
+        Log::info('admin.aircraft_fleet.query_done', [
+            'provider_id' => $providerId ?: null,
+            'rows' => $aircraft->count(),
+            'total' => $aircraft->total(),
+            'elapsed_ms' => round((microtime(true) - $startedAt) * 1000, 2),
+        ]);
 
         $aircraft->setCollection(
             $aircraft->getCollection()->map(function (Aeronave $item) {
                 $provider = $item->provider;
+                $state = $this->aircraftStateService->evaluate($item);
                 $providerDisplayName =
                     $provider?->commercial_name ?:
                     $provider?->user?->profile?->company_name ?:
@@ -2635,7 +2742,9 @@ class AdminControlador extends ControladorBase
 
                 return [
                     ...$item->attributesToArray(),
-                    'documents' => $item->documents->map(fn ($document) => $document->attributesToArray())->values(),
+                    'documents' => $this->deduplicateAircraftDocuments($item->documents)
+                        ->map(fn ($document) => $document->attributesToArray())
+                        ->values(),
                     'images' => $item->images->map(fn ($image) => $image->attributesToArray())->values(),
                     'suscripcionesAeronave' => $item->suscripcionesAeronave
                         ->map(function ($subscription) {
@@ -2654,19 +2763,61 @@ class AdminControlador extends ControladorBase
                         'commercial_name' => $provider->commercial_name,
                         'display_name' => $providerDisplayName,
                     ] : null,
+                    'aircraft_state' => $state,
+                    'ready_to_quote' => $state['ready_to_quote'] ?? false,
+                    'ready_to_book' => $state['ready_to_book'] ?? false,
                 ];
             })
         );
+
+        Log::info('admin.aircraft_fleet.response_ready', [
+            'provider_id' => $providerId ?: null,
+            'rows' => $aircraft->count(),
+            'elapsed_ms' => round((microtime(true) - $startedAt) * 1000, 2),
+        ]);
 
         return $this->ok([
             'aircraft' => $aircraft,
         ]);
     }
 
-    public function aircraftSubscriptionsPerFleet()
+    public function aircraftSubscriptionsPerFleet(Request $request)
     {
+        $filters = $request->validate([
+            'provider_id' => ['nullable', 'integer', 'exists:providers,id'],
+            'per_page' => ['nullable', 'integer', 'min:1', 'max:100'],
+        ]);
+
+        $providerId = (int) ($filters['provider_id'] ?? 0);
+        $perPage = max(1, min(100, (int) ($filters['per_page'] ?? 40)));
+        $startedAt = microtime(true);
+
+        Log::info('admin.aircraft_subscriptions.start', [
+            'provider_id' => $providerId ?: null,
+            'per_page' => $perPage,
+            'admin_user_id' => optional($request->user())->id,
+        ]);
+
+        $query = SuscripcionAeronave::query()
+            ->with(['aircraft.provider', 'plan', 'user'])
+            ->when($providerId > 0, fn ($builder) => $builder->whereHas('aircraft', fn ($aircraftQuery) => $aircraftQuery->where('provider_id', $providerId)))
+            ->latest();
+
+        Log::info('admin.aircraft_subscriptions.query_ready', [
+            'provider_id' => $providerId ?: null,
+        ]);
+
+        $subscriptions = $query->paginate($perPage);
+
+        Log::info('admin.aircraft_subscriptions.query_done', [
+            'provider_id' => $providerId ?: null,
+            'rows' => $subscriptions->count(),
+            'total' => $subscriptions->total(),
+            'elapsed_ms' => round((microtime(true) - $startedAt) * 1000, 2),
+        ]);
+
         return $this->ok([
-            'aircraft_subscriptions' => SuscripcionAeronave::with(['aircraft.provider', 'plan', 'user'])->latest()->paginate(40),
+            'aircraft_subscriptions' => $subscriptions,
         ]);
     }
 
@@ -3437,6 +3588,32 @@ class AdminControlador extends ControladorBase
             'released', 'cancelled', 'manual_block', 'reserved' => '#9ca3af',
             default => '#9ca3af',
         };
+    }
+
+    private function deduplicateAircraftDocuments(iterable $documents)
+    {
+        return collect($documents)
+            ->filter(fn ($document) => $document instanceof DocumentoAeronave)
+            ->sortByDesc(fn (DocumentoAeronave $document) => (int) $document->id)
+            ->unique(function (DocumentoAeronave $document) {
+                $aircraftId = (int) ($document->aircraft_id ?: 0);
+                $type = trim((string) ($document->document_type ?: $document->type ?: ''));
+                $storagePath = trim((string) ($document->storage_path ?: ''));
+                $documentUrl = trim((string) ($document->document_url ?: $document->file_url ?: ''));
+                $documentName = trim((string) ($document->document_name ?: ''));
+
+                if ($storagePath !== '') {
+                    return sprintf('storage:%d:%s:%s', $aircraftId, $type, $storagePath);
+                }
+
+                if ($documentUrl !== '') {
+                    return sprintf('url:%d:%s:%s', $aircraftId, $type, $documentUrl);
+                }
+
+                return sprintf('logical:%d:%s:%s', $aircraftId, $type, $documentName);
+            })
+            ->sortBy('id')
+            ->values();
     }
 
     private function resolveAircraftDisplayName(?Aeronave $aircraft): string

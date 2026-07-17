@@ -35,6 +35,10 @@ class Aeronave extends Model
 {
     protected $table = 'aircraft';
 
+    private bool $baseAirportResolved = false;
+
+    private ?string $resolvedBaseAirportCodeCache = null;
+
     use HasFactory;
 
     protected static function newFactory()
@@ -160,17 +164,25 @@ class Aeronave extends Model
 
     public function resolvedBaseAirportCode(): ?string
     {
+        if ($this->baseAirportResolved) {
+            return $this->resolvedBaseAirportCodeCache;
+        }
+
+        $this->baseAirportResolved = true;
+
+        $directCode = strtoupper(trim((string) ($this->base_airport ?? '')));
+
+        if ($directCode !== '') {
+            return $this->resolvedBaseAirportCodeCache = $directCode;
+        }
+
         if ($this->relationLoaded('baseAirport')) {
-            return $this->baseAirport?->icao ?: $this->baseAirport?->iata ?: $this->base_airport;
+            $relationCode = strtoupper(trim((string) ($this->baseAirport?->icao ?: $this->baseAirport?->iata ?: '')));
+
+            return $this->resolvedBaseAirportCodeCache = ($relationCode !== '' ? $relationCode : null);
         }
 
-        if ($this->base_airport_id) {
-            $airport = $this->baseAirport()->first(['icao', 'iata']);
-
-            return $airport?->icao ?: $airport?->iata ?: $this->base_airport;
-        }
-
-        return $this->base_airport;
+        return $this->resolvedBaseAirportCodeCache = null;
     }
 
     public function isAdministrativelyApproved(): bool

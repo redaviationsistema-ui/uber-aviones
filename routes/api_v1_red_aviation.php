@@ -68,6 +68,7 @@ Route::middleware(['auth.token'])->group(function () {
         Route::post('/aircraft', [OperadorControlador::class, 'storeAircraft']);
         Route::post('/aircraft/{aircraft}/documents', [AeronaveControlador::class, 'storeDocument']);
         Route::get('/aircraft/{aircraft}/documents/{document}/download', [AeronaveControlador::class, 'downloadDocument']);
+        Route::delete('/aircraft/{aircraft}/documents/{document}', [AeronaveControlador::class, 'destroyDocument']);
     });
 
     Route::prefix('operator')->middleware(['role:provider,admin', 'operator.verified'])->group(function () {

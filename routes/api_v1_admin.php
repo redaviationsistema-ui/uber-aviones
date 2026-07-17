@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controladores\AdministradorControlador;
+use App\Http\Controladores\AdminAircraftChecklistController;
 use App\Http\Controladores\AeronaveControlador;
 use App\Http\Controladores\RedAviation\AdminControlador as RedAviationAdminControlador;
 use App\Http\Controladores\RedAviation\FlightMembershipAdminControlador;
@@ -61,6 +62,8 @@ Route::prefix('admin')->middleware(['auth.token', 'role:admin'])->group(function
     Route::put('/crew/{user}', [RedAviationAdminControlador::class, 'updateSobrecargo']);
 
     Route::get('/aeronaves', [AdministradorControlador::class, 'aircraft']);
+    Route::get('/aeronaves/{aircraft}/checklist', [AdminAircraftChecklistController::class, 'show']);
+    Route::put('/aeronaves/{aircraft}/checklist', [AdminAircraftChecklistController::class, 'update']);
     Route::get('/aircraft-calendar', [RedAviationAdminControlador::class, 'aircraftCalendar']);
     Route::get('/operations/dashboard', [RedAviationAdminControlador::class, 'operationsDashboard']);
     Route::get('/operations/history', [RedAviationAdminControlador::class, 'operationsHistory']);
@@ -74,6 +77,7 @@ Route::prefix('admin')->middleware(['auth.token', 'role:admin'])->group(function
     Route::get('/aeronaves/documentos/{document}/descargar', [AeronaveControlador::class, 'downloadAdminDocument']);
     Route::post('/aeronaves/{aircraft}/bloquear', [AdministradorControlador::class, 'blockAeronave']);
     Route::post('/aeronaves/{aircraft}/activar', [AdministradorControlador::class, 'activateAeronave']);
+    Route::post('/aeronaves/{aircraft}/desactivar', [AdministradorControlador::class, 'deactivateAeronave']);
 
     Route::get('/solicitudes', [AdministradorControlador::class, 'flightRequests']);
     Route::get('/cotizaciones', [RedAviationAdminControlador::class, 'quotes']);
