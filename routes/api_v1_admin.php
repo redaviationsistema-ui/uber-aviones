@@ -76,6 +76,7 @@ Route::prefix('admin')->middleware(['auth.token', 'role:admin'])->group(function
     Route::get('/aircraft-documents/{document}/download', [AeronaveControlador::class, 'downloadAdminDocument']);
     Route::get('/aeronaves/documentos/{document}/descargar', [AeronaveControlador::class, 'downloadAdminDocument']);
     Route::post('/aeronaves/{aircraft}/bloquear', [AdministradorControlador::class, 'blockAeronave']);
+    Route::post('/aeronaves/{aircraft}/aprobar', [AdministradorControlador::class, 'approveAeronave']);
     Route::post('/aeronaves/{aircraft}/activar', [AdministradorControlador::class, 'activateAeronave']);
     Route::post('/aeronaves/{aircraft}/desactivar', [AdministradorControlador::class, 'deactivateAeronave']);
 

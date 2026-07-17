@@ -674,10 +674,20 @@ class AdministradorControlador extends ControladorBase
 
     public function blockAeronave(Aeronave $aircraft)
     {
-        $aircraft->update([
+        $payload = [
             'status' => 'blocked',
-            'approved_at' => null,
-        ]);
+        ];
+        if (array_key_exists('is_active', $aircraft->getAttributes())) {
+            $payload['is_active'] = false;
+        }
+        if (array_key_exists('operational_status', $aircraft->getAttributes())) {
+            $payload['operational_status'] = 'inactive';
+        }
+        if (array_key_exists('validation_status', $aircraft->getAttributes())) {
+            $payload['validation_status'] = 'rejected';
+        }
+
+        $aircraft->update($payload);
         $state = $this->aircraftStateService->evaluateAndSyncAircraftState($aircraft);
 
         return $this->ok([
@@ -704,10 +714,24 @@ class AdministradorControlador extends ControladorBase
 
         return DB::transaction(function () use ($aircraft, $state) {
             $lockedAircraft = Aeronave::query()->lockForUpdate()->findOrFail($aircraft->id);
-            $lockedAircraft->forceFill([
+            $payload = [
                 'status' => 'active',
                 'approved_at' => $lockedAircraft->approved_at ?: now(),
-            ])->save();
+            ];
+            if (array_key_exists('is_active', $lockedAircraft->getAttributes())) {
+                $payload['is_active'] = true;
+            }
+            if (array_key_exists('operational_status', $lockedAircraft->getAttributes())) {
+                $payload['operational_status'] = 'active';
+            }
+            if (array_key_exists('validation_status', $lockedAircraft->getAttributes())) {
+                $payload['validation_status'] = 'approved';
+            }
+            if (array_key_exists('activated_at', $lockedAircraft->getAttributes())) {
+                $payload['activated_at'] = now();
+            }
+
+            $lockedAircraft->forceFill($payload)->save();
 
             $refreshedState = $this->aircraftStateService->evaluateAndSyncAircraftState($lockedAircraft);
             $refreshedAircraft = $lockedAircraft->fresh(['provider.user.profile', 'images', 'documents', 'availability']);
@@ -724,15 +748,69 @@ class AdministradorControlador extends ControladorBase
     {
         return DB::transaction(function () use ($aircraft) {
             $lockedAircraft = Aeronave::query()->lockForUpdate()->findOrFail($aircraft->id);
-            $lockedAircraft->forceFill([
+            $payload = [
                 'status' => 'inactive',
-            ])->save();
+            ];
+            if (array_key_exists('is_active', $lockedAircraft->getAttributes())) {
+                $payload['is_active'] = false;
+            }
+            if (array_key_exists('operational_status', $lockedAircraft->getAttributes())) {
+                $payload['operational_status'] = 'inactive';
+            }
+            if (array_key_exists('validation_status', $lockedAircraft->getAttributes()) && $lockedAircraft->approved_at) {
+                $payload['validation_status'] = 'approved';
+            }
+
+            $lockedAircraft->forceFill($payload)->save();
 
             $state = $this->aircraftStateService->evaluate($lockedAircraft->fresh(['provider.user.profile', 'images', 'documents', 'availability']));
             $refreshedAircraft = $lockedAircraft->fresh(['provider.user.profile', 'images', 'documents', 'availability']);
 
             return $this->ok([
                 'message' => 'Aeronave desactivada correctamente.',
+                'aircraft' => $this->serializeAdminAircraftPayload($refreshedAircraft, $state),
+                'state' => $state,
+            ]);
+        });
+    }
+
+    public function approveAeronave(Aeronave $aircraft)
+    {
+        $aircraft->loadMissing(['provider', 'documents', 'images', 'availability']);
+
+        abort_if(! $aircraft->provider?->isAdministrativelyApproved(), 422, 'El proveedor debe estar aprobado antes de aprobar la aeronave.');
+
+        return DB::transaction(function () use ($aircraft) {
+            $lockedAircraft = Aeronave::query()
+                ->with(['provider', 'documents', 'images', 'availability'])
+                ->lockForUpdate()
+                ->findOrFail($aircraft->id);
+
+            abort_if(! $lockedAircraft->provider?->isAdministrativelyApproved(), 422, 'El proveedor debe estar aprobado antes de aprobar la aeronave.');
+
+            $payload = [
+                'approved_at' => $lockedAircraft->approved_at ?: now(),
+            ];
+            if (array_key_exists('validation_status', $lockedAircraft->getAttributes())) {
+                $payload['validation_status'] = 'approved';
+            }
+            if (array_key_exists('is_active', $lockedAircraft->getAttributes())) {
+                $payload['is_active'] = false;
+            }
+            if (array_key_exists('operational_status', $lockedAircraft->getAttributes())) {
+                $payload['operational_status'] = 'inactive';
+            }
+            if (array_key_exists('status', $lockedAircraft->getAttributes()) && $lockedAircraft->status !== 'blocked') {
+                $payload['status'] = 'inactive';
+            }
+
+            $lockedAircraft->forceFill($payload)->save();
+
+            $refreshedAircraft = $lockedAircraft->fresh(['provider.user.profile', 'images', 'documents', 'availability']);
+            $state = $this->aircraftStateService->evaluate($refreshedAircraft);
+
+            return $this->ok([
+                'message' => 'Aeronave aprobada correctamente.',
                 'aircraft' => $this->serializeAdminAircraftPayload($refreshedAircraft, $state),
                 'state' => $state,
             ]);
@@ -1439,17 +1517,17 @@ class AdministradorControlador extends ControladorBase
         return [
             ...$aircraft->attributesToArray(),
             'approved_at' => $aircraft->approved_at,
-            'approved' => $state['review']['approved'] ?? $aircraft->isAdministrativelyApproved(),
-            'review_status' => $state['review']['status'] ?? $aircraft->resolvedReviewStatus(),
+            'approved' => $aircraft->isAdministrativelyApproved(),
+            'review_status' => $aircraft->resolvedReviewStatus(),
             'approval' => [
-                'status' => $state['review']['status'] ?? $aircraft->resolvedReviewStatus(),
-                'label' => ($state['review']['approved'] ?? false) ? 'Aprobada' : 'Pendiente',
-                'is_approved' => (bool) ($state['review']['approved'] ?? $aircraft->isAdministrativelyApproved()),
+                'status' => $aircraft->resolvedApprovalStatus(),
+                'label' => $aircraft->isAdministrativelyApproved() ? 'Aprobada' : 'Pendiente',
+                'is_approved' => (bool) $aircraft->isAdministrativelyApproved(),
             ],
             'operational' => [
-                'status' => ($state['activation']['commercial_status'] ?? null) === 'active' ? 'active' : 'inactive',
-                'label' => ($state['activation']['is_active'] ?? false) ? 'Activa' : 'Inactiva',
-                'is_active' => (bool) ($state['activation']['is_active'] ?? false),
+                'status' => $aircraft->resolvedOperationalStatus(),
+                'label' => $aircraft->isOperationallyActive() ? 'Activa' : 'Inactiva',
+                'is_active' => (bool) $aircraft->isOperationallyActive(),
             ],
             'provider' => $this->serializeProviderInlineSummary($aircraft->provider),
             'documents' => $documents,
@@ -1479,12 +1557,13 @@ class AdministradorControlador extends ControladorBase
             ->map(fn ($entry) => [
                 'code' => (string) $entry,
                 'label' => match ((string) $entry) {
-                    'provider' => 'Proveedor no aprobado',
-                    'documents' => 'Documentacion obligatoria aprobada',
-                    'range' => 'Rango configurado',
-                    'capacity' => 'Capacidad configurada',
-                    'base' => 'Base operativa registrada',
-                    'pricing' => 'Informacion comercial incompleta',
+                    'provider_not_approved' => 'Proveedor pendiente de aprobación',
+                    'aircraft_not_approved' => 'Aeronave pendiente de aprobación',
+                    'documents_pending' => 'Documentación obligatoria pendiente',
+                    'range_missing' => 'Falta completar el rango de la aeronave',
+                    'capacity_missing' => 'Falta completar la capacidad de la aeronave',
+                    'base_missing' => 'Falta registrar la base operativa',
+                    'commercial_information_incomplete' => 'Información comercial incompleta',
                     'payment_pending' => 'Pago pendiente',
                     default => Str::headline(str_replace('_', ' ', (string) $entry)),
                 },

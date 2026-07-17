@@ -2706,7 +2706,7 @@ class AdminControlador extends ControladorBase
                 'updated_at',
             ])
             ->with([
-            'provider:id,user_id,company_name,commercial_name',
+            'provider:id,user_id,company_name,commercial_name,approval_status,admin_validation_status,status,access_enabled',
             'provider.user:id,name',
             'provider.user.profile:id,user_id,company_name',
             'baseAirport:id,icao,iata',
@@ -2762,6 +2762,11 @@ class AdminControlador extends ControladorBase
                         'company_name' => $provider->company_name,
                         'commercial_name' => $provider->commercial_name,
                         'display_name' => $providerDisplayName,
+                        'status' => $provider->resolvedApprovalStatus(),
+                        'approval_status' => $provider->approval_status,
+                        'admin_validation_status' => $provider->admin_validation_status,
+                        'is_approved' => $provider->isAdministrativelyApproved(),
+                        'access_enabled' => $provider->access_enabled,
                     ] : null,
                     'aircraft_state' => $state,
                     'ready_to_quote' => $state['ready_to_quote'] ?? false,
