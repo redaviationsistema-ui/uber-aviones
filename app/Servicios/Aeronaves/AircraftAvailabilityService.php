@@ -8,6 +8,7 @@ use App\Modelos\Cotizacion;
 use App\Modelos\Reserva;
 use App\Modelos\SolicitudVuelo;
 use Carbon\Carbon;
+use DateTimeInterface;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
@@ -16,6 +17,11 @@ use Throwable;
 
 class AircraftAvailabilityService
 {
+    public function __construct(
+        private readonly AircraftHoldDateResolver $aircraftHoldDateResolver,
+    ) {
+    }
+
     private const RESERVABLE_AIRCRAFT_STATUSES = [
         'active',
         'trial_active',
@@ -329,7 +335,8 @@ class AircraftAvailabilityService
         Cotizacion $quote,
         int $userId,
         ?Reserva $reservation = null,
-        int $minutesToHold = 15,
+        ?int $minutesToHold = null,
+        array $requestData = [],
     ): AircraftAvailabilityBlock {
         $quote->loadMissing(['flightRequest.legs', 'aircraft.provider']);
         $flightRequest = $quote->flightRequest;
@@ -350,7 +357,7 @@ class AircraftAvailabilityService
             throw new RuntimeException('La cotizacion no tiene aeronave asignada.');
         }
 
-        return DB::transaction(function () use ($quote, $flightRequest, $userId, $reservation, $minutesToHold) {
+        return DB::transaction(function () use ($quote, $flightRequest, $userId, $reservation, $minutesToHold, $requestData) {
             $aircraft = Aeronave::query()->lockForUpdate()->findOrFail($quote->aircraft_id);
             $this->expireStaleHoldsForAircraft((int) $aircraft->id);
 
@@ -358,7 +365,7 @@ class AircraftAvailabilityService
                 throw new RuntimeException('La aeronave ya no esta activa para reservarse.');
             }
 
-            [$start, $end] = $this->resolveQuoteWindow($quote);
+            [$start, $end] = $this->resolveQuoteWindow($quote, $requestData);
 
             $existing = AircraftAvailabilityBlock::query()
                 ->where('aircraft_id', $aircraft->id)
@@ -382,7 +389,9 @@ class AircraftAvailabilityService
                 ]);
             }
 
-            $minutesToHold = $this->normalizeHoldDuration($minutesToHold);
+            $minutesToHold = $this->normalizeHoldDuration(
+                $minutesToHold ?? (int) config('booking.aircraft_hold_minutes', 15),
+            );
 
             $this->ensureAircraftAvailable(
                 aircraftId: (int) $aircraft->id,
@@ -488,19 +497,14 @@ class AircraftAvailabilityService
         return $count;
     }
 
-    public function resolveQuoteWindow(Cotizacion $quote): array
+    public function resolveQuoteWindow(Cotizacion $quote, array $requestData = []): array
     {
-        $quote->loadMissing(['flightRequest.legs']);
+        $payload = $this->aircraftHoldDateResolver->buildPayload($requestData, $quote);
+        $resolvedStart = $this->aircraftHoldDateResolver->resolve($requestData, $quote);
 
-        $payload = [
-            'departure_datetime' => $quote->flightRequest?->departure_datetime,
-            'return_datetime' => $quote->flightRequest?->return_datetime,
-            'legs' => collect($quote->flightRequest?->legs ?? [])
-                ->map(fn ($leg) => [
-                    'departure_datetime' => $leg->departure_datetime,
-                    'arrival_datetime' => $leg->arrival_datetime,
-                ])->values()->all(),
-        ];
+        if ($resolvedStart && empty($payload['departure_datetime'])) {
+            $payload['departure_datetime'] = $resolvedStart->format('Y-m-d H:i:s');
+        }
 
         return $this->resolveWindowFromPayload($payload);
     }
@@ -542,7 +546,13 @@ class AircraftAvailabilityService
         $legs = is_array($payload['legs'] ?? null) ? $payload['legs'] : [];
 
         foreach ($legs as $leg) {
-            $departure = $this->toCarbon($leg['departure_datetime'] ?? (($leg['date'] ?? null) ? (($leg['date'] ?? '').' '.($leg['time'] ?? '09:00')) : null));
+            $departure = $this->toCarbon(
+                $leg['start_datetime']
+                    ?? $leg['departure_datetime']
+                    ?? (($leg['start_date'] ?? null) ? (($leg['start_date'] ?? '').' '.($leg['start_time'] ?? '09:00')) : null)
+                    ?? (($leg['departure_date'] ?? null) ? (($leg['departure_date'] ?? '').' '.($leg['departure_time'] ?? '09:00')) : null)
+                    ?? (($leg['date'] ?? null) ? (($leg['date'] ?? '').' '.($leg['time'] ?? '09:00')) : null)
+            );
             $arrival = $this->toCarbon($leg['arrival_datetime'] ?? null);
 
             if ($departure) {
@@ -555,7 +565,12 @@ class AircraftAvailabilityService
             }
         }
 
-        $topLevelDeparture = $this->toCarbon($payload['departure_datetime'] ?? null);
+        $topLevelDeparture = $this->toCarbon(
+            $payload['start_datetime']
+                ?? $payload['departure_datetime']
+                ?? (($payload['start_date'] ?? null) ? (($payload['start_date'] ?? '').' '.($payload['start_time'] ?? '09:00')) : null)
+                ?? (($payload['departure_date'] ?? null) ? (($payload['departure_date'] ?? '').' '.($payload['departure_time'] ?? '09:00')) : null)
+        );
         $topLevelReturn = $this->toCarbon($payload['return_datetime'] ?? null);
 
         if ($topLevelDeparture) {
@@ -602,6 +617,35 @@ class AircraftAvailabilityService
         return $this->resolveWindowFromPayload($payload);
     }
 
+    public function resolveFlightRequestWindow(SolicitudVuelo $flightRequest): array
+    {
+        $flightRequest->loadMissing('legs');
+
+        $payload = [
+            'departure_datetime' => $flightRequest->departure_datetime,
+            'return_datetime' => $flightRequest->return_datetime,
+            'departure_date' => optional($flightRequest->departure_datetime)->toDateString()
+                ?? $this->normalizeDatePart($flightRequest->departure_date),
+            'departure_time' => optional($flightRequest->departure_datetime)->format('H:i')
+                ?? $flightRequest->departure_time,
+            'return_date' => optional($flightRequest->return_datetime)->toDateString()
+                ?? $this->normalizeDatePart($flightRequest->return_date),
+            'return_time' => optional($flightRequest->return_datetime)->format('H:i')
+                ?? $flightRequest->return_time,
+            'legs' => collect($flightRequest->legs)
+                ->map(fn ($leg) => [
+                    'departure_datetime' => $leg->departure_datetime,
+                    'arrival_datetime' => $leg->arrival_datetime,
+                    'departure_date' => optional($leg->departure_datetime)->toDateString(),
+                    'departure_time' => optional($leg->departure_datetime)->format('H:i'),
+                ])
+                ->values()
+                ->all(),
+        ];
+
+        return $this->resolveWindowFromPayload($payload);
+    }
+
     private function normalizeWindow($requestedStart, $requestedEnd): array
     {
         $start = $this->toCarbon($requestedStart);
@@ -636,5 +680,16 @@ class AircraftAvailabilityService
         } catch (Throwable) {
             return null;
         }
+    }
+
+    private function normalizeDatePart(mixed $value): ?string
+    {
+        if ($value instanceof DateTimeInterface) {
+            return Carbon::instance($value)->toDateString();
+        }
+
+        $normalizedValue = trim((string) ($value ?? ''));
+
+        return $normalizedValue !== '' ? $normalizedValue : null;
     }
 }

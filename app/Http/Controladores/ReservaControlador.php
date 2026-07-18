@@ -273,16 +273,7 @@ class ReservaControlador extends ControladorBase
             return;
         }
 
-        [$requestedStart, $requestedEnd] = $this->aircraftAvailabilityService->resolveWindowFromPayload([
-            'departure_datetime' => $flightRequest->departure_datetime,
-            'return_datetime' => $flightRequest->return_datetime,
-            'legs' => $flightRequest->legs()->get(['departure_datetime', 'arrival_datetime'])->map(
-                fn ($leg) => [
-                    'departure_datetime' => $leg->departure_datetime,
-                    'arrival_datetime' => $leg->arrival_datetime,
-                ]
-            )->values()->all(),
-        ]);
+        [$requestedStart, $requestedEnd] = $this->aircraftAvailabilityService->resolveFlightRequestWindow($flightRequest);
 
         if (! $this->aircraftAvailabilityService->aircraftHasConflict($aircraftId, $requestedStart, $requestedEnd)) {
             return;

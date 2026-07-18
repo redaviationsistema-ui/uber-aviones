@@ -4,10 +4,11 @@ namespace App\Http\Controladores\RedAviation;
 
 use App\Events\NewFlightRequestCreated;
 use App\Http\Controladores\ControladorBase;
+use App\Jobs\DispatchProviderFlightRequestNotificationsJob;
 use App\Modelos\Aeronave;
 use App\Modelos\Aeropuerto;
+use App\Modelos\Cotizacion;
 use App\Modelos\ImagenAeronave;
-use App\Modelos\Notificacion;
 use App\Modelos\Operacion;
 use App\Modelos\ReglaGastoAeropuerto;
 use App\Modelos\ReglaPrecioCategoria;
@@ -18,6 +19,7 @@ use App\Servicios\Aeronaves\AircraftAvailabilityService;
 use App\Servicios\Billing\BillingPlanServicio;
 use App\Servicios\Pagos\PaymentFeeCalculationServicio;
 use App\Servicios\RedAviation\MatchingRedAviationServicio;
+use App\Servicios\RedAviation\ProviderFlightRequestNotificationService;
 use App\Servicios\RedAviation\VisibilidadServicio;
 use Carbon\Carbon;
 use Illuminate\Database\QueryException;
@@ -25,6 +27,7 @@ use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Str;
 
 class ClienteControlador extends ControladorBase
 {
@@ -69,6 +72,7 @@ class ClienteControlador extends ControladorBase
     private ?array $activeAirportSearchColumns = null;
 
     private ?\Illuminate\Support\Collection $airportExpenseRulesCache = null;
+    private ?bool $flightRequestIdempotencyColumnExists = null;
 
 
     private const CATEGORY_MACH_BANDS = [
@@ -121,6 +125,7 @@ class ClienteControlador extends ControladorBase
         private readonly MatchingRedAviationServicio $matchingServicio,
         private readonly VisibilidadServicio $visibilidadServicio,
         private readonly PaymentFeeCalculationServicio $paymentFeeCalculationServicio,
+        private readonly ProviderFlightRequestNotificationService $providerFlightRequestNotificationService,
     ) {
     }
 
@@ -573,6 +578,7 @@ class ClienteControlador extends ControladorBase
             'match_id' => ['nullable'],
             'matched_option_id' => ['nullable'],
             'currency' => ['nullable', 'string', 'max:10'],
+            'idempotency_key' => ['nullable', 'string', 'max:100'],
             'base_price' => ['nullable', 'numeric'],
             'operational_fee' => ['nullable', 'numeric'],
             'priority_price' => ['nullable', 'numeric'],
@@ -594,105 +600,202 @@ class ClienteControlador extends ControladorBase
         $data['trip_type'] = $this->normalizeTripType($data['trip_type'] ?? null);
         $ignoredClientPricing = $this->extractIgnoredClientPricingFields($data);
         $data = $this->stripClientPricingFields($data);
+        $idempotencyKey = $this->resolveFlightRequestIdempotencyKey($request, $data);
 
-        [$user, $solicitud, $chat] = DB::transaction(function () use ($request, $user, $commercialGate, $data, $ignoredClientPricing) {
-            $freshUser = $user->fresh(['activeSuscripcion', 'demo']);
+        if ($idempotencyKey && $this->flightRequestSupportsIdempotency()) {
+            $existingRequest = $this->findExistingFlightRequestByIdempotency($user->id, $idempotencyKey);
 
-            $solicitud = SolicitudVuelo::create($data + [
-                'client_id' => $freshUser->id,
-                'status' => 'pending',
-                'workflow_status' => 'en_validacion',
-                'currency' => $data['currency'] ?? 'USD',
-                'final_price' => null,
-                'pricing_context' => null,
-                'package_snapshot' => [
-                    'plan_id' => $freshUser->activeSuscripcion?->plan_id,
-                    'demo' => $freshUser->demo?->status === 'active',
-                    'commercial_access' => [
-                        'status' => $freshUser->access_status ?: 'trial_active',
-                        'free_quotes_used' => (int) ($freshUser->free_quotes_used ?? 0),
-                        'free_quote_limit' => (int) ($freshUser->free_quote_limit ?? 1),
-                        'has_paid_access' => (bool) $freshUser->has_paid_access,
+            if ($existingRequest) {
+                return $this->buildStoredFlightRequestResponse(
+                    $existingRequest,
+                    $user,
+                    alreadyExists: true,
+                    message: 'La solicitud ya había sido registrada.',
+                    status: 200,
+                );
+            }
+        }
+
+        try {
+            [$user, $solicitud, $chat, $acceptedQuote] = DB::transaction(function () use ($request, $user, $commercialGate, $data, $ignoredClientPricing, $idempotencyKey) {
+                $freshUser = $user->fresh(['activeSuscripcion', 'demo']);
+
+                $solicitud = SolicitudVuelo::create([
+                    ...$data,
+                    'client_id' => $freshUser->id,
+                    'idempotency_key' => $this->flightRequestSupportsIdempotency() ? $idempotencyKey : null,
+                    'status' => 'pending',
+                    'workflow_status' => 'en_validacion',
+                    'currency' => $data['currency'] ?? 'USD',
+                    'final_price' => null,
+                    'pricing_context' => null,
+                    'package_snapshot' => [
+                        'plan_id' => $freshUser->activeSuscripcion?->plan_id,
+                        'demo' => $freshUser->demo?->status === 'active',
+                        'commercial_access' => [
+                            'status' => $freshUser->access_status ?: 'trial_active',
+                            'free_quotes_used' => (int) ($freshUser->free_quotes_used ?? 0),
+                            'free_quote_limit' => (int) ($freshUser->free_quote_limit ?? 1),
+                            'has_paid_access' => (bool) $freshUser->has_paid_access,
+                        ],
                     ],
-                ],
-                'visibility_payload' => array_filter([
-                    'client_pricing_ignored' => ! empty($ignoredClientPricing) ? $ignoredClientPricing : null,
-                ], fn ($value) => $value !== null),
-            ]);
+                    'visibility_payload' => array_filter([
+                        'client_pricing_ignored' => ! empty($ignoredClientPricing) ? $ignoredClientPricing : null,
+                    ], fn ($value) => $value !== null),
+                ]);
 
-            $this->storeFlightRequestLegs($solicitud, $data);
+                $this->storeFlightRequestLegs($solicitud, $data);
 
-            $hasExplicitSelection = ! empty($data['provider_id'])
-                || ! empty($data['aircraft_id'])
-                || ! empty($data['match_id'])
-                || ! empty($data['matched_option_id']);
+                $hasExplicitSelection = ! empty($data['provider_id'])
+                    || ! empty($data['aircraft_id'])
+                    || ! empty($data['match_id'])
+                    || ! empty($data['matched_option_id']);
 
-            if ($hasExplicitSelection) {
-                $this->assignSelectedMatchToFlightRequest($solicitud, $data);
-            } else {
-                $this->matchingServicio->ejecutar($solicitud);
-                $this->assignSelectedMatchToFlightRequest($solicitud, $data);
+                if ($hasExplicitSelection) {
+                    $this->assignSelectedMatchToFlightRequest($solicitud, $data);
+                } else {
+                    $this->matchingServicio->ejecutar($solicitud);
+                    $this->assignSelectedMatchToFlightRequest($solicitud, $data);
+                }
+
+                $acceptedQuote = $this->ensureAcceptedQuoteForFlightRequest($solicitud->fresh(['assignedAircraft', 'matches.aircraft']));
+
+                $chat = $solicitud->chatsProtegidos()->create([
+                    'client_id' => $freshUser->id,
+                    'status' => 'activo',
+                ]);
+
+                return [$freshUser, $solicitud, $chat, $acceptedQuote];
+            });
+        } catch (QueryException $exception) {
+            if ($idempotencyKey && $this->flightRequestSupportsIdempotency() && $this->isFlightRequestIdempotencyUniqueViolation($exception)) {
+                $existingRequest = $this->findExistingFlightRequestByIdempotency($user->id, $idempotencyKey);
+
+                if ($existingRequest) {
+                    return $this->buildStoredFlightRequestResponse(
+                        $existingRequest,
+                        $user,
+                        alreadyExists: true,
+                        message: 'La solicitud ya había sido registrada.',
+                        status: 200,
+                    );
+                }
             }
 
-            $chat = $solicitud->chatsProtegidos()->create([
-                'client_id' => $freshUser->id,
-                'status' => 'activo',
-            ]);
-
-            return [$freshUser, $solicitud, $chat];
-        });
+            throw $exception;
+        }
 
         $this->writeAudit($request, 'create', 'red_aviation.flight_requests', 'Solicitud Red Aviation creada.');
-        $this->notifyProvidersAboutFlightRequest($solicitud->fresh(['assignedAircraft', 'matches.aircraft']));
+        $this->dispatchProviderFlightRequestNotifications((int) $solicitud->id);
 
-        return $this->ok([
-            'flight_request' => $this->visibilidadServicio->solicitudParaCliente(
-                $solicitud->fresh(['matches.aircraft.images', 'chatsProtegidos', 'operaciones.timeline', 'legs'])
-            ),
-            'chat_id' => $chat->id,
-            'access' => $user->accessStatus(),
-        ], 201);
+        return $this->buildStoredFlightRequestResponse(
+            $solicitud,
+            $user,
+            alreadyExists: false,
+            message: null,
+            status: 201,
+            acceptedQuote: $acceptedQuote,
+            chatId: $chat->id,
+        );
     }
 
     private function notifyProvidersAboutFlightRequest(SolicitudVuelo $solicitud): void
     {
-        $solicitud->loadMissing(['assignedAircraft', 'matches.aircraft']);
-        $providerIds = collect([$solicitud->assigned_provider_id])
-            ->merge($solicitud->matches->pluck('provider_id'))
-            ->filter()
-            ->unique()
-            ->values();
-
-        foreach ($providerIds as $providerId) {
-            $event = new NewFlightRequestCreated($solicitud, (int) $providerId);
-            $payload = $event->broadcastWith();
-            event($event);
-            $this->createProviderFlightRequestNotification((int) $providerId, $payload);
-        }
+        $this->providerFlightRequestNotificationService->dispatchForFlightRequest($solicitud);
     }
 
-    private function createProviderFlightRequestNotification(int $providerId, array $payload): void
+    private function dispatchProviderFlightRequestNotifications(int $flightRequestId): void
     {
-        try {
-            $userIds = Usuario::query()
-                ->where('provider_id', $providerId)
-                ->pluck('id');
-
-            foreach ($userIds as $userId) {
-                Notificacion::create([
-                    'user_id' => $userId,
-                    'provider_id' => $providerId,
-                    'type' => 'flight.request.created',
-                    'title' => 'Nueva solicitud de vuelo',
-                    'message' => ($payload['route'] ?? 'Ruta por confirmar').' · '.($payload['aircraft_name'] ?? 'Aeronave por confirmar'),
-                    'payload' => $payload,
-                    'data' => $payload,
-                ]);
-            }
-        } catch (\Throwable $exception) {
-            report($exception);
-        }
+        DispatchProviderFlightRequestNotificationsJob::dispatch($flightRequestId);
     }
+
+    private function resolveFlightRequestIdempotencyKey(Request $request, array $validatedData): ?string
+    {
+        $candidate = trim((string) ($request->header('Idempotency-Key') ?: ($validatedData['idempotency_key'] ?? '')));
+
+        return $candidate !== '' ? $candidate : null;
+    }
+
+    private function findExistingFlightRequestByIdempotency(int $clientId, ?string $idempotencyKey): ?SolicitudVuelo
+    {
+        if ($clientId <= 0 || ! $idempotencyKey || ! $this->flightRequestSupportsIdempotency()) {
+            return null;
+        }
+
+        return SolicitudVuelo::query()
+            ->where('client_id', $clientId)
+            ->where('idempotency_key', $idempotencyKey)
+            ->first();
+    }
+
+    private function isFlightRequestIdempotencyUniqueViolation(QueryException $exception): bool
+    {
+        $sqlState = (string) ($exception->errorInfo[0] ?? $exception->getCode());
+        $message = strtolower($exception->getMessage());
+
+        return in_array($sqlState, ['23000', '23505'], true)
+            && str_contains($message, 'fr_client_idem_uq');
+    }
+
+    private function flightRequestSupportsIdempotency(): bool
+    {
+        if ($this->flightRequestIdempotencyColumnExists !== null) {
+            return $this->flightRequestIdempotencyColumnExists;
+        }
+
+        return $this->flightRequestIdempotencyColumnExists = Schema::hasColumn('flight_requests', 'idempotency_key');
+    }
+
+    private function buildStoredFlightRequestResponse(
+        SolicitudVuelo $solicitud,
+        Usuario $user,
+        bool $alreadyExists,
+        ?string $message,
+        int $status,
+        $acceptedQuote = null,
+        ?int $chatId = null,
+    ) {
+        $loadedRequest = $solicitud->fresh([
+            'assignedAircraft.images',
+            'matches.aircraft.images',
+            'chatsProtegidos',
+            'operaciones.timeline',
+            'legs',
+            'quotes',
+        ]);
+
+        $acceptedQuote ??= $loadedRequest->quotes
+            ->where('status', 'accepted')
+            ->sortByDesc('id')
+            ->first();
+        $chatId ??= $loadedRequest->chatsProtegidos->sortByDesc('id')->first()?->id;
+
+        $flightRequestPayload = $this->visibilidadServicio->solicitudParaCliente(
+            $loadedRequest,
+            [
+                'skip_reservation_lookup' => true,
+            ],
+        );
+
+        return $this->ok(array_filter([
+            'message' => $message,
+            'already_exists' => $alreadyExists,
+            'flight_request' => $flightRequestPayload + ['already_exists' => $alreadyExists],
+            'accepted_quote' => $acceptedQuote ? [
+                'id' => $acceptedQuote->id,
+                'quote_id' => $acceptedQuote->id,
+                'aircraft_id' => $acceptedQuote->aircraft_id,
+                'provider_id' => $acceptedQuote->provider_id,
+                'status' => $acceptedQuote->status,
+                'total' => $acceptedQuote->total,
+                'currency' => $acceptedQuote->currency,
+                'expires_at' => optional($acceptedQuote->expires_at)->toIso8601String(),
+            ] : null,
+            'chat_id' => $chatId,
+            'access' => $user->accessStatus(),
+        ], fn ($value) => $value !== null), $status);
+    }
+
     private function resolveCommercialAccessGate($user): array
     {
         if ($user->hasRole(Usuario::ROLE_ADMIN)) {
@@ -894,6 +997,62 @@ class ClienteControlador extends ControladorBase
             'code' => 'AIRCRAFT_NOT_AVAILABLE',
             'message' => 'Esta aeronave ya no está disponible para el horario seleccionado.',
         ], 409));
+    }
+
+    private function ensureAcceptedQuoteForFlightRequest(SolicitudVuelo $solicitud): ?Cotizacion
+    {
+        $solicitud->loadMissing(['quotes', 'assignedAircraft']);
+
+        $providerId = (int) ($solicitud->assigned_provider_id ?? 0);
+        $aircraftId = (int) ($solicitud->assigned_aircraft_id ?? 0);
+        $totalAmount = (float) data_get($solicitud->pricing_context, 'total_amount', $solicitud->final_price ?? 0);
+
+        if ($providerId <= 0 || $aircraftId <= 0 || $totalAmount <= 0) {
+            return null;
+        }
+
+        $subtotal = (float) data_get(
+            $solicitud->pricing_context,
+            'subtotal_before_margin',
+            data_get($solicitud->pricing_context, 'subtotal', max($totalAmount, 0))
+        );
+        $taxes = (float) data_get(
+            $solicitud->pricing_context,
+            'tax',
+            data_get($solicitud->pricing_context, 'taxes', 0)
+        );
+        $fees = max(round($totalAmount - $subtotal - $taxes, 2), 0);
+
+        $existingQuote = $solicitud->quotes()
+            ->where('provider_id', $providerId)
+            ->where('aircraft_id', $aircraftId)
+            ->where('status', 'accepted')
+            ->latest('id')
+            ->first();
+
+        $attributes = [
+            'subtotal' => round($subtotal, 2),
+            'taxes' => round($taxes, 2),
+            'fees' => round($fees, 2),
+            'total' => round($totalAmount, 2),
+            'currency' => $solicitud->currency ?: 'USD',
+            'provider_notes' => 'Cotizacion aceptada automaticamente a partir de la seleccion del cliente en preview.',
+            'status' => 'accepted',
+            'expires_at' => now()->addDay(),
+        ];
+
+        if ($existingQuote) {
+            $existingQuote->update($attributes);
+
+            return $existingQuote->fresh();
+        }
+
+        return $solicitud->quotes()->create([
+            ...$attributes,
+            'quote_code' => 'QT-'.now()->format('ymdHis').'-'.Str::upper(Str::random(6)),
+            'provider_id' => $providerId,
+            'aircraft_id' => $aircraftId,
+        ]);
     }
 
     public function indexFlightRequests(Request $request)

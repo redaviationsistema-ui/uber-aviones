@@ -71,6 +71,85 @@ class AircraftHoldFlowTest extends TestCase
         $this->assertSame(1, AircraftAvailabilityBlock::query()->where('quote_id', $quote->id)->where('status', 'held')->count());
     }
 
+    public function test_hold_resolves_departure_from_request_payload_when_quote_window_is_missing(): void
+    {
+        $this->seed();
+
+        [, $token, $quote] = $this->createAcceptedQuoteContext('XA-HOLD2C');
+        $quote->flightRequest()->update([
+            'departure_datetime' => null,
+            'return_datetime' => null,
+            'departure_date' => null,
+            'departure_time' => null,
+            'return_date' => null,
+            'return_time' => null,
+        ]);
+
+        $response = $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson("/api/v1/cliente/cotizaciones/{$quote->id}/aircraft-hold", [
+                'quote_id' => $quote->id,
+                'aircraft_id' => $quote->aircraft_id,
+                'departure_date' => '2026-08-20',
+                'departure_time' => '10:00',
+                'departure_datetime' => '2026-08-20T10:00:00',
+                'start_date' => '2026-08-20',
+                'start_time' => '10:00',
+                'start_datetime' => '2026-08-20T10:00:00',
+            ])
+            ->assertCreated()
+            ->assertJsonPath('data.quote_id', $quote->id);
+
+        $this->assertDatabaseHas('aircraft_availability_blocks', [
+            'id' => $response->json('data.hold_id'),
+            'quote_id' => $quote->id,
+            'aircraft_id' => $quote->aircraft_id,
+            'status' => 'held',
+        ]);
+    }
+
+    public function test_hold_resolves_departure_from_flight_request_date_and_time_when_datetime_is_missing(): void
+    {
+        $this->seed();
+
+        [, $token, $quote] = $this->createAcceptedQuoteContext('XA-HOLD2E');
+        $quote->flightRequest()->update([
+            'departure_datetime' => null,
+            'return_datetime' => null,
+            'departure_date' => '2026-08-20',
+            'departure_time' => '10:00',
+            'return_date' => '2026-08-20',
+            'return_time' => '14:00',
+        ]);
+
+        $response = $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson("/api/v1/cliente/cotizaciones/{$quote->id}/aircraft-hold")
+            ->assertCreated()
+            ->assertJsonPath('data.quote_id', $quote->id);
+
+        $this->assertDatabaseHas('aircraft_availability_blocks', [
+            'id' => $response->json('data.hold_id'),
+            'quote_id' => $quote->id,
+            'aircraft_id' => $quote->aircraft_id,
+            'status' => 'held',
+        ]);
+    }
+
+    public function test_hold_rejects_when_body_quote_id_does_not_match_route_quote(): void
+    {
+        $this->seed();
+
+        [, $token, $quote] = $this->createAcceptedQuoteContext('XA-HOLD2D');
+
+        $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson("/api/v1/cliente/cotizaciones/{$quote->id}/aircraft-hold", [
+                'quote_id' => $quote->id + 999,
+                'aircraft_id' => $quote->aircraft_id,
+                'departure_datetime' => '2026-08-20T10:00:00',
+            ])
+            ->assertStatus(422)
+            ->assertJsonPath('message', 'El quote_id enviado no coincide con la cotización de la URL.');
+    }
+
     public function test_expired_hold_does_not_exclude_aircraft_and_command_is_idempotent(): void
     {
         $this->seed();

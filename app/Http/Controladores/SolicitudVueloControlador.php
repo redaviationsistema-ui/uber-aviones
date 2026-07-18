@@ -7,16 +7,22 @@ use App\Enumeraciones\EstadoAeronave;
 use App\Enumeraciones\EstadoDisponibilidad;
 use App\Enumeraciones\EstadoProveedor;
 use App\Enumeraciones\EstadoSolicitudVuelo;
+use App\Jobs\DispatchProviderFlightRequestNotificationsJob;
 use App\Modelos\Aeropuerto;
 use App\Modelos\Aeronave;
-use App\Modelos\Notificacion;
 use App\Modelos\SolicitudVuelo;
 use App\Modelos\Usuario;
+use App\Servicios\RedAviation\ProviderFlightRequestNotificationService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 
 class SolicitudVueloControlador extends ControladorBase
 {
+    public function __construct(
+        private readonly ProviderFlightRequestNotificationService $providerFlightRequestNotificationService,
+    ) {
+    }
+
     public function index(Request $request)
     {
         $query = SolicitudVuelo::with(['matches.aircraft', 'quotes'])
@@ -69,7 +75,7 @@ class SolicitudVueloControlador extends ControladorBase
 
         $this->matchAeronave($flightRequest);
         $this->writeAudit($request, 'create', 'flight_requests', 'Solicitud de vuelo creada.');
-        $this->notifyProvidersAboutFlightRequest($flightRequest->fresh(['assignedAircraft', 'matches.aircraft']));
+        $this->dispatchProviderFlightRequestNotifications((int) $flightRequest->id);
 
         return $this->ok(['flight_request' => $flightRequest->load('matches.aircraft.provider')], 201);
     }
@@ -105,42 +111,12 @@ class SolicitudVueloControlador extends ControladorBase
 
     private function notifyProvidersAboutFlightRequest(SolicitudVuelo $solicitud): void
     {
-        $solicitud->loadMissing(['assignedAircraft', 'matches.aircraft']);
-        $providerIds = collect([$solicitud->assigned_provider_id])
-            ->merge($solicitud->matches->pluck('provider_id'))
-            ->filter()
-            ->unique()
-            ->values();
-
-        foreach ($providerIds as $providerId) {
-            $event = new NewFlightRequestCreated($solicitud, (int) $providerId);
-            $payload = $event->broadcastWith();
-            event($event);
-            $this->createProviderFlightRequestNotification((int) $providerId, $payload);
-        }
+        $this->providerFlightRequestNotificationService->dispatchForFlightRequest($solicitud);
     }
 
-    private function createProviderFlightRequestNotification(int $providerId, array $payload): void
+    private function dispatchProviderFlightRequestNotifications(int $flightRequestId): void
     {
-        try {
-            $userIds = Usuario::query()
-                ->where('provider_id', $providerId)
-                ->pluck('id');
-
-            foreach ($userIds as $userId) {
-                Notificacion::create([
-                    'user_id' => $userId,
-                    'provider_id' => $providerId,
-                    'type' => 'flight.request.created',
-                    'title' => 'Nueva solicitud de vuelo',
-                    'message' => ($payload['route'] ?? 'Ruta por confirmar').' · '.($payload['aircraft_name'] ?? 'Aeronave por confirmar'),
-                    'payload' => $payload,
-                    'data' => $payload,
-                ]);
-            }
-        } catch (\Throwable $exception) {
-            report($exception);
-        }
+        DispatchProviderFlightRequestNotificationsJob::dispatch($flightRequestId);
     }
     private function matchAeronave(SolicitudVuelo $flightRequest): void
     {
@@ -201,4 +177,3 @@ class SolicitudVueloControlador extends ControladorBase
             ->first();
     }
 }
-

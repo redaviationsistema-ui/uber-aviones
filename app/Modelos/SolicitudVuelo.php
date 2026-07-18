@@ -39,6 +39,7 @@ class SolicitudVuelo extends Model
 
     protected $fillable = [
         'client_id',
+        'idempotency_key',
         'assigned_provider_id',
         'assigned_aircraft_id',
         'assigned_aircraft_model',
@@ -73,6 +74,10 @@ class SolicitudVuelo extends Model
         'stripe_payment_intent_id',
         'status',
         'workflow_status',
+    ];
+
+    protected $hidden = [
+        'idempotency_key',
     ];
 
     protected function casts(): array

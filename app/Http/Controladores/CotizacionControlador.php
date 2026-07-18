@@ -2,11 +2,14 @@
 
 namespace App\Http\Controladores;
 
+use App\Http\Requests\CreateAircraftHoldRequest;
 use App\Modelos\SolicitudVuelo;
 use App\Modelos\Cotizacion;
 use App\Servicios\Aeronaves\AircraftAvailabilityService;
 use App\Servicios\Billing\FlightMembershipService;
 use Illuminate\Http\Request;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Facades\Log;
 use RuntimeException;
 
 class CotizacionControlador extends ControladorBase
@@ -128,16 +131,58 @@ class CotizacionControlador extends ControladorBase
         return $this->ok(['quote' => $quote->fresh()]);
     }
 
-    public function createAircraftHold(Request $request, Cotizacion $quote)
+    public function createAircraftHold(CreateAircraftHoldRequest $request, Cotizacion $quote): JsonResponse
     {
         abort_if($quote->flightRequest?->client_id !== $request->user()->id && ! $request->user()->hasRole('admin'), 403);
+        $data = $request->validated();
+        $routeQuoteId = (int) $quote->id;
+        $bodyQuoteId = (int) ($data['quote_id'] ?? 0);
+
+        if ($bodyQuoteId > 0 && $bodyQuoteId !== $routeQuoteId) {
+            return response()->json([
+                'success' => false,
+                'message' => 'El quote_id enviado no coincide con la cotización de la URL.',
+            ], 422);
+        }
+
+        Log::info('Aircraft hold request diagnostics', [
+            'route_quote_id' => $routeQuoteId,
+            'request_quote_id' => $data['quote_id'] ?? null,
+            'aircraft_id' => $data['aircraft_id'] ?? null,
+            'start_date' => $data['start_date'] ?? null,
+            'start_time' => $data['start_time'] ?? null,
+            'start_datetime' => $data['start_datetime'] ?? null,
+            'departure_date' => $data['departure_date'] ?? null,
+            'departure_time' => $data['departure_time'] ?? null,
+            'departure_datetime' => $data['departure_datetime'] ?? null,
+            'first_leg' => $data['legs'][0] ?? null,
+        ]);
 
         $reservation = $quote->flightRequest?->reservation;
 
         try {
-            $hold = $this->aircraftAvailabilityService->holdAircraftForQuote($quote->load(['flightRequest.legs', 'aircraft']), (int) $request->user()->id, $reservation);
+            $hold = $this->aircraftAvailabilityService->holdAircraftForQuote(
+                $quote->load(['flightRequest.legs', 'aircraft']),
+                (int) $request->user()->id,
+                $reservation,
+                null,
+                $data,
+            );
         } catch (RuntimeException $exception) {
-            abort(409, $exception->getMessage());
+            $message = $exception->getMessage();
+            $status = str_contains($message, 'No se pudo resolver la fecha de inicio') ? 422 : 409;
+
+            return response()->json([
+                'success' => false,
+                'message' => $message,
+                'errors' => $status === 422
+                    ? [
+                        'departure' => [
+                            'La cotización no contiene una fecha de salida válida.',
+                        ],
+                    ]
+                    : null,
+            ], $status);
         }
 
         $reused = (bool) $hold->getAttribute('hold_reused');
@@ -185,10 +230,12 @@ class CotizacionControlador extends ControladorBase
 
         return [
             'hold_id' => $hold->id,
+            'quote_id' => $hold->quote_id,
             'aircraft_id' => $hold->aircraft_id,
             'status' => $hold->status,
             'starts_at' => $hold->start_datetime,
             'ends_at' => $hold->end_datetime,
+            'expires_at' => $expiresAt,
             'hold_expires_at' => $expiresAt,
             'expires_in_seconds' => $secondsRemaining,
             'is_active' => $hold->status === AircraftAvailabilityService::STATUS_HELD

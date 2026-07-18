@@ -5,13 +5,18 @@ namespace Tests\Feature;
 use App\Modelos\Aeronave;
 use App\Modelos\CatalogoDisponibilidadEstatus;
 use App\Modelos\IdentityVerification;
+use App\Modelos\Notificacion;
 use App\Modelos\Operacion;
 use App\Modelos\Proveedor;
 use App\Modelos\SolicitudVuelo;
 use App\Modelos\Usuario;
+use App\Jobs\DispatchProviderFlightRequestNotificationsJob;
+use App\Servicios\RedAviation\ProviderFlightRequestNotificationService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Defer\DeferredCallbackCollection;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
@@ -162,6 +167,196 @@ class PlataformaVuelosApiTest extends TestCase
             ->assertJsonPath('flight_request.status', 'operador_asignado');
 
         $this->assertNotNull($response->json('chat_id'));
+    }
+
+    public function test_red_aviation_client_request_defers_provider_notifications_until_after_response(): void
+    {
+        $this->seed();
+
+        $aircraft = Aeronave::where('registration', 'XA-LJ45')->firstOrFail();
+        $expectedRecipients = Usuario::query()
+            ->where('provider_id', $aircraft->provider_id)
+            ->count();
+        $initialNotificationCount = Notificacion::query()
+            ->where('provider_id', $aircraft->provider_id)
+            ->where('type', 'flight.request.created')
+            ->count();
+
+        $this->assertGreaterThan(0, $expectedRecipients);
+
+        $register = $this->postJson('/api/v1/auth/register', [
+            'name' => 'Cliente Diferido',
+            'email' => 'cliente.deferido@test.com',
+            'password' => 'password123',
+            'password_confirmation' => 'password123',
+            'role' => 'client',
+        ])->assertCreated();
+
+        $sessionToken = $register->json('token');
+
+        $this->withToken($sessionToken)
+            ->postJson('/api/v1/subscriptions/start-trial')
+            ->assertCreated();
+
+        $response = $this->withToken($sessionToken)
+            ->postJson('/api/v1/client/flight-requests', [
+                'origin' => 'MMMX',
+                'destination' => 'MMUN',
+                'departure_datetime' => now()->addDays(4)->toISOString(),
+                'passengers' => 4,
+                'aircraft_type' => 'light_jet',
+                'provider_id' => $aircraft->provider_id,
+                'aircraft_id' => $aircraft->id,
+                'final_price' => 15620,
+                'total' => 15620,
+                'estimated_total' => 15620,
+                'selected_card_price' => 15620,
+            ])
+            ->assertCreated()
+            ->assertJsonPath('success', true);
+
+        $flightRequestId = $response->json('flight_request.id');
+
+        app(DeferredCallbackCollection::class)->invoke();
+
+        $notifications = Notificacion::query()
+            ->where('provider_id', $aircraft->provider_id)
+            ->where('type', 'flight.request.created')
+            ->get();
+
+        $this->assertCount($initialNotificationCount + $expectedRecipients, $notifications);
+        $this->assertSame(
+            $flightRequestId,
+            data_get($notifications->sortByDesc('id')->first()?->payload, 'request_id')
+        );
+    }
+
+    public function test_red_aviation_client_request_queues_provider_notifications_and_service_persists_them(): void
+    {
+        $this->seed();
+        Queue::fake();
+
+        $aircraft = Aeronave::where('registration', 'XA-LJ45')->firstOrFail();
+        $expectedRecipients = Usuario::query()
+            ->where('provider_id', $aircraft->provider_id)
+            ->count();
+        $initialNotificationCount = Notificacion::query()
+            ->where('provider_id', $aircraft->provider_id)
+            ->where('type', 'flight.request.created')
+            ->count();
+
+        $register = $this->postJson('/api/v1/auth/register', [
+            'name' => 'Cliente Queue',
+            'email' => 'cliente.queue@test.com',
+            'password' => 'password123',
+            'password_confirmation' => 'password123',
+            'role' => 'client',
+        ])->assertCreated();
+
+        $sessionToken = $register->json('token');
+
+        $this->withToken($sessionToken)
+            ->postJson('/api/v1/subscriptions/start-trial')
+            ->assertCreated();
+
+        $response = $this->withToken($sessionToken)
+            ->postJson('/api/v1/client/flight-requests', [
+                'origin' => 'MMMX',
+                'destination' => 'MMUN',
+                'departure_datetime' => now()->addDays(4)->toISOString(),
+                'passengers' => 4,
+                'aircraft_type' => 'light_jet',
+                'provider_id' => $aircraft->provider_id,
+                'aircraft_id' => $aircraft->id,
+                'final_price' => 15620,
+                'total' => 15620,
+                'estimated_total' => 15620,
+                'selected_card_price' => 15620,
+            ])
+            ->assertCreated()
+            ->assertJsonPath('success', true);
+
+        $flightRequestId = (int) $response->json('flight_request.id');
+
+        Queue::assertPushed(DispatchProviderFlightRequestNotificationsJob::class, function ($job) use ($flightRequestId) {
+            return $job->flightRequestId === $flightRequestId;
+        });
+
+        $this->assertSame(
+            $initialNotificationCount,
+            Notificacion::query()
+                ->where('provider_id', $aircraft->provider_id)
+                ->where('type', 'flight.request.created')
+                ->count()
+        );
+
+        app(ProviderFlightRequestNotificationService::class)->dispatchForFlightRequest($flightRequestId);
+
+        $notifications = Notificacion::query()
+            ->where('provider_id', $aircraft->provider_id)
+            ->where('type', 'flight.request.created')
+            ->get();
+
+        $this->assertCount($initialNotificationCount + $expectedRecipients, $notifications);
+        $this->assertSame(
+            $flightRequestId,
+            data_get($notifications->sortByDesc('id')->first()?->payload, 'request_id')
+        );
+    }
+
+    public function test_red_aviation_client_request_is_idempotent_with_same_key(): void
+    {
+        $this->seed();
+        Queue::fake();
+
+        $register = $this->postJson('/api/v1/auth/register', [
+            'name' => 'Cliente Idempotente',
+            'email' => 'cliente.idempotente@test.com',
+            'password' => 'password123',
+            'password_confirmation' => 'password123',
+            'role' => 'client',
+        ])->assertCreated();
+
+        $sessionToken = $register->json('token');
+
+        $this->withToken($sessionToken)
+            ->postJson('/api/v1/subscriptions/start-trial')
+            ->assertCreated();
+
+        $payload = [
+            'origin' => 'MMMX',
+            'destination' => 'MMUN',
+            'departure_datetime' => now()->addDays(4)->toISOString(),
+            'passengers' => 4,
+            'aircraft_type' => 'light_jet',
+            'requirements' => ['wifi' => true],
+            'idempotency_key' => 'payload-key-should-be-overridden',
+        ];
+
+        $firstResponse = $this->withToken($sessionToken)
+            ->withHeader('Idempotency-Key', '11111111-1111-4111-8111-111111111111')
+            ->postJson('/api/v1/client/flight-requests', $payload)
+            ->assertCreated()
+            ->assertJsonPath('success', true)
+            ->assertJsonPath('already_exists', false);
+
+        $firstFlightRequestId = (int) $firstResponse->json('flight_request.id');
+        $firstChatId = (int) $firstResponse->json('chat_id');
+
+        $secondResponse = $this->withToken($sessionToken)
+            ->withHeader('Idempotency-Key', '11111111-1111-4111-8111-111111111111')
+            ->postJson('/api/v1/client/flight-requests', $payload)
+            ->assertOk()
+            ->assertJsonPath('success', true)
+            ->assertJsonPath('already_exists', true)
+            ->assertJsonPath('message', 'La solicitud ya había sido registrada.');
+
+        $this->assertSame($firstFlightRequestId, (int) $secondResponse->json('flight_request.id'));
+        $this->assertSame($firstChatId, (int) $secondResponse->json('chat_id'));
+        $this->assertSame(1, SolicitudVuelo::query()->where('client_id', $register->json('user.id'))->count());
+        $this->assertSame(1, \App\Modelos\ChatProtegido::query()->where('flight_request_id', $firstFlightRequestId)->count());
+
+        Queue::assertPushed(DispatchProviderFlightRequestNotificationsJob::class, 1);
     }
 
     public function test_admin_can_grant_trial_to_client_and_unlock_flight_requests(): void

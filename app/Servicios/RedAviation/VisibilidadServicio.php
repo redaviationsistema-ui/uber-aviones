@@ -15,12 +15,11 @@ class VisibilidadServicio
     {
         $includeTimeline = (bool) ($options['include_timeline'] ?? true);
         $includeMatches = (bool) ($options['include_matches'] ?? true);
+        $skipReservationLookup = (bool) ($options['skip_reservation_lookup'] ?? false);
         $summaryOnly = ! $includeTimeline || ! $includeMatches;
         $preferredMatch = $includeMatches ? $this->matchPreferidoParaCliente($solicitud) : null;
         $visibilityPayload = $solicitud->visibility_payload ?? [];
-        $assignedAircraft = $solicitud->relationLoaded('assignedAircraft')
-            ? $solicitud->assignedAircraft
-            : $solicitud->assignedAircraft()->with('images')->first();
+        $assignedAircraft = $this->resolveAssignedAircraft($solicitud, true);
 
         $chat = $solicitud->relationLoaded('chatsProtegidos')
             ? $solicitud->chatsProtegidos->sortByDesc('id')->first()
@@ -31,14 +30,8 @@ class VisibilidadServicio
             : ($solicitud->relationLoaded('operaciones')
                 ? $solicitud->operaciones->sortByDesc('id')->first()
                 : $solicitud->operaciones()->latest('id')->first());
-        $reservation = $solicitud->relationLoaded('reservation')
-            ? $solicitud->reservation
-            : $solicitud->reservation()->with(['contract', 'latestPayment'])->first();
-        $latestPayment = $reservation?->relationLoaded('latestPayment')
-            ? $reservation->latestPayment
-            : ($reservation?->relationLoaded('payments')
-                ? $reservation->payments->sortByDesc('id')->first()
-                : $reservation?->latestPayment()->first());
+        $reservation = $skipReservationLookup ? null : $this->resolveReservation($solicitud);
+        $latestPayment = $this->resolveLatestPayment($reservation);
         $contract = $reservation?->contract;
         $contractReadyForPayment = in_array(strtolower((string) ($contract?->status ?? '')), ['signed', 'completed'], true)
             || strtolower((string) ($contract?->docusign_status ?? '')) === 'completed'
@@ -69,6 +62,9 @@ class VisibilidadServicio
                     ],
             ])->values()
             : collect();
+        $acceptedQuote = $solicitud->relationLoaded('quotes')
+            ? $solicitud->quotes->where('status', 'accepted')->sortByDesc('id')->first()
+            : $solicitud->quotes()->where('status', 'accepted')->latest('id')->first();
 
         return [
             'id' => $solicitud->id,
@@ -131,6 +127,16 @@ class VisibilidadServicio
             'stripe_checkout_session_id' => $solicitud->stripe_checkout_session_id ?? $latestPayment?->stripe_checkout_session_id,
             'stripe_payment_intent_id' => $solicitud->stripe_payment_intent_id ?? $latestPayment?->stripe_payment_intent_id,
             'reservation_id' => $reservation?->id,
+            'accepted_quote' => $acceptedQuote ? [
+                'id' => $acceptedQuote->id,
+                'quote_id' => $acceptedQuote->id,
+                'aircraft_id' => $acceptedQuote->aircraft_id,
+                'provider_id' => $acceptedQuote->provider_id,
+                'status' => $acceptedQuote->status,
+                'total' => $acceptedQuote->total,
+                'currency' => $acceptedQuote->currency,
+                'expires_at' => $acceptedQuote->expires_at,
+            ] : null,
             'summary_only' => $summaryOnly,
             'reservation' => $reservation ? [
                 'id' => $reservation->id,
@@ -179,22 +185,10 @@ class VisibilidadServicio
     {
         $match = $this->matchPreferidoParaOperador($solicitud);
         $visibilityPayload = $solicitud->visibility_payload ?? [];
-        $assignedAircraft = $solicitud->relationLoaded('assignedAircraft')
-            ? $solicitud->assignedAircraft
-            : $solicitud->assignedAircraft()->first();
-        $reservation = $solicitud->relationLoaded('reservation')
-            ? $solicitud->reservation
-            : $solicitud->reservation()->with(['contract', 'latestPayment'])->first();
-        $operation = $solicitud->relationLoaded('latestOperation')
-            ? $solicitud->latestOperation
-            : ($solicitud->relationLoaded('operaciones')
-                ? $solicitud->operaciones->sortByDesc('id')->first()
-                : $solicitud->latestOperation()->first());
-        $latestPayment = $reservation?->relationLoaded('latestPayment')
-            ? $reservation->latestPayment
-            : ($reservation?->relationLoaded('payments')
-                ? $reservation->payments->sortByDesc('id')->first()
-                : $reservation?->latestPayment()->first());
+        $assignedAircraft = $this->resolveAssignedAircraft($solicitud);
+        $reservation = $this->resolveReservation($solicitud);
+        $operation = $this->resolveLatestOperation($solicitud);
+        $latestPayment = $this->resolveLatestPayment($reservation);
         $operatorStatus = $match?->status === 'rejected'
             ? 'rejected'
             : ($match?->status === 'accepted'
@@ -271,24 +265,16 @@ class VisibilidadServicio
     {
         $preferredMatch = $this->matchPreferidoParaOperador($solicitud);
         $visibilityPayload = $solicitud->visibility_payload ?? [];
-        $assignedAircraft = $solicitud->relationLoaded('assignedAircraft')
-            ? $solicitud->assignedAircraft
-            : $solicitud->assignedAircraft()->first();
-        $reservation = $solicitud->relationLoaded('reservation')
-            ? $solicitud->reservation
-            : $solicitud->reservation()->with(['contract', 'latestPayment'])->first();
-        $operation = $solicitud->relationLoaded('latestOperation')
-            ? $solicitud->latestOperation
-            : $solicitud->latestOperation()->first();
+        $assignedAircraft = $this->resolveAssignedAircraft($solicitud);
+        $reservation = $this->resolveReservation($solicitud);
+        $operation = $this->resolveLatestOperation($solicitud, preferCollection: false);
         $timeline = $operation
             ? ($operation->relationLoaded('timeline')
                 ? $operation->timeline->sortByDesc('id')->values()
                 : $operation->timeline()->latest('id')->get())
             : collect();
-        $latestPayment = $reservation?->relationLoaded('latestPayment')
-            ? $reservation->latestPayment
-            : $reservation?->latestPayment()->first();
-        $client = $solicitud->relationLoaded('client') ? $solicitud->client : $solicitud->client()->first();
+        $latestPayment = $this->resolveLatestPayment($reservation);
+        $client = $this->resolveClient($solicitud);
 
         return [
             'id' => $solicitud->id,
@@ -518,5 +504,78 @@ class VisibilidadServicio
             'passengers' => $leg->passengers,
             'distance_km' => $leg->distance_km,
         ])->values();
+    }
+
+    private function resolveAssignedAircraft(SolicitudVuelo $solicitud, bool $withImages = false): ?Aeronave
+    {
+        if ($solicitud->relationLoaded('assignedAircraft')) {
+            return $solicitud->assignedAircraft;
+        }
+
+        if (! $solicitud->assigned_aircraft_id) {
+            return null;
+        }
+
+        $relation = $solicitud->assignedAircraft();
+
+        if ($withImages) {
+            $relation->with('images');
+        }
+
+        return $relation->first();
+    }
+
+    private function resolveReservation(SolicitudVuelo $solicitud)
+    {
+        if ($solicitud->relationLoaded('reservation')) {
+            return $solicitud->reservation;
+        }
+
+        return $solicitud->reservation()->with(['contract', 'latestPayment'])->first();
+    }
+
+    private function resolveLatestOperation(SolicitudVuelo $solicitud, bool $preferCollection = true): ?Operacion
+    {
+        if ($solicitud->relationLoaded('latestOperation')) {
+            return $solicitud->latestOperation;
+        }
+
+        if ($preferCollection && $solicitud->relationLoaded('operaciones')) {
+            return $solicitud->operaciones->sortByDesc('id')->first();
+        }
+
+        return $preferCollection
+            ? $solicitud->operaciones()->latest('id')->first()
+            : $solicitud->latestOperation()->first();
+    }
+
+    private function resolveLatestPayment($reservation)
+    {
+        if (! $reservation) {
+            return null;
+        }
+
+        if ($reservation->relationLoaded('latestPayment')) {
+            return $reservation->latestPayment;
+        }
+
+        if ($reservation->relationLoaded('payments')) {
+            return $reservation->payments->sortByDesc('id')->first();
+        }
+
+        return $reservation->latestPayment()->first();
+    }
+
+    private function resolveClient(SolicitudVuelo $solicitud): ?Usuario
+    {
+        if ($solicitud->relationLoaded('client')) {
+            return $solicitud->client;
+        }
+
+        if (! $solicitud->client_id) {
+            return null;
+        }
+
+        return $solicitud->client()->first();
     }
 }
