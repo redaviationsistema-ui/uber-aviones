@@ -81,8 +81,14 @@ Route::prefix('admin')->middleware(['auth.token', 'role:admin'])->group(function
     Route::post('/aeronaves/{aircraft}/desactivar', [AdministradorControlador::class, 'deactivateAeronave']);
 
     Route::get('/solicitudes', [AdministradorControlador::class, 'flightRequests']);
+    Route::patch('/solicitudes/{flightRequest}', [AdministradorControlador::class, 'updateFlightRequest']);
+    Route::put('/solicitudes/{flightRequest}', [AdministradorControlador::class, 'updateFlightRequest']);
+    Route::post('/solicitudes/{flightRequest}', [AdministradorControlador::class, 'updateFlightRequest']);
     Route::get('/cotizaciones', [RedAviationAdminControlador::class, 'quotes']);
     Route::get('/reservas', [AdministradorControlador::class, 'reservations']);
+    Route::patch('/reservas/{reservation}', [AdministradorControlador::class, 'updateReservation']);
+    Route::put('/reservas/{reservation}', [AdministradorControlador::class, 'updateReservation']);
+    Route::post('/reservas/{reservation}', [AdministradorControlador::class, 'updateReservation']);
     Route::get('/pagos', [AdministradorControlador::class, 'payments']);
     Route::get('/comisiones', [AdministradorControlador::class, 'commissions']);
     Route::post('/comisiones/{commission}/liberar', [AdministradorControlador::class, 'releaseComision']);

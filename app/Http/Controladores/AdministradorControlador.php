@@ -850,7 +850,40 @@ class AdministradorControlador extends ControladorBase
 
     public function flightRequests()
     {
-        return $this->ok(['flight_requests' => SolicitudVuelo::with(['client', 'matches.aircraft'])->latest()->paginate(25)]);
+        return $this->ok(['flight_requests' => SolicitudVuelo::with(['client', 'matches' => fn ($query) => $query->whereNotNull('aircraft_id'), 'matches.aircraft'])->latest()->paginate(25)]);
+    }
+
+    public function updateFlightRequest(Request $request, SolicitudVuelo $flightRequest)
+    {
+        $data = $request->validate([
+            'status' => ['nullable', 'string', 'max:50'],
+            'workflow_status' => ['nullable', 'string', 'max:100'],
+            'payment_status' => ['nullable', 'string', 'max:50'],
+            'notes' => ['nullable', 'string', 'max:5000'],
+            'admin_flow_state' => ['nullable', 'string', 'max:50'],
+            'flow_control_state' => ['nullable', 'string', 'max:50'],
+            'admin_delay_reason' => ['nullable', 'string', 'max:1000'],
+            'delay_reason' => ['nullable', 'string', 'max:1000'],
+            'hold_reason' => ['nullable', 'string', 'max:1000'],
+            'admin_delay_eta' => ['nullable', 'string', 'max:100'],
+            'delay_eta' => ['nullable', 'string', 'max:100'],
+            'hold_eta' => ['nullable', 'string', 'max:100'],
+            'admin_note' => ['nullable', 'string', 'max:5000'],
+        ]);
+
+        $previousState = $flightRequest->only(['status', 'workflow_status', 'payment_status', 'admin_flow_state', 'flow_control_state']);
+
+        $updateData = collect($data)->filter()->all();
+        $flightRequest->update($updateData);
+
+        $this->writeAudit($request, 'admin_flight_request_updated', 'flight_requests', 'Admin actualizó solicitud de vuelo.', [
+            'entity' => 'flight_request',
+            'entity_id' => $flightRequest->id,
+            'before' => $previousState,
+            'after' => $flightRequest->only(['status', 'workflow_status', 'payment_status', 'admin_flow_state', 'flow_control_state']),
+        ]);
+
+        return $this->ok(['flight_request' => $flightRequest->fresh(['client', 'matches' => fn ($query) => $query->whereNotNull('aircraft_id'), 'matches.aircraft'])]);
     }
 
     public function quotes()
@@ -861,6 +894,40 @@ class AdministradorControlador extends ControladorBase
     public function reservations()
     {
         return $this->ok(['reservations' => Reserva::with(['client', 'provider', 'aircraft', 'quote'])->latest()->paginate(25)]);
+    }
+
+    public function updateReservation(Request $request, Reserva $reservation)
+    {
+        $data = $request->validate([
+            'status' => ['nullable', 'string', 'max:50'],
+            'workflow_status' => ['nullable', 'string', 'max:100'],
+            'payment_status' => ['nullable', 'string', 'max:50'],
+            'contract_status' => ['nullable', 'string', 'max:50'],
+            'notes' => ['nullable', 'string', 'max:5000'],
+            'admin_flow_state' => ['nullable', 'string', 'max:50'],
+            'flow_control_state' => ['nullable', 'string', 'max:50'],
+            'admin_delay_reason' => ['nullable', 'string', 'max:1000'],
+            'delay_reason' => ['nullable', 'string', 'max:1000'],
+            'hold_reason' => ['nullable', 'string', 'max:1000'],
+            'admin_delay_eta' => ['nullable', 'string', 'max:100'],
+            'delay_eta' => ['nullable', 'string', 'max:100'],
+            'hold_eta' => ['nullable', 'string', 'max:100'],
+            'admin_note' => ['nullable', 'string', 'max:5000'],
+        ]);
+
+        $previousState = $reservation->only(['status', 'workflow_status', 'payment_status', 'contract_status', 'admin_flow_state', 'flow_control_state']);
+
+        $updateData = collect($data)->filter()->all();
+        $reservation->update($updateData);
+
+        $this->writeAudit($request, 'admin_reservation_updated', 'reservations', 'Admin actualizó reserva.', [
+            'entity' => 'reservation',
+            'entity_id' => $reservation->id,
+            'before' => $previousState,
+            'after' => $reservation->only(['status', 'workflow_status', 'payment_status', 'contract_status', 'admin_flow_state', 'flow_control_state']),
+        ]);
+
+        return $this->ok(['reservation' => $reservation->fresh(['client', 'provider', 'aircraft', 'quote', 'flightRequest'])]);
     }
 
     public function payments()

@@ -9,7 +9,7 @@ class TramoSolicitudVuelo extends Model
 {
     protected $table = 'flight_request_legs';
 
-    protected $fillable = ['flight_request_id', 'leg_order', 'origin', 'origin_airport_id', 'destination', 'destination_airport_id', 'departure_datetime', 'arrival_datetime', 'distance_km', 'passengers'];
+    protected $fillable = ['flight_request_id', 'leg_order', 'origin', 'origin_airport_id', 'destination', 'destination_airport_id', 'departure_datetime', 'arrival_datetime', 'distance_km', 'passengers', 'status'];
 
     protected function casts(): array
     {
