@@ -25,6 +25,7 @@ use App\Modelos\Usuario;
 use App\Servicios\Aeronaves\AircraftAvailabilityService;
 use App\Servicios\Aeronaves\AircraftStateService;
 use App\Servicios\Administracion\AdminAuditServicio;
+use App\Servicios\Administracion\AdminAircraftFleetProfiler;
 use App\Servicios\Administracion\AdminCotizacionesServicio;
 use App\Servicios\Administracion\AdminDashboardServicio;
 use App\Servicios\Administracion\AdminDocumentosServicio;
@@ -58,6 +59,61 @@ use RuntimeException;
 
 class AdminControlador extends ControladorBase
 {
+    private const AIRCRAFT_FLEET_SELECT_COLUMNS = [
+        'id',
+        'provider_id',
+        'model',
+        'manufacturer',
+        'category',
+        'model_year',
+        'registration',
+        'capacity',
+        'base_airport',
+        'base_airport_id',
+        'range_km',
+        'speed_kmh',
+        'coverage',
+        'amenities',
+        'hourly_rate',
+        'airport_expenses_usd',
+        'minimum_hours',
+        'minimum_route_price',
+        'climb_descent_minutes',
+        'operational_cost',
+        'fuel_burn_gph',
+        'engine_reserve_rate',
+        'insurance_rate',
+        'maintenance_rate',
+        'crew_rate',
+        'repositioning_fee',
+        'overnight_fee',
+        'currency',
+        'status',
+        'is_active',
+        'operational_status',
+        'validation_status',
+        'activated_at',
+        'approved_at',
+        'billing_status',
+        'billing_plan_id',
+        'subscription_status',
+        'subscription_started_at',
+        'subscription_ends_at',
+        'last_payment_at',
+        'security_filter',
+        'security_score',
+        'airworthiness_status',
+        'last_maintenance_at',
+        'engine_run_at',
+        'captain_training_at',
+        'lodging_location',
+        'client_fbo',
+        'dispatch_center',
+        'dispatch_notes',
+        'security_notes',
+        'created_at',
+        'updated_at',
+    ];
     public function __construct(
         private readonly AircraftAvailabilityService $aircraftAvailabilityService,
         private readonly ReservationLifecycleService $reservationLifecycleService,
@@ -1538,6 +1594,7 @@ class AdminControlador extends ControladorBase
                     'operations.status',
                     'operations.sobrecargo_user_id',
                     'operations.crew_status',
+                    'operations.crew_notes',
                 ]),
                 'latestOperation.sobrecargo:id,name',
                 'latestOperation.timeline' => fn ($query) => $query
@@ -2011,10 +2068,23 @@ class AdminControlador extends ControladorBase
             'provider_id' => ['required', 'exists:providers,id'],
             'aircraft_id' => ['required', 'exists:aircraft,id'],
             'sobrecargo_user_id' => ['nullable', 'exists:users,id'],
+            'note' => ['nullable', 'string', 'max:1000'],
+            'briefing_time' => ['nullable', 'string', 'max:120'],
+            'presentation_time' => ['nullable', 'string', 'max:120'],
+            'presentation_place' => ['nullable', 'string', 'max:255'],
+            'presentation_location' => ['nullable', 'string', 'max:255'],
         ]);
 
         $hasAssignedCrew = ! empty($data['sobrecargo_user_id']);
         $currentWorkflowStatus = Str::lower(trim((string) ($flightRequest->workflow_status ?? '')));
+        $presentationTime = trim((string) ($data['presentation_time'] ?? $data['briefing_time'] ?? ''));
+        $presentationPlace = trim((string) ($data['presentation_place'] ?? $data['presentation_location'] ?? ''));
+        $crewNote = trim((string) ($data['note'] ?? ''));
+        $existingOperation = Operacion::query()
+            ->where('flight_request_id', $flightRequest->id)
+            ->latest('id')
+            ->first();
+        $assignedCrew = null;
 
         if (
             $hasAssignedCrew
@@ -2023,6 +2093,79 @@ class AdminControlador extends ControladorBase
             throw ValidationException::withMessages([
                 'sobrecargo_user_id' => 'La sobrecargo solo puede asignarse cuando el vuelo ya esta confirmado para despacho operativo.',
             ]);
+        }
+
+        if ($hasAssignedCrew) {
+            $assignedCrew = Usuario::query()
+                ->with(['roles', 'profile'])
+                ->findOrFail((int) $data['sobrecargo_user_id']);
+
+            if (! $assignedCrew->hasRole(Usuario::ROLE_SOBRECARGO) && $assignedCrew->operational_role !== Usuario::ROLE_SOBRECARGO) {
+                throw ValidationException::withMessages([
+                    'sobrecargo_user_id' => 'El usuario seleccionado no corresponde a un sobrecargo.',
+                ]);
+            }
+
+            $normalizedCrewStatus = Str::lower(trim((string) ($assignedCrew->status ?? '')));
+
+            if (in_array($normalizedCrewStatus, ['blocked', 'bloqueado', 'suspended', 'suspendido', 'inactive', 'inactivo'], true)) {
+                throw ValidationException::withMessages([
+                    'sobrecargo_user_id' => 'La sobrecargo seleccionada no se encuentra activa para recibir asignaciones.',
+                ]);
+            }
+
+            $taxData = $this->normalizeJoinedProfileTaxData($assignedCrew->profile?->tax_data ?? $assignedCrew->profile_tax_data ?? null);
+            $validationState = Str::lower(trim((string) ($taxData['validation_status'] ?? $taxData['profile_state'] ?? '')));
+            $currentProfileState = Str::lower(trim((string) ($taxData['current_status'] ?? '')));
+
+            if ($validationState !== '' && ! in_array($validationState, ['approved', 'aprobado', 'active', 'activo'], true)) {
+                throw ValidationException::withMessages([
+                    'sobrecargo_user_id' => 'La sobrecargo seleccionada no tiene validacion administrativa aprobada.',
+                ]);
+            }
+
+            if ($currentProfileState !== '' && in_array($currentProfileState, ['blocked', 'bloqueado', 'suspended', 'suspendido', 'inactive', 'inactivo'], true)) {
+                throw ValidationException::withMessages([
+                    'sobrecargo_user_id' => 'La sobrecargo seleccionada tiene el perfil bloqueado para operar.',
+                ]);
+            }
+
+            [$requestedStart, $requestedEnd] = $this->aircraftAvailabilityService->resolveWindowFromPayload([
+                'departure_datetime' => $flightRequest->departure_datetime,
+                'return_datetime' => $flightRequest->return_datetime,
+                'legs' => $flightRequest->legs()->get(['departure_datetime', 'arrival_datetime'])->map(
+                    fn ($leg) => [
+                        'departure_datetime' => $leg->departure_datetime,
+                        'arrival_datetime' => $leg->arrival_datetime,
+                    ]
+                )->values()->all(),
+            ]);
+
+            $hasCrewConflict = $this->reservationLifecycleService->crewHasConflict(
+                (int) $assignedCrew->id,
+                $requestedStart,
+                $requestedEnd,
+                $existingOperation?->id,
+            );
+
+            if ($hasCrewConflict) {
+                throw ValidationException::withMessages([
+                    'sobrecargo_user_id' => 'La sobrecargo seleccionada ya tiene una operacion activa en el mismo horario.',
+                ]);
+            }
+
+            $hasBlockedAvailability = SobrecargoDisponibilidad::query()
+                ->where('sobrecargo_id', $assignedCrew->id)
+                ->whereDate('fecha', '<=', $requestedEnd->toDateString())
+                ->whereDate('fecha', '>=', $requestedStart->toDateString())
+                ->whereHas('estatus', fn ($query) => $query->where('permite_asignacion', false))
+                ->exists();
+
+            if ($hasBlockedAvailability) {
+                throw ValidationException::withMessages([
+                    'sobrecargo_user_id' => 'La sobrecargo seleccionada tiene un bloqueo de disponibilidad en el rango solicitado.',
+                ]);
+            }
         }
 
         $nextWorkflowStatus = $hasAssignedCrew
@@ -2040,6 +2183,9 @@ class AdminControlador extends ControladorBase
                 'crew_status' => $hasAssignedCrew ? 'pending_crew_response' : null,
                 'crew_confirmed_at' => null,
                 'crew_decline_reason' => null,
+                'crew_notes' => $hasAssignedCrew
+                    ? ($crewNote !== '' ? $crewNote : $existingOperation?->crew_notes)
+                    : null,
             ]
         );
 
@@ -2054,6 +2200,7 @@ class AdminControlador extends ControladorBase
 
         $aircraft = Aeronave::find($data['aircraft_id']);
         $visibilityPayload = $flightRequest->visibility_payload ?? [];
+        $existingBriefing = is_array($visibilityPayload['briefing'] ?? null) ? $visibilityPayload['briefing'] : [];
         $reservation = Reserva::query()
             ->where('flight_request_id', $flightRequest->id)
             ->latest('id')
@@ -2093,6 +2240,21 @@ class AdminControlador extends ControladorBase
                 'aircraft_capacity' => $aircraft?->capacity,
                 'operational_status' => $nextWorkflowStatus,
                 'operational_ready' => (bool) ($visibilityPayload['operational_ready'] ?? false),
+                'presentation_time' => $presentationTime !== '' ? $presentationTime : ($visibilityPayload['presentation_time'] ?? null),
+                'presentation_place' => $presentationPlace !== '' ? $presentationPlace : ($visibilityPayload['presentation_place'] ?? $visibilityPayload['presentation_location'] ?? null),
+                'presentation_location' => $presentationPlace !== '' ? $presentationPlace : ($visibilityPayload['presentation_location'] ?? $visibilityPayload['presentation_place'] ?? null),
+                'crew_notes' => $hasAssignedCrew
+                    ? ($crewNote !== '' ? $crewNote : ($visibilityPayload['crew_notes'] ?? $existingOperation?->crew_notes))
+                    : null,
+                'briefing' => [
+                    ...$existingBriefing,
+                    'origen' => $flightRequest->origin,
+                    'destino' => $flightRequest->destination,
+                    'salida' => $flightRequest->departure_datetime,
+                    'pasajeros_autorizados' => $flightRequest->passengers,
+                    'hora_presentacion' => $presentationTime !== '' ? $presentationTime : ($existingBriefing['hora_presentacion'] ?? null),
+                    'lugar_presentacion' => $presentationPlace !== '' ? $presentationPlace : ($existingBriefing['lugar_presentacion'] ?? null),
+                ],
             ],
         ]);
 
@@ -2653,70 +2815,18 @@ class AdminControlador extends ControladorBase
             'admin_user_id' => optional($request->user())->id,
         ]);
 
+        $profiler = $this->adminAircraftFleetProfiler();
+        $selectedColumns = $this->resolveAircraftFleetColumns();
+
         $query = Aeronave::query()
-            ->select([
-                'id',
-                'provider_id',
-                'model',
-                'manufacturer',
-                'category',
-                'model_year',
-                'registration',
-                'capacity',
-                'base_airport',
-                'base_airport_id',
-                'range_km',
-                'speed_kmh',
-                'coverage',
-                'amenities',
-                'hourly_rate',
-                'airport_expenses_usd',
-                'minimum_hours',
-                'minimum_route_price',
-                'climb_descent_minutes',
-                'operational_cost',
-                'fuel_burn_gph',
-                'engine_reserve_rate',
-                'insurance_rate',
-                'maintenance_rate',
-                'crew_rate',
-                'repositioning_fee',
-                'overnight_fee',
-                'currency',
-                'status',
-                'is_active',
-                'operational_status',
-                'validation_status',
-                'activated_at',
-                'approved_at',
-                'billing_status',
-                'billing_plan_id',
-                'subscription_status',
-                'subscription_started_at',
-                'subscription_ends_at',
-                'last_payment_at',
-                'security_filter',
-                'security_score',
-                'airworthiness_status',
-                'last_maintenance_at',
-                'engine_run_at',
-                'captain_training_at',
-                'lodging_location',
-                'client_fbo',
-                'dispatch_center',
-                'dispatch_notes',
-                'security_notes',
-                'created_at',
-                'updated_at',
-            ])
+            ->select($selectedColumns)
+            ->withCount('documents')
+            ->withExists(['availability as availability_configured'])
             ->with([
-            'provider:id,user_id,company_name,commercial_name,approval_status,admin_validation_status,status,access_enabled',
-            'provider.user:id,name',
-            'provider.user.profile:id,user_id,company_name',
-            'baseAirport:id,icao,iata',
-            'documents',
-            'images',
-            'suscripcionesAeronave' => fn ($q) => $q->where('status', 'active')->with('plan')->latest('id'),
+                'provider:id,user_id,company_name,commercial_name,approval_status,admin_validation_status,status,access_enabled',
+                'baseAirport:id,icao,iata',
+                'documents:id,aircraft_id,provider_id,document_type,type,document_name,document_url,file_url,storage_path,expires_at,status,verified_by_admin,created_at,updated_at',
+                'images:id,aircraft_id,kind,title,image_url,sort_order,is_main,visible_to_client',
             ])
             ->when($providerId > 0, fn ($builder) => $builder->where('provider_id', $providerId))
             ->latest();
@@ -2725,32 +2835,61 @@ class AdminControlador extends ControladorBase
             'provider_id' => $providerId ?: null,
         ]);
 
-        $aircraft = $query->paginate($perPage);
+        $queryStartedAt = microtime(true);
+        $aircraft = $query->simplePaginate($perPage);
+        $profiler?->recordPhaseDuration('query_and_eager_loading_ms', (microtime(true) - $queryStartedAt) * 1000);
 
         Log::info('admin.aircraft_fleet.query_done', [
             'provider_id' => $providerId ?: null,
             'rows' => $aircraft->count(),
-            'total' => $aircraft->total(),
+            'total' => method_exists($aircraft, 'total') ? $aircraft->total() : null,
             'elapsed_ms' => round((microtime(true) - $startedAt) * 1000, 2),
         ]);
 
+        $transformStartedAt = microtime(true);
         $aircraft->setCollection(
-            $aircraft->getCollection()->map(function (Aeronave $item) {
+            $aircraft->getCollection()->map(function (Aeronave $item) use ($profiler) {
+                $itemStartedAt = microtime(true);
                 $provider = $item->provider;
+                $evaluateStartedAt = microtime(true);
                 $state = $this->aircraftStateService->evaluate($item);
+                $profiler?->recordPhaseDuration('evaluate_total_ms', (microtime(true) - $evaluateStartedAt) * 1000);
                 $providerDisplayName =
                     $provider?->commercial_name ?:
-                    $provider?->user?->profile?->company_name ?:
-                    $provider?->company_name ?:
-                    $provider?->user?->name;
+                    $provider?->company_name;
 
-                return [
+                $payload = [
                     ...$item->attributesToArray(),
                     'documents' => $this->deduplicateAircraftDocuments($item->documents)
-                        ->map(fn ($document) => $document->attributesToArray())
-                        ->values(),
-                    'images' => $item->images->map(fn ($image) => $image->attributesToArray())->values(),
-                    'suscripcionesAeronave' => $item->suscripcionesAeronave
+                        ->map(fn ($document) => [
+                            'id' => $document->id,
+                            'aircraft_id' => $document->aircraft_id,
+                            'provider_id' => $document->provider_id,
+                            'document_type' => $document->document_type,
+                            'type' => $document->type,
+                            'document_name' => $document->document_name,
+                            'document_url' => $document->document_url,
+                            'file_url' => $document->file_url,
+                            'storage_path' => $document->storage_path,
+                            'expires_at' => optional($document->expires_at)->toIso8601String(),
+                            'status' => $document->status,
+                            'verified_by_admin' => $document->verified_by_admin,
+                            'created_at' => optional($document->created_at)->toIso8601String(),
+                            'updated_at' => optional($document->updated_at)->toIso8601String(),
+                        ])
+                        ->values()
+                        ->all(),
+                    'images' => $item->images->map(fn ($image) => [
+                        'id' => $image->id,
+                        'aircraft_id' => $image->aircraft_id,
+                        'kind' => $image->kind,
+                        'title' => $image->title,
+                        'image_url' => $image->image_url,
+                        'sort_order' => $image->sort_order,
+                        'is_main' => $image->is_main,
+                        'visible_to_client' => $image->visible_to_client,
+                    ])->values()->all(),
+                    'suscripcionesAeronave' => ($item->relationLoaded('suscripcionesAeronave') ? $item->suscripcionesAeronave : collect())
                         ->map(function ($subscription) {
                             return [
                                 ...$subscription->attributesToArray(),
@@ -2776,8 +2915,13 @@ class AdminControlador extends ControladorBase
                     'ready_to_quote' => $state['ready_to_quote'] ?? false,
                     'ready_to_book' => $state['ready_to_book'] ?? false,
                 ];
+
+                $profiler?->recordAircraftTransform((int) $item->id, (microtime(true) - $itemStartedAt) * 1000);
+
+                return $payload;
             })
         );
+        $profiler?->recordPhaseDuration('response_transform_ms', (microtime(true) - $transformStartedAt) * 1000);
 
         Log::info('admin.aircraft_fleet.response_ready', [
             'provider_id' => $providerId ?: null,
@@ -2785,9 +2929,13 @@ class AdminControlador extends ControladorBase
             'elapsed_ms' => round((microtime(true) - $startedAt) * 1000, 2),
         ]);
 
-        return $this->ok([
+        $response = $this->ok([
             'aircraft' => $aircraft,
         ]);
+
+        $profiler?->capturePayloadFromResponse($response, $aircraft->items());
+
+        return $response;
     }
 
     public function aircraftSubscriptionsPerFleet(Request $request)
@@ -2828,6 +2976,39 @@ class AdminControlador extends ControladorBase
         return $this->ok([
             'aircraft_subscriptions' => $subscriptions,
         ]);
+    }
+
+    private function resolveAircraftFleetColumns(): array
+    {
+        static $resolvedColumns = null;
+
+        if (is_array($resolvedColumns)) {
+            return $resolvedColumns;
+        }
+
+        $cacheKey = sprintf(
+            'admin:aircraft_fleet_columns:%s:%s',
+            config('database.default'),
+            (string) config('database.connections.'.config('database.default').'.database', 'default'),
+        );
+
+        $resolvedColumns = Cache::remember($cacheKey, now()->addHours(12), function () {
+            $availableColumns = array_flip(Schema::getColumnListing('aircraft'));
+
+            return array_values(array_filter(
+                self::AIRCRAFT_FLEET_SELECT_COLUMNS,
+                fn (string $column) => isset($availableColumns[$column]),
+            ));
+        });
+
+        return $resolvedColumns;
+    }
+
+    private function adminAircraftFleetProfiler(): ?AdminAircraftFleetProfiler
+    {
+        return app()->bound(AdminAircraftFleetProfiler::class)
+            ? app(AdminAircraftFleetProfiler::class)
+            : null;
     }
 
     public function kpis()

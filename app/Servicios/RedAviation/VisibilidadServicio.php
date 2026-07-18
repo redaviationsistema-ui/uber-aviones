@@ -265,6 +265,7 @@ class VisibilidadServicio
     {
         $preferredMatch = $this->matchPreferidoParaOperador($solicitud);
         $visibilityPayload = $solicitud->visibility_payload ?? [];
+        $briefingPayload = is_array($visibilityPayload['briefing'] ?? null) ? $visibilityPayload['briefing'] : [];
         $assignedAircraft = $this->resolveAssignedAircraft($solicitud);
         $reservation = $this->resolveReservation($solicitud);
         $operation = $this->resolveLatestOperation($solicitud, preferCollection: false);
@@ -317,6 +318,17 @@ class VisibilidadServicio
             'visibility_payload' => $visibilityPayload,
             'provider_operational_release' => $visibilityPayload['provider_operational_release'] ?? null,
             'operational_status' => $visibilityPayload['operational_status'] ?? null,
+            'presentation_time' => $visibilityPayload['presentation_time'] ?? $briefingPayload['hora_presentacion'] ?? null,
+            'presentation_place' => $visibilityPayload['presentation_place'] ?? $visibilityPayload['presentation_location'] ?? $briefingPayload['lugar_presentacion'] ?? null,
+            'presentation_location' => $visibilityPayload['presentation_location'] ?? $visibilityPayload['presentation_place'] ?? $briefingPayload['lugar_presentacion'] ?? null,
+            'briefing' => [
+                'origen' => $briefingPayload['origen'] ?? $solicitud->origin,
+                'destino' => $briefingPayload['destino'] ?? $solicitud->destination,
+                'salida' => $briefingPayload['salida'] ?? $solicitud->departure_datetime,
+                'pasajeros_autorizados' => $briefingPayload['pasajeros_autorizados'] ?? $solicitud->passengers,
+                'hora_presentacion' => $briefingPayload['hora_presentacion'] ?? $visibilityPayload['presentation_time'] ?? null,
+                'lugar_presentacion' => $briefingPayload['lugar_presentacion'] ?? $visibilityPayload['presentation_place'] ?? $visibilityPayload['presentation_location'] ?? null,
+            ],
             'aircraft_confirmed' => (bool) ($visibilityPayload['aircraft_confirmed'] ?? false),
             'crew_confirmed' => (bool) ($visibilityPayload['crew_confirmed'] ?? false),
             'operational_ready' => (bool) ($visibilityPayload['operational_ready'] ?? false),
@@ -347,6 +359,7 @@ class VisibilidadServicio
                 'status' => $operation->status,
                 'sobrecargo_user_id' => $operation->sobrecargo_user_id,
                 'crew_status' => $operation->crew_status,
+                'crew_notes' => $operation->crew_notes,
                 'sobrecargo' => $operation->sobrecargo ? [
                     'id' => $operation->sobrecargo->id,
                     'name' => $operation->sobrecargo->name,

@@ -4,6 +4,7 @@ namespace App\Servicios\Aeronaves;
 
 use App\Modelos\Aeronave;
 use App\Modelos\DocumentoAeronave;
+use App\Servicios\Administracion\AdminAircraftFleetProfiler;
 use App\Servicios\Billing\ProviderAircraftSubscriptionService;
 use Carbon\Carbon;
 use Illuminate\Support\Collection;
@@ -79,9 +80,11 @@ class AircraftStateService
 
     public function evaluate(Aeronave|int $aircraft, ?array $billingSnapshot = null): array
     {
+        $profiler = $this->adminAircraftFleetProfiler();
+        $evaluationStartedAt = microtime(true);
         $resolvedAircraft = $aircraft instanceof Aeronave
-            ? $aircraft->loadMissing(['provider', 'documents', 'images', 'availability', 'baseAirport'])
-            : Aeronave::query()->with(['provider', 'documents', 'images', 'availability', 'baseAirport'])->findOrFail($aircraft);
+            ? $aircraft->loadMissing(['provider', 'documents', 'baseAirport'])
+            : Aeronave::query()->with(['provider', 'documents', 'baseAirport'])->findOrFail($aircraft);
 
         $cacheKey = $this->evaluationCacheKey($resolvedAircraft, $billingSnapshot);
 
@@ -89,20 +92,41 @@ class AircraftStateService
             return $this->evaluationCache[$cacheKey];
         }
 
+        $segments = [];
+        $documentsStartedAt = microtime(true);
         $documents = $this->deduplicateAircraftDocuments($resolvedAircraft->documents ?? collect());
-        $billing = $billingSnapshot ?? $this->providerAircraftSubscriptionService->buildAircraftBillingSnapshot(
-            $resolvedAircraft->loadMissing(['provider', 'documents'])
-        );
+        $segments['deduplicate_documents_ms'] = (microtime(true) - $documentsStartedAt) * 1000;
+
+        $billingStartedAt = microtime(true);
+        $billing = $billingSnapshot ?? $this->providerAircraftSubscriptionService->buildAircraftBillingSnapshot($resolvedAircraft);
+        $segments['billing_snapshot_ms'] = (microtime(true) - $billingStartedAt) * 1000;
+
+        $documentsStateStartedAt = microtime(true);
         $documentsState = $this->buildDocumentsState($resolvedAircraft, $documents);
+        $segments['documents_state_ms'] = (microtime(true) - $documentsStateStartedAt) * 1000;
+
+        $operationStartedAt = microtime(true);
         $operationState = $this->buildOperationState($resolvedAircraft);
+        $segments['operation_state_ms'] = (microtime(true) - $operationStartedAt) * 1000;
+
+        $pricingStartedAt = microtime(true);
         $pricingState = $this->buildPricingState($resolvedAircraft);
+        $segments['pricing_state_ms'] = (microtime(true) - $pricingStartedAt) * 1000;
+
+        $reviewStartedAt = microtime(true);
         $reviewState = $this->buildReviewState($resolvedAircraft, $documentsState);
+        $segments['review_state_ms'] = (microtime(true) - $reviewStartedAt) * 1000;
+
+        $activationStartedAt = microtime(true);
         $activationState = $this->buildActivationState($resolvedAircraft, $billing, $reviewState, $documentsState, $operationState, $pricingState);
+        $segments['activation_state_ms'] = (microtime(true) - $activationStartedAt) * 1000;
         $readyToQuote = (bool) ($activationState['requirements_complete'] ?? false) && ($activationState['is_active'] ?? false);
         $readyToBook = $readyToQuote;
+        $paymentStartedAt = microtime(true);
         $paymentState = $this->buildPaymentState($billing);
+        $segments['payment_state_ms'] = (microtime(true) - $paymentStartedAt) * 1000;
 
-        return $this->evaluationCache[$cacheKey] = [
+        $result = [
             'review' => $reviewState,
             'documents' => $documentsState,
             'payment' => $paymentState,
@@ -118,6 +142,14 @@ class AircraftStateService
             'ready_to_quote' => $readyToQuote,
             'ready_to_book' => $readyToBook,
         ];
+
+        $profiler?->recordAircraftEvaluation(
+            (int) $resolvedAircraft->getKey(),
+            (microtime(true) - $evaluationStartedAt) * 1000,
+            $segments,
+        );
+
+        return $this->evaluationCache[$cacheKey] = $result;
     }
 
     public function evaluateAndSyncAircraftState(Aeronave|int $aircraft, ?array $billingSnapshot = null): array
@@ -130,13 +162,13 @@ class AircraftStateService
 
         return DB::transaction(function () use ($aircraftId, $billingSnapshot) {
             $aircraft = Aeronave::query()
-                ->with(['provider', 'documents', 'images', 'availability', 'baseAirport'])
+                ->with(['provider', 'documents', 'baseAirport'])
                 ->lockForUpdate()
                 ->findOrFail($aircraftId);
 
             $this->providerAircraftSubscriptionService->syncAircraftStateIfExpired($aircraft);
             $aircraft->refresh();
-            $aircraft->load(['provider', 'documents', 'images', 'availability', 'baseAirport']);
+            $aircraft->load(['provider', 'documents', 'baseAirport']);
 
             $this->forgetEvaluationCacheForAircraft($aircraftId);
             return $this->evaluate($aircraft, $billingSnapshot);
@@ -462,5 +494,12 @@ class AircraftStateService
             ->replaceMatches('/[\s-]+/', '_')
             ->replaceMatches('/_+/', '_')
             ->value();
+    }
+
+    private function adminAircraftFleetProfiler(): ?AdminAircraftFleetProfiler
+    {
+        return app()->bound(AdminAircraftFleetProfiler::class)
+            ? app(AdminAircraftFleetProfiler::class)
+            : null;
     }
 }

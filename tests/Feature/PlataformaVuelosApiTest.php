@@ -676,6 +676,79 @@ class PlataformaVuelosApiTest extends TestCase
         $this->assertFalse((bool) data_get($matchedRequest, 'operational_ready'));
     }
 
+    public function test_admin_assign_persists_briefing_location_and_note_for_crew_assignment(): void
+    {
+        $this->seed();
+
+        $adminToken = $this->postJson('/api/v1/auth/login', [
+            'email' => 'admin@privateflights.test',
+            'password' => 'password',
+        ])->assertOk()->json('token');
+
+        $sobrecargo = Usuario::query()->where('email', 'sobrecargo@redaviation.test')->firstOrFail();
+        $provider = Proveedor::query()->firstOrFail();
+        $aircraft = Aeronave::query()->where('provider_id', $provider->id)->firstOrFail();
+        $client = Usuario::query()->where('email', 'cliente@privateflights.test')->firstOrFail();
+
+        $flightRequest = SolicitudVuelo::query()->create([
+            'client_id' => $client->id,
+            'assigned_provider_id' => $provider->id,
+            'assigned_aircraft_id' => $aircraft->id,
+            'assigned_aircraft_model' => $aircraft->model,
+            'origin' => 'MMTO',
+            'destination' => 'MMMX',
+            'departure_datetime' => now()->addDay(),
+            'passengers' => 2,
+            'trip_type' => 'one_way',
+            'status' => 'confirmada',
+            'workflow_status' => 'flight_confirmed',
+            'visibility_payload' => [
+                'operational_status' => 'flight_confirmed',
+                'operational_ready' => false,
+            ],
+        ]);
+
+        $this->withToken($adminToken)
+            ->postJson("/api/v1/admin/requests/{$flightRequest->id}/assign", [
+                'provider_id' => $provider->id,
+                'aircraft_id' => $aircraft->id,
+                'sobrecargo_user_id' => $sobrecargo->id,
+                'presentation_time' => '08:30',
+                'presentation_place' => 'FBO · Toluca',
+                'note' => 'Briefing VIP confirmado.',
+            ])
+            ->assertOk();
+
+        $flightRequest->refresh();
+
+        $this->assertSame('08:30', data_get($flightRequest->visibility_payload, 'presentation_time'));
+        $this->assertSame('FBO · Toluca', data_get($flightRequest->visibility_payload, 'presentation_place'));
+        $this->assertSame('FBO · Toluca', data_get($flightRequest->visibility_payload, 'presentation_location'));
+        $this->assertSame('08:30', data_get($flightRequest->visibility_payload, 'briefing.hora_presentacion'));
+        $this->assertSame('FBO · Toluca', data_get($flightRequest->visibility_payload, 'briefing.lugar_presentacion'));
+        $this->assertSame('Briefing VIP confirmado.', data_get($flightRequest->visibility_payload, 'crew_notes'));
+
+        $this->assertDatabaseHas('operations', [
+            'flight_request_id' => $flightRequest->id,
+            'sobrecargo_user_id' => $sobrecargo->id,
+            'crew_notes' => 'Briefing VIP confirmado.',
+        ]);
+
+        $requestPayload = $this->withToken($adminToken)
+            ->getJson('/api/v1/admin/requests')
+            ->assertOk()
+            ->json('requests');
+
+        $matchedRequest = collect($requestPayload)->firstWhere('id', $flightRequest->id);
+
+        $this->assertNotNull($matchedRequest);
+        $this->assertSame('08:30', data_get($matchedRequest, 'presentation_time'));
+        $this->assertSame('FBO · Toluca', data_get($matchedRequest, 'presentation_place'));
+        $this->assertSame('08:30', data_get($matchedRequest, 'briefing.hora_presentacion'));
+        $this->assertSame('FBO · Toluca', data_get($matchedRequest, 'briefing.lugar_presentacion'));
+        $this->assertSame('Briefing VIP confirmado.', data_get($matchedRequest, 'operation.crew_notes'));
+    }
+
     public function test_admin_assign_with_crew_rejects_requests_before_flight_confirmed(): void
     {
         $this->seed();
@@ -722,6 +795,92 @@ class PlataformaVuelosApiTest extends TestCase
             'sobrecargo_user_id' => $sobrecargo->id,
             'status' => 'tracking_live',
         ]);
+    }
+
+    public function test_admin_reassign_updates_existing_operation_without_creating_duplicates(): void
+    {
+        $this->seed();
+
+        $adminToken = $this->postJson('/api/v1/auth/login', [
+            'email' => 'admin@privateflights.test',
+            'password' => 'password',
+        ])->assertOk()->json('token');
+
+        $firstCrew = Usuario::query()->where('email', 'sobrecargo@redaviation.test')->firstOrFail();
+        $secondCrew = Usuario::factory()->create([
+            'name' => 'Sobrecargo Reasignada',
+            'email' => 'sobrecargo.reasignada@test.com',
+            'role' => Usuario::ROLE_SOBRECARGO,
+            'operational_role' => Usuario::ROLE_SOBRECARGO,
+            'status' => 'active',
+        ]);
+        $secondCrew->profile()->create([
+            'user_id' => $secondCrew->id,
+            'base_airport' => 'MMTO',
+            'tax_data' => [
+                'profile_state' => 'approved',
+                'validation_status' => 'approved',
+                'current_status' => 'active',
+            ],
+        ]);
+        $provider = Proveedor::query()->firstOrFail();
+        $aircraft = Aeronave::query()->where('provider_id', $provider->id)->firstOrFail();
+        $client = Usuario::query()->where('email', 'cliente@privateflights.test')->firstOrFail();
+
+        $flightRequest = SolicitudVuelo::query()->create([
+            'client_id' => $client->id,
+            'assigned_provider_id' => $provider->id,
+            'assigned_aircraft_id' => $aircraft->id,
+            'assigned_aircraft_model' => $aircraft->model,
+            'origin' => 'MMTO',
+            'destination' => 'MMMX',
+            'departure_datetime' => now()->addDay(),
+            'passengers' => 2,
+            'trip_type' => 'one_way',
+            'status' => 'confirmada',
+            'workflow_status' => 'flight_confirmed',
+            'visibility_payload' => [
+                'operational_status' => 'flight_confirmed',
+                'operational_ready' => false,
+            ],
+        ]);
+
+        $this->withToken($adminToken)
+            ->postJson("/api/v1/admin/requests/{$flightRequest->id}/assign", [
+                'provider_id' => $provider->id,
+                'aircraft_id' => $aircraft->id,
+                'sobrecargo_user_id' => $firstCrew->id,
+                'presentation_time' => '08:30',
+                'presentation_place' => 'FBO · Toluca',
+                'note' => 'Primer briefing.',
+            ])
+            ->assertOk();
+
+        $this->withToken($adminToken)
+            ->postJson("/api/v1/admin/requests/{$flightRequest->id}/assign", [
+                'provider_id' => $provider->id,
+                'aircraft_id' => $aircraft->id,
+                'sobrecargo_user_id' => $secondCrew->id,
+                'presentation_time' => '09:00',
+                'presentation_place' => 'Hangar · Toluca',
+                'note' => 'Reasignacion confirmada.',
+            ])
+            ->assertOk();
+
+        $this->assertSame(1, Operacion::query()->where('flight_request_id', $flightRequest->id)->count());
+
+        $this->assertDatabaseHas('operations', [
+            'flight_request_id' => $flightRequest->id,
+            'sobrecargo_user_id' => $secondCrew->id,
+            'crew_notes' => 'Reasignacion confirmada.',
+            'status' => 'tracking_live',
+        ]);
+
+        $flightRequest->refresh();
+
+        $this->assertSame('09:00', data_get($flightRequest->visibility_payload, 'presentation_time'));
+        $this->assertSame('Hangar · Toluca', data_get($flightRequest->visibility_payload, 'presentation_place'));
+        $this->assertSame('Reasignacion confirmada.', data_get($flightRequest->visibility_payload, 'crew_notes'));
     }
 
     public function test_admin_workflow_endpoint_promotes_to_tracking_live_when_operation_already_has_crew(): void
