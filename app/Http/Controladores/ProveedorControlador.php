@@ -1750,14 +1750,11 @@ class ProveedorControlador extends ControladorBase
 
     private function resolveProviderAccessEnabled(Proveedor $provider, ?string $adminValidationStatus = null): bool
     {
-        if ($provider->access_enabled !== null) {
-            return (bool) $provider->access_enabled;
-        }
-
         $approvalStatus = strtolower(trim((string) $provider->approval_status));
         $resolvedAdminStatus = $adminValidationStatus ?: $this->resolveAdminValidationStatus($provider);
 
-        return $approvalStatus === 'approved' && $resolvedAdminStatus === 'approved';
+        return $resolvedAdminStatus === 'approved'
+            || ($approvalStatus === 'approved' && in_array($resolvedAdminStatus, ['draft', 'pending_validation'], true));
     }
 
     private function resolveSatValidationStatus(Proveedor $provider, array $taxData = []): string

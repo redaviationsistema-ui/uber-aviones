@@ -164,10 +164,6 @@ class Proveedor extends Model
             return false;
         }
 
-        if ($this->access_enabled !== null) {
-            return $this->isAdministrativelyApproved() && (bool) $this->access_enabled;
-        }
-
         return $this->isAdministrativelyApproved();
     }
 

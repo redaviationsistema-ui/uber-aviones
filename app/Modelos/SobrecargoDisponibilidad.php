@@ -22,6 +22,11 @@ class SobrecargoDisponibilidad extends Model
         'created_by',
         'updated_by',
         'bitacora',
+        'hora_inicio',
+        'hora_fin',
+        'tipo',
+        'base',
+        'inmediata',
     ];
 
     protected function casts(): array
@@ -30,6 +35,7 @@ class SobrecargoDisponibilidad extends Model
             'fecha' => 'date',
             'aprobado_at' => 'datetime',
             'bitacora' => 'array',
+            'inmediata' => 'boolean',
         ];
     }
 

@@ -1362,7 +1362,7 @@ class PlataformaVuelosApiTest extends TestCase
         $this->assertDatabaseHas('operations', [
             'id' => $operation->id,
             'status' => 'incidencia',
-            'crew_status' => 'crew_incident_reported',
+            'crew_status' => 'crew_confirmed',
         ]);
     }
 

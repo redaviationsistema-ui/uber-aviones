@@ -5,21 +5,29 @@ namespace App\Http\Controladores;
 use App\Modelos\LineaTiempoOperacion;
 use App\Modelos\Operacion;
 use App\Modelos\Usuario;
+use App\Servicios\Sobrecargo\CrewOperationalNotificationService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\Rules\File;
 
 class CrewOperationIncidentController extends ControladorBase
 {
+    public function __construct(private readonly CrewOperationalNotificationService $crewNotifications) {}
+
     private const STATUSES = ['open', 'in_review', 'resolved', 'closed'];
+
     private const CATEGORIES = ['catering', 'cabina', 'cliente', 'seguridad', 'horario', 'coordinacion', 'otro'];
+
     private const PRIORITIES = ['baja', 'media', 'alta', 'critica'];
+
     private const PHASES = ['Pre-vuelo', 'En vuelo', 'Post-vuelo'];
 
     public function index(Request $request)
     {
         $user = $request->user();
+        abort_unless($user?->hasRole(Usuario::ROLE_SOBRECARGO) || $user?->hasRole(Usuario::ROLE_ADMIN), 403);
         $query = DB::table('crew_operation_incidents')
             ->when($request->filled('crew_operation_id'), fn ($builder) => $builder->where('crew_operation_id', $request->integer('crew_operation_id')))
             ->when($request->filled('crew_id'), fn ($builder) => $builder->where('crew_id', $request->integer('crew_id')))
@@ -45,10 +53,11 @@ class CrewOperationIncidentController extends ControladorBase
             'phase' => ['nullable', Rule::in(self::PHASES)],
             'description' => ['required', 'string'],
             'files' => ['nullable', 'array'],
-            'files.*' => ['file', 'max:10240'],
+            'files.*' => [File::types(['jpg', 'jpeg', 'png', 'webp', 'pdf'])->max(10 * 1024)],
         ]);
 
         $user = $request->user();
+        abort_unless($user?->hasRole(Usuario::ROLE_SOBRECARGO) || $user?->hasRole(Usuario::ROLE_ADMIN), 403);
         if ($user && $user->hasRole(Usuario::ROLE_SOBRECARGO)) {
             abort_if((int) $data['crew_id'] !== (int) $user->id, 403);
         }
@@ -114,6 +123,19 @@ class CrewOperationIncidentController extends ControladorBase
 
         $incident = DB::table('crew_operation_incidents')->where('id', $incidentId)->first();
 
+        if (in_array($data['priority'], ['alta', 'critica'], true)) {
+            $type = $data['priority'] === 'critica' ? 'critical_incident_created' : 'high_incident_created';
+            $level = $data['priority'] === 'critica' ? 'critical' : 'warning';
+            DB::afterCommit(function () use ($operation, $incidentId, $type, $level, $data) {
+                Usuario::query()->where(fn ($query) => $query->where('role', Usuario::ROLE_ADMIN)->orWhere('operational_role', Usuario::ROLE_ADMIN))
+                    ->each(fn (Usuario $admin) => $this->crewNotifications->send(
+                        $admin, $operation, $type,
+                        $data['priority'] === 'critica' ? 'Incidencia critica' : 'Incidencia de prioridad alta',
+                        $data['description'], $level, null, ['idempotency_context' => 'incident_'.$incidentId, 'incident_id' => $incidentId],
+                    ));
+            });
+        }
+
         return $this->ok(['incident' => $this->withFiles($incident)], 201);
     }
 
@@ -123,6 +145,7 @@ class CrewOperationIncidentController extends ControladorBase
         abort_if(! $incident, 404);
 
         $user = $request->user();
+        abort_unless($user?->hasRole(Usuario::ROLE_SOBRECARGO) || $user?->hasRole(Usuario::ROLE_ADMIN), 403);
         if ($user && $user->hasRole(Usuario::ROLE_SOBRECARGO)) {
             abort_if((int) $incident->crew_id !== (int) $user->id, 403);
         }
@@ -401,7 +424,6 @@ class CrewOperationIncidentController extends ControladorBase
             if (! in_array($currentStatus, ['cancelada', 'cancelled', 'finalizada', 'completed'], true)) {
                 $operation->forceFill([
                     'status' => 'incidencia',
-                    'crew_status' => 'crew_incident_reported',
                 ])->save();
             }
 
@@ -413,10 +435,7 @@ class CrewOperationIncidentController extends ControladorBase
         }
 
         $isCompleted = ! empty($operation->crew_service_completed_at) || ! empty($operation->completed_at);
-        $operation->forceFill([
-            'status' => $isCompleted ? 'completed' : 'confirmed',
-            'crew_status' => $isCompleted ? 'crew_completed' : 'crew_confirmed',
-        ])->save();
+        $operation->forceFill(['status' => $isCompleted ? 'completed' : 'confirmed'])->save();
     }
 
     private function incidentFilesLabel(int $incidentId): ?string

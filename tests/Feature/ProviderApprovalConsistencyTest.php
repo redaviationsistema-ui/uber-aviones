@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Modelos\Aeronave;
+use App\Modelos\DocumentoAeronave;
 use App\Modelos\Plan;
 use App\Modelos\Proveedor;
 use App\Modelos\TokenApi;
@@ -220,7 +221,7 @@ class ProviderApprovalConsistencyTest extends TestCase
 
     private function createAircraft(Proveedor $provider, array $attributes = []): Aeronave
     {
-        return Aeronave::query()->create([
+        $aircraft = Aeronave::query()->create([
             'provider_id' => $provider->id,
             'model' => 'Learjet 31A',
             'registration' => 'XA-'.strtoupper(substr(md5((string) microtime(true)), 0, 3)),
@@ -230,9 +231,26 @@ class ProviderApprovalConsistencyTest extends TestCase
             'range_km' => 2400,
             'speed_kmh' => 710,
             'hourly_rate' => 5000,
+            'minimum_hours' => 1,
             'currency' => 'USD',
             'status' => 'inactive',
             ...$attributes,
         ]);
+
+        foreach (['airworthiness', 'registration', 'insurance', 'maintenance'] as $type) {
+            DocumentoAeronave::query()->create([
+                'aircraft_id' => $aircraft->id,
+                'provider_id' => $provider->id,
+                'type' => $type,
+                'document_type' => $type,
+                'document_name' => $type.'.pdf',
+                'file_url' => 'https://example.test/'.$type.'.pdf',
+                'document_url' => 'https://example.test/'.$type.'.pdf',
+                'status' => 'approved',
+                'verified_by_admin' => true,
+            ]);
+        }
+
+        return $aircraft;
     }
 }

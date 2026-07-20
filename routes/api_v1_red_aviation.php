@@ -2,6 +2,7 @@
 
 use App\Http\Controladores\AeronaveControlador;
 use App\Http\Controladores\CrewOperationIncidentController;
+use App\Http\Controladores\NotificacionControlador;
 use App\Http\Controladores\RedAviation\AdminControlador;
 use App\Http\Controladores\RedAviation\AdminInventoryControlador;
 use App\Http\Controladores\RedAviation\BillingPlanControlador;
@@ -12,7 +13,6 @@ use App\Http\Controladores\RedAviation\OperadorControlador;
 use App\Http\Controladores\RedAviation\ProviderAircraftBillingControlador;
 use App\Http\Controladores\RedAviation\SobrecargoControlador;
 use App\Http\Controladores\RedAviation\SuscripcionControlador;
-use App\Http\Controladores\NotificacionControlador;
 use App\Http\Controladores\ReservaControlador;
 use App\Http\Controladores\StripePagoControlador;
 use Illuminate\Support\Facades\Route;
@@ -103,6 +103,10 @@ Route::middleware(['auth.token'])->group(function () {
         Route::get('/assignments', [SobrecargoControlador::class, 'assignments']);
         Route::post('/assignments/{operation}/respond', [SobrecargoControlador::class, 'respondAssignment']);
         Route::get('/operations/{operation}', [SobrecargoControlador::class, 'operation']);
+        Route::get('/operations/{operation}/workflow', [SobrecargoControlador::class, 'workflow']);
+        Route::post('/operations/{operation}/transition', [SobrecargoControlador::class, 'transitionOperation']);
+        Route::put('/operations/{operation}/checklists/{type}/items/{item}', [SobrecargoControlador::class, 'updateChecklistItem']);
+        Route::post('/operations/{operation}/report', [SobrecargoControlador::class, 'submitFinalReport']);
         Route::post('/operations/{operation}/respond', [SobrecargoControlador::class, 'respondAssignment']);
         Route::post('/operations/{operation}/checkin', [SobrecargoControlador::class, 'checkinOperation']);
         Route::post('/operations/{operation}/cabin-ready', [SobrecargoControlador::class, 'markCabinReady']);
@@ -144,6 +148,7 @@ Route::middleware(['auth.token'])->group(function () {
         Route::get('/operators', [AdminControlador::class, 'operators']);
         Route::get('/sobrecargos', [AdminControlador::class, 'sobrecargos']);
         Route::get('/crew', [AdminControlador::class, 'sobrecargos']);
+        Route::get('/crew/metrics', [AdminControlador::class, 'crewMetrics']);
         Route::put('/sobrecargos/{user}', [AdminControlador::class, 'updateSobrecargo']);
         Route::put('/crew/{user}', [AdminControlador::class, 'updateSobrecargo']);
         Route::get('/sobrecargos/disponibilidad', [AdminControlador::class, 'crewAvailability']);
@@ -155,6 +160,7 @@ Route::middleware(['auth.token'])->group(function () {
         Route::get('/releases', [AdminControlador::class, 'releases']);
         Route::get('/contracts', [AdminControlador::class, 'contracts']);
         Route::post('/requests/{flightRequest}/assign', [AdminControlador::class, 'assign']);
+        Route::post('/operations/{operation}/crew-transition', [AdminControlador::class, 'transitionCrewOperation']);
         Route::put('/requests/{flightRequest}/workflow', [AdminControlador::class, 'updateRequestWorkflow']);
         Route::get('/subscriptions', [AdminControlador::class, 'subscriptions']);
         Route::get('/client-access-payments', [AdminControlador::class, 'clientAccessPayments']);
@@ -206,5 +212,8 @@ Route::middleware(['auth.token'])->group(function () {
     Route::post('/chats/{chat}/messages', [ChatControlador::class, 'storeMessage'])->middleware('anti_broker.filter');
 
     Route::get('/notifications', [NotificacionControlador::class, 'index']);
+    Route::get('/notifications/unread-count', [NotificacionControlador::class, 'unreadCount']);
+    Route::patch('/notifications/read-all', [NotificacionControlador::class, 'markAllAsRead']);
+    Route::patch('/notifications/{notification}/read', [NotificacionControlador::class, 'markAsRead']);
     Route::post('/notifications/{notification}/read', [NotificacionControlador::class, 'markAsRead']);
 });

@@ -702,6 +702,14 @@ class AdministradorControlador extends ControladorBase
     public function activateAeronave(Aeronave $aircraft)
     {
         $requestStartedAt = microtime(true);
+        if (! $aircraft->approved_at) {
+            $approvalPayload = ['approved_at' => now()];
+            if (array_key_exists('validation_status', $aircraft->getAttributes())) {
+                $approvalPayload['validation_status'] = 'approved';
+            }
+            $aircraft->forceFill($approvalPayload)->save();
+            $aircraft->refresh();
+        }
         $validationStartedAt = microtime(true);
         $state = $this->aircraftStateService->evaluateAndSyncAircraftState($aircraft);
         $validationMs = round((microtime(true) - $validationStartedAt) * 1000, 2);
@@ -714,13 +722,15 @@ class AdministradorControlador extends ControladorBase
                 'missing_requirements' => $state['activation']['missing_requirements'] ?? [],
             ]);
 
-            return response()->json([
-                'success' => false,
-                'code' => 'AIRCRAFT_PENDING_REQUIREMENTS',
-                'message' => 'La aeronave no cumple todos los requisitos para activarse.',
+            return $this->ok([
+                'message' => 'Aeronave aprobada; la activacion queda pendiente de requisitos.',
+                'aircraft' => $this->serializeAdminAircraftPayload(
+                    $aircraft->fresh(['provider.user.profile', 'images', 'documents', 'availability']),
+                    $state,
+                ),
                 'missing_requirements' => $this->aircraftActivationRequirementPayload($state),
                 'state' => $state,
-            ], 409);
+            ]);
         }
 
         $databaseStartedAt = microtime(true);
@@ -762,11 +772,10 @@ class AdministradorControlador extends ControladorBase
 
         return $this->ok([
             'message' => 'Aeronave activada correctamente.',
-            'aircraft' => [
-                ...$activatedAircraft->attributesToArray(),
-                'ready_to_quote' => true,
-                'ready_to_book' => true,
-            ],
+            'aircraft' => $this->serializeAdminAircraftPayload(
+                $activatedAircraft->load(['provider.user.profile', 'images', 'documents', 'availability']),
+                $this->aircraftStateService->evaluateAndSyncAircraftState($activatedAircraft),
+            ),
             'timing' => [
                 'validation_and_readiness_ms' => $validationMs,
                 'database_update_ms' => $databaseMs,

@@ -10,7 +10,12 @@ class ChecklistOperacion extends Model
 {
     protected $table = 'checklists';
 
-    protected $fillable = ['operation_id', 'sobrecargo_user_id', 'type', 'status'];
+    protected $fillable = ['operation_id', 'sobrecargo_user_id', 'type', 'status', 'submitted_at'];
+
+    protected function casts(): array
+    {
+        return ['submitted_at' => 'datetime'];
+    }
 
     public function operacion(): BelongsTo
     {

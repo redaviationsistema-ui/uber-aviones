@@ -12,6 +12,10 @@ use App\Consola\Comandos\ExpirarSuscripcionesAeronavesComando;
 use App\Consola\Comandos\ExpirarSuscripcionesComando;
 use App\Consola\Comandos\LiberarPagosProveedorComando;
 use App\Consola\Comandos\PerfilarFlotaAeronavesAdminComando;
+use App\Consola\Comandos\NormalizarDatosLegacySobrecargoComando;
+use App\Consola\Comandos\CrearOperacionSmokeSobrecargoComando;
+use App\Consola\Comandos\EliminarOperacionSmokeSobrecargoComando;
+use App\Consola\Comandos\EnviarRecordatoriosOperativosSobrecargoComando;
 use App\Http\Intermediarios\VerificarAccesoActivo;
 use App\Http\Intermediarios\VerificarDemo;
 use App\Http\Intermediarios\VerificarProveedorAprobado;
@@ -104,6 +108,10 @@ return Application::configure(basePath: dirname(__DIR__))
         ExpirarSuscripcionesComando::class,
         LiberarPagosProveedorComando::class,
         PerfilarFlotaAeronavesAdminComando::class,
+        NormalizarDatosLegacySobrecargoComando::class,
+        CrearOperacionSmokeSobrecargoComando::class,
+        EliminarOperacionSmokeSobrecargoComando::class,
+        EnviarRecordatoriosOperativosSobrecargoComando::class,
     ])
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->append(CorsIntermediario::class);

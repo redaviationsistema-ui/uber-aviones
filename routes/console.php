@@ -16,3 +16,4 @@ Schedule::command('skygroup:expire-aircraft-holds')->everyFiveMinutes()->without
 Schedule::command('skygroup:send-access-renewal-reminders')->dailyAt('09:00');
 Schedule::command('skygroup:expire-quotes')->everyFifteenMinutes();
 Schedule::command('skygroup:release-provider-payments')->dailyAt('02:00');
+Schedule::command('crew:send-operational-reminders')->everyFifteenMinutes()->withoutOverlapping();

@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controladores\AutenticacionControlador;
+use App\Http\Controladores\DispositivoUsuarioControlador;
 use App\Http\Controladores\OcrDocumentoControlador;
 use Illuminate\Support\Facades\Route;
 
@@ -17,6 +18,9 @@ Route::prefix('auth')->group(function () {
         ->name('verification.verify');
 
     Route::middleware('auth.token')->group(function () {
+        Route::post('/devices', [DispositivoUsuarioControlador::class, 'store']);
+        Route::put('/devices/{deviceUuid}', [DispositivoUsuarioControlador::class, 'update']);
+        Route::delete('/devices/{deviceUuid}', [DispositivoUsuarioControlador::class, 'destroy']);
         Route::post('/logout', [AutenticacionControlador::class, 'logout']);
         Route::get('/me', [AutenticacionControlador::class, 'me']);
         Route::get('/redirect-dashboard', [AutenticacionControlador::class, 'redirectDashboard']);

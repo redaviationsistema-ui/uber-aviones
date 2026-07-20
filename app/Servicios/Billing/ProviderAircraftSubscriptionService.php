@@ -579,7 +579,10 @@ class ProviderAircraftSubscriptionService
             && $this->normalizeValue($aircraft->status) === 'active';
 
         $primaryAction = 'activate';
-        $billingStatus = 'unpaid';
+        $persistedBillingStatus = $this->normalizeValue($aircraft->billing_status);
+        $billingStatus = in_array($persistedBillingStatus, ['active', 'pending_payment', 'unpaid'], true)
+            ? $persistedBillingStatus
+            : 'unpaid';
 
         if ($canOperate) {
             $primaryAction = 'none';

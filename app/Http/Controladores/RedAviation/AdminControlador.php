@@ -2,60 +2,67 @@
 
 namespace App\Http\Controladores\RedAviation;
 
+use App\Dominio\Sobrecargo\CrewAssignmentStatus;
 use App\Http\Controladores\ControladorBase;
 use App\Modelos\AccessPayment;
-use App\Modelos\AircraftAvailabilityBlock;
-use App\Modelos\BanderaAntiBroker;
-use App\Modelos\ContratoReserva;
-use App\Modelos\Demo;
-use App\Modelos\Cotizacion;
-use App\Modelos\Operacion;
-use App\Modelos\Proveedor;
-use App\Modelos\Rol;
 use App\Modelos\Aeronave;
-use App\Modelos\Pago;
-use App\Modelos\Reserva;
+use App\Modelos\AircraftAvailabilityBlock;
+use App\Modelos\AsignacionSobrecargo;
+use App\Modelos\BanderaAntiBroker;
 use App\Modelos\CatalogoDisponibilidadEstatus;
+use App\Modelos\ContratoReserva;
+use App\Modelos\Cotizacion;
+use App\Modelos\Demo;
 use App\Modelos\DocumentoAeronave;
-use App\Modelos\SolicitudVuelo;
+use App\Modelos\LineaTiempoOperacion;
+use App\Modelos\Operacion;
+use App\Modelos\Pago;
+use App\Modelos\Proveedor;
+use App\Modelos\Reserva;
+use App\Modelos\Rol;
 use App\Modelos\SobrecargoDisponibilidad;
+use App\Modelos\SolicitudVuelo;
 use App\Modelos\Suscripcion;
 use App\Modelos\SuscripcionAeronave;
 use App\Modelos\Usuario;
-use App\Servicios\Aeronaves\AircraftAvailabilityService;
-use App\Servicios\Aeronaves\AircraftStateService;
-use App\Servicios\Administracion\AdminAuditServicio;
 use App\Servicios\Administracion\AdminAircraftFleetProfiler;
+use App\Servicios\Administracion\AdminAuditServicio;
 use App\Servicios\Administracion\AdminCotizacionesServicio;
 use App\Servicios\Administracion\AdminDashboardServicio;
 use App\Servicios\Administracion\AdminDocumentosServicio;
 use App\Servicios\Administracion\AdminReportesServicio;
 use App\Servicios\Administracion\AdminSettingsServicio;
 use App\Servicios\Administracion\AdminVuelosServicio;
+use App\Servicios\Aeronaves\AircraftAvailabilityService;
+use App\Servicios\Aeronaves\AircraftStateService;
 use App\Servicios\Operaciones\ReservationLifecycleService;
 use App\Servicios\RedAviation\KpiSaasServicio;
 use App\Servicios\RedAviation\VisibilidadServicio;
+use App\Servicios\Sobrecargo\CrewOperationalAuditService;
+use App\Servicios\Sobrecargo\CrewOperationalMetricsService;
+use App\Servicios\Sobrecargo\CrewOperationalNotificationService;
 use Carbon\Carbon;
 use Carbon\CarbonPeriod;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Http\Response;
 use Illuminate\Support\Facades\Cache;
-use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
-use Stripe\Checkout\Session;
-use Stripe\PaymentIntent;
-use Stripe\Stripe;
+use RuntimeException;
 use Shuchkin\SimpleXLS;
 use Shuchkin\SimpleXLSX;
 use Shuchkin\SimpleXLSXGen;
+use Stripe\Checkout\Session;
+use Stripe\PaymentIntent;
+use Stripe\Stripe;
 use Symfony\Component\HttpFoundation\StreamedResponse;
-use RuntimeException;
 
 class AdminControlador extends ControladorBase
 {
@@ -114,6 +121,7 @@ class AdminControlador extends ControladorBase
         'created_at',
         'updated_at',
     ];
+
     public function __construct(
         private readonly AircraftAvailabilityService $aircraftAvailabilityService,
         private readonly ReservationLifecycleService $reservationLifecycleService,
@@ -127,9 +135,10 @@ class AdminControlador extends ControladorBase
         private readonly AdminVuelosServicio $adminVuelosServicio,
         private readonly AdminDocumentosServicio $adminDocumentosServicio,
         private readonly AircraftStateService $aircraftStateService,
-    )
-    {
-    }
+        private readonly CrewOperationalAuditService $crewAudit,
+        private readonly CrewOperationalNotificationService $crewNotifications,
+        private readonly CrewOperationalMetricsService $crewMetrics,
+    ) {}
 
     public function dashboard(Request $request)
     {
@@ -161,6 +170,21 @@ class AdminControlador extends ControladorBase
         return $this->ok([
             'audit_logs' => $this->adminAuditServicio->query($filters),
         ]);
+    }
+
+    public function crewMetrics(Request $request)
+    {
+        $filters = $request->validate([
+            'period' => ['nullable', Rule::in(['today', 'week', 'month', 'custom'])],
+            'from' => ['nullable', 'date'], 'to' => ['nullable', 'date'],
+            'crew_member_id' => ['nullable', 'integer', 'exists:users,id'],
+            'base' => ['nullable', 'string', 'max:100'],
+            'status' => ['nullable', 'string', 'max:80'],
+            'incident_severity' => ['nullable', Rule::in(['baja', 'media', 'alta', 'critica'])],
+            'operation_type' => ['nullable', 'string', 'max:80'],
+        ]);
+
+        return $this->ok($this->crewMetrics->build($filters));
     }
 
     public function settings()
@@ -925,6 +949,16 @@ class AdminControlador extends ControladorBase
             ], 422);
         }
 
+        $hasOperationalHistory = Operacion::query()->where('sobrecargo_user_id', $user->id)->exists()
+            || AsignacionSobrecargo::query()->where('sobrecargo_user_id', $user->id)->exists()
+            || DB::table('crew_operation_incidents')->where('crew_id', $user->id)->exists();
+        if ($hasOperationalHistory) {
+            return response()->json([
+                'success' => false,
+                'message' => 'El usuario tiene historial operativo y no puede eliminarse. Desactivalo para conservar la trazabilidad.',
+            ], 409);
+        }
+
         $email = $user->email;
         $user->delete();
 
@@ -1414,7 +1448,7 @@ class AdminControlador extends ControladorBase
                 return $this->buildAdminCrewAvailabilityMemberPayload(
                     $crew,
                     $this->buildCrewAvailabilityRangePayload(
-                    $crew->disponibilidadesSobrecargo->keyBy(fn (SobrecargoDisponibilidad $item) => $item->fecha?->toDateString()),
+                        $crew->disponibilidadesSobrecargo->keyBy(fn (SobrecargoDisponibilidad $item) => $item->fecha?->toDateString()),
                         $from,
                         $to,
                         $defaultStatus
@@ -2173,30 +2207,102 @@ class AdminControlador extends ControladorBase
             : ($flightRequest->workflow_status ?: 'operador_asignado');
         $nextOperationStatus = $hasAssignedCrew ? 'tracking_live' : 'operador_asignado';
 
-        $operacion = Operacion::updateOrCreate(
-            ['flight_request_id' => $flightRequest->id],
-            [
-                'provider_id' => $data['provider_id'],
-                'aircraft_id' => $data['aircraft_id'],
-                'sobrecargo_user_id' => $data['sobrecargo_user_id'] ?? null,
-                'status' => $nextOperationStatus,
-                'crew_status' => $hasAssignedCrew ? 'pending_crew_response' : null,
-                'crew_confirmed_at' => null,
-                'crew_decline_reason' => null,
-                'crew_notes' => $hasAssignedCrew
-                    ? ($crewNote !== '' ? $crewNote : $existingOperation?->crew_notes)
-                    : null,
-            ]
-        );
+        $operacion = DB::transaction(function () use ($flightRequest, $data, $hasAssignedCrew, $nextOperationStatus, $crewNote, $existingOperation, $presentationTime, $request) {
+            SolicitudVuelo::query()->whereKey($flightRequest->id)->lockForUpdate()->firstOrFail();
+            $lockedExistingOperation = Operacion::query()->where('flight_request_id', $flightRequest->id)->lockForUpdate()->first();
+            $previousCrewId = $lockedExistingOperation?->sobrecargo_user_id;
+            $operation = Operacion::updateOrCreate(
+                ['flight_request_id' => $flightRequest->id],
+                [
+                    'provider_id' => $data['provider_id'],
+                    'aircraft_id' => $data['aircraft_id'],
+                    'sobrecargo_user_id' => $data['sobrecargo_user_id'] ?? null,
+                    'status' => $nextOperationStatus,
+                    'crew_status' => $hasAssignedCrew ? 'pending_crew_response' : null,
+                    'crew_confirmed_at' => null,
+                    'crew_decline_reason' => null,
+                    'crew_notes' => $hasAssignedCrew
+                        ? ($crewNote !== '' ? $crewNote : $existingOperation?->crew_notes)
+                        : null,
+                ]
+            );
 
-        $operacion->timeline()->create([
-            'status' => $nextOperationStatus,
-            'title' => 'Asignacion manual',
-            'description' => $hasAssignedCrew
-                ? 'Admin Red Aviation asigno proveedor, aeronave y sobrecargo. La operacion paso a tracking en vivo.'
-                : 'Admin Red Aviation realizo el matching manual.',
-            'created_by' => $request->user()->id,
-        ]);
+            if ($hasAssignedCrew) {
+                $resolvedPresentation = $presentationTime !== ''
+                    ? Carbon::parse($flightRequest->departure_datetime->format('Y-m-d').' '.$presentationTime)
+                    : Carbon::parse($flightRequest->departure_datetime)->subHour();
+                $existingCrewAssignment = AsignacionSobrecargo::query()->where('operation_id', $operation->id)
+                    ->where('sobrecargo_user_id', (int) $data['sobrecargo_user_id'])->lockForUpdate()->first();
+                $previousPresentation = $existingCrewAssignment?->presentation_time;
+                $scheduleChanged = $lockedExistingOperation && (
+                    (int) $lockedExistingOperation->provider_id !== (int) $data['provider_id']
+                    || (int) $lockedExistingOperation->aircraft_id !== (int) $data['aircraft_id']
+                );
+                AsignacionSobrecargo::query()->where('operation_id', $operation->id)
+                    ->where('sobrecargo_user_id', '!=', (int) $data['sobrecargo_user_id'])
+                    ->whereNotIn('status', [CrewAssignmentStatus::CANCELLED, CrewAssignmentStatus::REJECTED])
+                    ->update(['status' => CrewAssignmentStatus::CANCELLED, 'cancelled_at' => now(), 'cancellation_reason' => 'Reasignada por administracion.']);
+                $assignment = AsignacionSobrecargo::query()->updateOrCreate(
+                    ['operation_id' => $operation->id, 'sobrecargo_user_id' => (int) $data['sobrecargo_user_id']],
+                    [
+                        'role' => 'sobrecargo', 'status' => CrewAssignmentStatus::PENDING_CONFIRMATION,
+                        'assigned_by' => $request->user()->id, 'assigned_at' => now(),
+                        'response_deadline' => now()->addHours(12)->min($resolvedPresentation->copy()->subHour()),
+                        'presentation_time' => $resolvedPresentation, 'accepted_at' => null, 'rejected_at' => null,
+                        'rejection_reason' => null, 'cancelled_at' => null, 'cancellation_reason' => null,
+                    ]
+                );
+                $isReassignment = $previousCrewId && (int) $previousCrewId !== (int) $data['sobrecargo_user_id'];
+                $this->crewAudit->record(
+                    $request, $request->user(), $operation, $isReassignment ? 'assignment_reassigned' : 'assignment_created',
+                    CrewAssignmentStatus::normalize($lockedExistingOperation?->crew_status),
+                    CrewAssignmentStatus::PENDING_CONFIRMATION,
+                    $crewNote !== '' ? $crewNote : null,
+                    ['assignment_id' => $assignment->id],
+                );
+                DB::afterCommit(fn () => $this->crewNotifications->send(
+                    Usuario::query()->findOrFail((int) $data['sobrecargo_user_id']),
+                    $operation,
+                    $isReassignment ? 'assignment_reassigned' : 'new_assignment',
+                    $isReassignment ? 'Operacion reasignada' : 'Nueva asignacion operativa',
+                    $isReassignment ? 'La operacion fue reasignada a tu perfil.' : 'Tienes una nueva asignacion pendiente de respuesta.',
+                    'info',
+                    $assignment->id,
+                    ['response_deadline' => optional($assignment->response_deadline)?->toISOString()],
+                ));
+                if ($isReassignment) {
+                    DB::afterCommit(function () use ($previousCrewId, $operation, $assignment) {
+                        $previousCrew = Usuario::query()->find($previousCrewId);
+                        if ($previousCrew) {
+                            $this->crewNotifications->send($previousCrew, $operation, 'assignment_reassigned', 'Asignacion reasignada', 'Esta operacion fue reasignada a otra sobrecargo.', 'warning', $assignment->id, ['idempotency_context' => 'previous_crew']);
+                        }
+                    });
+                }
+                if ($previousPresentation && ! $previousPresentation->equalTo($resolvedPresentation)) {
+                    DB::afterCommit(fn () => $this->crewNotifications->send(
+                        Usuario::query()->findOrFail((int) $data['sobrecargo_user_id']), $operation,
+                        'presentation_time_changed', 'Hora de presentacion actualizada',
+                        'Revisa la nueva hora de presentacion de la operacion.', 'warning', $assignment->id,
+                        ['presentation_time' => $resolvedPresentation->toISOString()],
+                    ));
+                }
+                if ($scheduleChanged) {
+                    DB::afterCommit(fn () => $this->crewNotifications->send(
+                        Usuario::query()->findOrFail((int) $data['sobrecargo_user_id']), $operation,
+                        'schedule_changed', 'Datos operativos actualizados',
+                        'El proveedor o la aeronave de la operacion cambio. Revisa el briefing.', 'warning', $assignment->id,
+                    ));
+                }
+            }
+
+            $operation->timeline()->create([
+                'status' => $nextOperationStatus, 'title' => 'Asignacion manual',
+                'description' => $hasAssignedCrew ? 'Admin Red Aviation asigno proveedor, aeronave y sobrecargo. La operacion paso a tracking en vivo.' : 'Admin Red Aviation realizo el matching manual.',
+                'created_by' => $request->user()->id,
+            ]);
+
+            return $operation;
+        }, 3);
 
         $aircraft = Aeronave::find($data['aircraft_id']);
         $visibilityPayload = $flightRequest->visibility_payload ?? [];
@@ -2276,6 +2382,71 @@ class AdminControlador extends ControladorBase
         }
 
         return $this->ok(['operation' => $operacion->load('timeline')]);
+    }
+
+    public function transitionCrewOperation(Request $request, Operacion $operation)
+    {
+        $data = $request->validate([
+            'status' => ['required', Rule::in([
+                CrewAssignmentStatus::IN_FLIGHT, CrewAssignmentStatus::LANDED,
+                CrewAssignmentStatus::ADMINISTRATIVELY_CLOSED, CrewAssignmentStatus::CANCELLED,
+                CrewAssignmentStatus::NO_SHOW,
+            ])],
+            'reason' => ['nullable', 'string', 'max:1000'],
+        ]);
+
+        return DB::transaction(function () use ($operation, $data, $request) {
+            $locked = Operacion::query()->lockForUpdate()->findOrFail($operation->id);
+            $current = CrewAssignmentStatus::normalize($locked->crew_status);
+            $target = $data['status'];
+            abort_unless(CrewAssignmentStatus::canTransition($current, $target), 409, 'La transicion administrativa no corresponde al estado actual.');
+            abort_if($target === CrewAssignmentStatus::ADMINISTRATIVELY_CLOSED && ! $locked->crew_report_submitted_at, 409, 'El reporte final de sobrecargo sigue pendiente.');
+
+            $updates = ['crew_status' => $target];
+            if ($target === CrewAssignmentStatus::IN_FLIGHT) {
+                $updates += ['crew_service_started_at' => now(), 'started_at' => now(), 'status' => 'in_progress'];
+            }
+            if ($target === CrewAssignmentStatus::LANDED) {
+                $updates['crew_landed_at'] = now();
+            }
+            if ($target === CrewAssignmentStatus::ADMINISTRATIVELY_CLOSED) {
+                $updates += ['crew_administratively_closed_at' => now(), 'crew_administratively_closed_by' => $request->user()->id, 'completed_at' => now(), 'status' => 'completed'];
+            }
+            if ($target === CrewAssignmentStatus::CANCELLED) {
+                $updates += ['status' => 'cancelled', 'crew_decline_reason' => $data['reason'] ?? 'Cancelada por administracion'];
+                AsignacionSobrecargo::query()->where('operation_id', $locked->id)->update(['status' => $target, 'cancelled_at' => now(), 'cancellation_reason' => $data['reason'] ?? null]);
+            }
+            $locked->update($updates);
+            $this->crewAudit->record(
+                $request, $request->user(), $locked,
+                $target === CrewAssignmentStatus::ADMINISTRATIVELY_CLOSED ? 'administratively_closed' : ($target === CrewAssignmentStatus::CANCELLED ? 'assignment_cancelled' : $target),
+                $current, $target, $data['reason'] ?? null,
+                ['assignment_id' => AsignacionSobrecargo::query()->where('operation_id', $locked->id)->latest('id')->value('id')],
+            );
+            if ($locked->sobrecargo_user_id) {
+                DB::afterCommit(fn () => $this->crewNotifications->send(
+                    Usuario::query()->findOrFail($locked->sobrecargo_user_id),
+                    $locked,
+                    $target === CrewAssignmentStatus::ADMINISTRATIVELY_CLOSED ? 'operation_closed' : $target,
+                    $target === CrewAssignmentStatus::ADMINISTRATIVELY_CLOSED ? 'Operacion cerrada' : 'Actualizacion de operacion',
+                    'El estado operativo cambio a '.str_replace('_', ' ', $target).'.',
+                    $target === CrewAssignmentStatus::CANCELLED ? 'critical' : 'info',
+                ));
+            }
+            if ($target === CrewAssignmentStatus::NO_SHOW) {
+                DB::afterCommit(function () use ($locked) {
+                    Usuario::query()->where(fn ($query) => $query->where('role', Usuario::ROLE_ADMIN)->orWhere('operational_role', Usuario::ROLE_ADMIN))
+                        ->each(fn (Usuario $admin) => $this->crewNotifications->send($admin, $locked, 'no_show', 'No show de sobrecargo', 'La operacion fue marcada como no show.', 'critical'));
+                });
+            }
+            $timeline = LineaTiempoOperacion::create([
+                'operation_id' => $locked->id, 'status' => $target,
+                'title' => 'Actualizacion administrativa: '.str_replace('_', ' ', $target),
+                'description' => $data['reason'] ?? null, 'created_by' => $request->user()->id,
+            ]);
+
+            return $this->ok(['operation' => $locked->fresh(), 'timeline_item' => $timeline]);
+        }, 3);
     }
 
     public function updateRequestWorkflow(Request $request, SolicitudVuelo $flightRequest)
@@ -2358,7 +2529,7 @@ class AdminControlador extends ControladorBase
             ]);
             $flightRequest->save();
 
-            $reservation = \App\Modelos\Reserva::query()
+            $reservation = Reserva::query()
                 ->where('flight_request_id', $flightRequest->id)
                 ->latest('id')
                 ->first();
@@ -2786,15 +2957,15 @@ class AdminControlador extends ControladorBase
                         ->orWhere('access_payment_id', '<=', $payment->id);
                 })
                 ->update([
-                'access_status' => 'active',
-                'has_paid_access' => true,
-                'paid_access_at' => DB::raw('coalesce(paid_access_at, now())'),
-                'access_expires_at' => Carbon::parse($periodEnd)->endOfDay(),
-                'access_payment_id' => $payment->id,
-                'provider_subscription_id' => $subscriptionId !== '' ? $subscriptionId : DB::raw('provider_subscription_id'),
-                'provider_customer_id' => $customerId !== '' ? $customerId : DB::raw('provider_customer_id'),
-                'updated_at' => now(),
-            ]);
+                    'access_status' => 'active',
+                    'has_paid_access' => true,
+                    'paid_access_at' => DB::raw('coalesce(paid_access_at, now())'),
+                    'access_expires_at' => Carbon::parse($periodEnd)->endOfDay(),
+                    'access_payment_id' => $payment->id,
+                    'provider_subscription_id' => $subscriptionId !== '' ? $subscriptionId : DB::raw('provider_subscription_id'),
+                    'provider_customer_id' => $customerId !== '' ? $customerId : DB::raw('provider_customer_id'),
+                    'updated_at' => now(),
+                ]);
         });
     }
 
@@ -3130,7 +3301,7 @@ class AdminControlador extends ControladorBase
         ]);
     }
 
-    public function exportDataTransfer(Request $request): StreamedResponse|JsonResponse|\Illuminate\Http\Response
+    public function exportDataTransfer(Request $request): StreamedResponse|JsonResponse|Response
     {
         $connection = $this->resolveConnection($request->query('connection'));
         $table = $this->resolveTable($connection, (string) $request->query('resource'));
@@ -3239,6 +3410,7 @@ class AdminControlador extends ControladorBase
 
         if (! is_array($headers)) {
             fclose($handle);
+
             return [];
         }
 
@@ -3372,6 +3544,7 @@ class AdminControlador extends ControladorBase
     {
         if (! $user->hasRole(Usuario::ROLE_PROVIDER)) {
             $user->forceFill(['provider_id' => null])->saveQuietly();
+
             return;
         }
 

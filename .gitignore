@@ -3,6 +3,7 @@
 .env
 .env.*
 !.env.example
+!.env.testing.example
 /bootstrap/cache/*.php
 /storage/*.key
 /storage/logs/*

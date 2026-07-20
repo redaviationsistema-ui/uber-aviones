@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Http\Controladores\StripeWebhookControlador;
 use App\Modelos\Aeronave;
 use App\Modelos\AircraftBillingPayment;
+use App\Modelos\DocumentoAeronave;
 use App\Modelos\Plan;
 use App\Modelos\Proveedor;
 use App\Modelos\RegistroAuditoria;
@@ -1187,7 +1188,7 @@ class ProviderAircraftSubscriptionFlowTest extends TestCase
 
     private function createAircraftForBilling(Proveedor $provider, array $overrides = []): Aeronave
     {
-        return Aeronave::query()->create([
+        $aircraft = Aeronave::query()->create([
             'provider_id' => $provider->id,
             'model' => 'LEAR JET 31',
             'registration' => 'XB-LJ31',
@@ -1200,6 +1201,24 @@ class ProviderAircraftSubscriptionFlowTest extends TestCase
             'subscription_status' => 'pending',
             ...$overrides,
         ]);
+
+        if ($aircraft->approved_at) {
+            foreach (['airworthiness', 'registration', 'insurance', 'maintenance'] as $type) {
+                DocumentoAeronave::query()->create([
+                    'aircraft_id' => $aircraft->id,
+                    'provider_id' => $provider->id,
+                    'type' => $type,
+                    'document_type' => $type,
+                    'document_name' => $type.'.pdf',
+                    'file_url' => 'https://example.test/'.$type.'.pdf',
+                    'document_url' => 'https://example.test/'.$type.'.pdf',
+                    'status' => 'approved',
+                    'verified_by_admin' => true,
+                ]);
+            }
+        }
+
+        return $aircraft;
     }
 
     private function createAircraftBillingPayment(Proveedor $provider, Aeronave $aircraft, Plan $plan, array $overrides = []): AircraftBillingPayment

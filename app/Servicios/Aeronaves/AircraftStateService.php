@@ -211,7 +211,7 @@ class AircraftStateService
         }
 
         return [
-            'status' => $providerApproved ? 'pending_review' : 'provider_pending',
+            'status' => 'pending_review',
             'approved' => false,
             'provider_approved' => $providerApproved,
             'aircraft_approved' => false,

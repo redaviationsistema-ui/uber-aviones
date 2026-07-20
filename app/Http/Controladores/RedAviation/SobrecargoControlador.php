@@ -2,6 +2,7 @@
 
 namespace App\Http\Controladores\RedAviation;
 
+use App\Dominio\Sobrecargo\CrewAssignmentStatus;
 use App\Http\Controladores\ControladorBase;
 use App\Modelos\AsignacionSobrecargo;
 use App\Modelos\CatalogoDisponibilidadEstatus;
@@ -9,19 +10,28 @@ use App\Modelos\ChecklistItem;
 use App\Modelos\ChecklistOperacion;
 use App\Modelos\LineaTiempoOperacion;
 use App\Modelos\Operacion;
+use App\Modelos\RegistroAuditoria;
 use App\Modelos\SobrecargoDisponibilidad;
 use App\Modelos\Usuario;
+use App\Servicios\Operaciones\ReservationLifecycleService;
 use App\Servicios\RedAviation\VisibilidadServicio;
+use App\Servicios\Sobrecargo\CrewOperationalAuditService;
+use App\Servicios\Sobrecargo\CrewOperationalNotificationService;
 use Carbon\Carbon;
 use Carbon\CarbonPeriod;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 
 class SobrecargoControlador extends ControladorBase
 {
-    public function __construct(private readonly VisibilidadServicio $visibilidadServicio)
-    {
-    }
+    public function __construct(
+        private readonly VisibilidadServicio $visibilidadServicio,
+        private readonly ReservationLifecycleService $reservationLifecycleService,
+        private readonly CrewOperationalAuditService $crewAudit,
+        private readonly CrewOperationalNotificationService $crewNotifications,
+    ) {}
 
     public function dashboard(Request $request)
     {
@@ -119,6 +129,7 @@ class SobrecargoControlador extends ControladorBase
             'aeronave',
             'proveedor',
             'timeline' => fn ($query) => $query->latest('id'),
+            'checklists.items',
         ])
             ->where('sobrecargo_user_id', $request->user()->id)
             ->latest()
@@ -133,66 +144,97 @@ class SobrecargoControlador extends ControladorBase
 
     public function respondAssignment(Request $request, Operacion $operation)
     {
-        abort_if($operation->sobrecargo_user_id !== $request->user()->id, 403);
-
         $data = $request->validate([
-            'response' => ['required', Rule::in(['Confirmado', 'Rechazado', 'Solicitar revision'])],
-            'reject_reason' => ['nullable', 'string', 'max:255'],
+            'response' => ['required', Rule::in(['Confirmado', 'Rechazado', 'Solicitar revision', 'confirmed', 'rejected', 'clarification_requested'])],
+            'reject_reason' => ['nullable', Rule::in(['schedule_conflict', 'not_available', 'documentation_issue', 'medical', 'distance', 'personal', 'other'])],
             'comment' => ['nullable', 'string'],
         ]);
-
-        $assignment = AsignacionSobrecargo::query()->updateOrCreate(
-            [
-                'operation_id' => $operation->id,
-                'sobrecargo_user_id' => $request->user()->id,
-            ],
-            [
-                'status' => $data['response'],
-            ],
-        );
-
-        $crewStatus = match ($data['response']) {
-            'Confirmado' => 'crew_confirmed',
-            'Rechazado' => 'crew_declined',
-            default => 'crew_change_requested',
+        $response = match ($data['response']) {
+            'Confirmado', 'confirmed' => CrewAssignmentStatus::CONFIRMED,
+            'Rechazado', 'rejected' => CrewAssignmentStatus::REJECTED,
+            default => 'clarification_requested',
         };
+        if ($response === CrewAssignmentStatus::REJECTED && empty($data['reject_reason'])) {
+            throw ValidationException::withMessages(['reject_reason' => 'Selecciona un motivo de rechazo.']);
+        }
 
-        $operation->update([
-            'status' => match ($data['response']) {
-                'Confirmado' => 'confirmed',
-                'Solicitar revision' => 'revision_requested',
-                default => $operation->status,
-            },
-            'crew_status' => $crewStatus,
-            'crew_confirmed_at' => $data['response'] === 'Confirmado' ? now() : null,
-            'crew_decline_reason' => $data['response'] === 'Rechazado' ? ($data['reject_reason'] ?? null) : null,
-            'crew_notes' => $data['comment'] ?? $data['reject_reason'] ?? $operation->crew_notes,
-            'crew_checkin_at' => $data['response'] === 'Confirmado' ? $operation->crew_checkin_at : null,
-            'crew_service_started_at' => $data['response'] === 'Confirmado' ? $operation->crew_service_started_at : null,
-            'crew_service_completed_at' => $data['response'] === 'Confirmado' ? $operation->crew_service_completed_at : null,
-        ]);
+        [$assignment, $timeline] = DB::transaction(function () use ($operation, $request, $data, $response) {
+            $lockedOperation = Operacion::query()->with('solicitudVuelo')->lockForUpdate()->findOrFail($operation->id);
+            abort_if($lockedOperation->sobrecargo_user_id !== $request->user()->id, 403);
+            $assignment = AsignacionSobrecargo::query()->lockForUpdate()->firstOrCreate(
+                ['operation_id' => $lockedOperation->id, 'sobrecargo_user_id' => $request->user()->id],
+                ['status' => CrewAssignmentStatus::PENDING_CONFIRMATION, 'assigned_at' => now()]
+            );
+            $current = CrewAssignmentStatus::normalize($assignment->status);
+            abort_if(in_array($current, [CrewAssignmentStatus::CONFIRMED, CrewAssignmentStatus::REJECTED, CrewAssignmentStatus::CANCELLED], true), 409, 'La asignacion ya fue respondida o cancelada.');
+            abort_if($response === CrewAssignmentStatus::CONFIRMED && $assignment->response_deadline?->isPast(), 409, 'La fecha limite para aceptar esta asignacion ya vencio.');
 
-        $timeline = LineaTiempoOperacion::create([
-            'operation_id' => $operation->id,
-            'status' => match ($data['response']) {
-                'Confirmado' => 'confirmada',
-                'Rechazado' => 'rechazada',
-                default => 'revision_solicitada',
-            },
-            'title' => match ($data['response']) {
-                'Confirmado' => 'Sobrecargo confirma asignacion',
-                'Rechazado' => 'Sobrecargo rechaza asignacion',
-                default => 'Sobrecargo solicita revision',
-            },
-            'description' => $data['comment']
-                ?: $data['reject_reason']
-                ?: 'Respuesta de asignacion registrada por el sobrecargo.',
-            'created_by' => $request->user()->id,
-        ]);
+            if ($response === CrewAssignmentStatus::CONFIRMED) {
+                $departure = $lockedOperation->solicitudVuelo?->departure_datetime;
+                $end = $lockedOperation->solicitudVuelo?->return_datetime ?: optional($departure)->copy()?->addHours(8);
+                if ($departure && $end && $this->reservationLifecycleService->crewHasConflict((int) $request->user()->id, Carbon::parse($departure), Carbon::parse($end), (int) $lockedOperation->id)) {
+                    throw ValidationException::withMessages(['response' => 'Existe otra operacion activa en el mismo horario.']);
+                }
+                $blocked = $departure && SobrecargoDisponibilidad::query()
+                    ->where('sobrecargo_id', $request->user()->id)
+                    ->whereDate('fecha', Carbon::parse($departure)->toDateString())
+                    ->whereHas('estatus', fn ($query) => $query->where('permite_asignacion', false))->exists();
+                throw_if($blocked, ValidationException::withMessages(['response' => 'Tu disponibilidad actual bloquea esta operacion.']));
+            }
+
+            $assignment->update([
+                'status' => $response,
+                'accepted_at' => $response === CrewAssignmentStatus::CONFIRMED ? now() : null,
+                'rejected_at' => $response === CrewAssignmentStatus::REJECTED ? now() : null,
+                'rejection_reason' => $response === CrewAssignmentStatus::REJECTED ? $data['reject_reason'] : null,
+            ]);
+            $this->crewAudit->record(
+                $request,
+                $request->user(),
+                $lockedOperation,
+                $response === CrewAssignmentStatus::CONFIRMED ? 'assignment_accepted' : ($response === CrewAssignmentStatus::REJECTED ? 'assignment_rejected' : 'assignment_clarification_requested'),
+                $current,
+                $response,
+                $data['reject_reason'] ?? $data['comment'] ?? null,
+                ['assignment_id' => $assignment->id],
+            );
+            DB::afterCommit(function () use ($lockedOperation, $assignment, $response) {
+                Usuario::query()
+                    ->where(fn ($query) => $query->where('role', Usuario::ROLE_ADMIN)->orWhere('operational_role', Usuario::ROLE_ADMIN))
+                    ->each(fn (Usuario $admin) => $this->crewNotifications->send(
+                        $admin,
+                        $lockedOperation,
+                        $response === CrewAssignmentStatus::CONFIRMED ? 'assignment_accepted' : 'assignment_rejected',
+                        $response === CrewAssignmentStatus::CONFIRMED ? 'Asignacion aceptada' : 'Asignacion rechazada',
+                        $response === CrewAssignmentStatus::CONFIRMED ? 'La sobrecargo acepto la asignacion.' : 'La sobrecargo rechazo la asignacion.',
+                        $response === CrewAssignmentStatus::CONFIRMED ? 'success' : 'warning',
+                        $assignment->id,
+                    ));
+            });
+            $lockedOperation->update([
+                'status' => $response === 'clarification_requested' ? 'revision_requested' : $lockedOperation->status,
+                'crew_status' => $response,
+                'crew_confirmed_at' => $response === CrewAssignmentStatus::CONFIRMED ? now() : null,
+                'crew_decline_reason' => $response === CrewAssignmentStatus::REJECTED ? $data['reject_reason'] : null,
+                'crew_notes' => $data['comment'] ?? $data['reject_reason'] ?? $lockedOperation->crew_notes,
+            ]);
+            if ($response === CrewAssignmentStatus::CONFIRMED) {
+                $this->ensureOperationChecklist($lockedOperation, $request->user()->id, 'preparation');
+            }
+            $timeline = LineaTiempoOperacion::create([
+                'operation_id' => $lockedOperation->id, 'status' => $response,
+                'title' => $response === CrewAssignmentStatus::CONFIRMED ? 'Sobrecargo acepta asignacion' : ($response === CrewAssignmentStatus::REJECTED ? 'Sobrecargo rechaza asignacion' : 'Sobrecargo solicita aclaracion'),
+                'description' => $data['comment'] ?? $data['reject_reason'] ?? 'Respuesta registrada.', 'created_by' => $request->user()->id,
+            ]);
+
+            return [$assignment->fresh(), $timeline];
+        }, 3);
+
+        $operation = $operation->fresh(['solicitudVuelo', 'aeronave', 'proveedor', 'timeline']);
 
         return $this->ok([
             'assignment' => $assignment,
-            'operation' => $this->formatAssignmentPayload($operation->fresh(['solicitudVuelo', 'aeronave', 'proveedor', 'timeline']), $request->user()->id),
+            'operation' => $this->formatAssignmentPayload($operation, $request->user()->id),
             'timeline_item' => $timeline,
         ]);
     }
@@ -200,36 +242,47 @@ class SobrecargoControlador extends ControladorBase
     public function checkinOperation(Request $request, Operacion $operation)
     {
         abort_if($operation->sobrecargo_user_id !== $request->user()->id, 403);
-
         $data = $request->validate([
             'note' => ['nullable', 'string'],
+            'base' => ['nullable', 'string', 'max:120'],
+            'fit_to_operate' => ['required', 'boolean'],
         ]);
+        abort_unless($data['fit_to_operate'], 422, 'Debes confirmar que estas apta para operar.');
 
-        $operation->update([
-            'crew_status' => 'crew_enroute',
-            'crew_notes' => $data['note'] ?? $operation->crew_notes,
-            'crew_checkin_at' => $operation->crew_checkin_at ?? now(),
-        ]);
+        return DB::transaction(function () use ($operation, $request, $data) {
+            $locked = Operacion::query()->lockForUpdate()->findOrFail($operation->id);
+            abort_if($locked->crew_checkin_at, 409, 'El check-in ya fue registrado.');
+            abort_unless(CrewAssignmentStatus::normalize($locked->crew_status) === CrewAssignmentStatus::READY_FOR_OPERATION, 409, 'Completa primero la preparacion previa.');
+            $assignment = AsignacionSobrecargo::query()->where('operation_id', $locked->id)
+                ->where('sobrecargo_user_id', $request->user()->id)->latest('id')->first();
+            $presentation = $assignment?->presentation_time ? Carbon::parse($assignment->presentation_time) : null;
+            $minutesLate = $presentation ? max(0, $presentation->diffInMinutes(now(), false)) : 0;
+            $punctuality = $minutesLate >= 30 ? 'very_late' : ($minutesLate > 0 ? 'late' : 'on_time');
+            $previous = CrewAssignmentStatus::normalize($locked->crew_status);
+            $locked->update([
+                'crew_status' => CrewAssignmentStatus::CHECKED_IN, 'crew_notes' => $data['note'] ?? $locked->crew_notes,
+                'crew_checkin_at' => now(), 'crew_checkin_base' => $data['base'] ?? null,
+                'crew_checkin_status' => $punctuality, 'crew_checkin_notes' => $data['note'] ?? null, 'crew_fit_to_operate' => true,
+            ]);
+            $this->ensureOperationChecklist($locked, $request->user()->id, 'preflight');
+            $timeline = LineaTiempoOperacion::create([
+                'operation_id' => $locked->id, 'status' => 'crew_checkin', 'title' => 'Sobrecargo confirma check-in operativo',
+                'description' => $data['note'] ?: 'El sobrecargo ya reporto llegada a FBO / aeropuerto.', 'created_by' => $request->user()->id,
+            ]);
+            $event = $punctuality === 'on_time' ? 'check_in_completed' : 'check_in_late';
+            $this->crewAudit->record($request, $request->user(), $locked, $event, $previous, CrewAssignmentStatus::CHECKED_IN, $data['note'] ?? null, ['assignment_id' => $assignment?->id, 'minutes_late' => $minutesLate]);
+            if ($punctuality !== 'on_time') {
+                DB::afterCommit(fn () => $this->notifyAdmins($locked, 'check_in_late', 'Check-in tardio', "El check-in se registro con {$minutesLate} minutos de retraso.", 'warning', $assignment?->id));
+            }
 
-        $timeline = LineaTiempoOperacion::create([
-            'operation_id' => $operation->id,
-            'status' => 'crew_checkin',
-            'title' => 'Sobrecargo confirma check-in operativo',
-            'description' => $data['note'] ?: 'El sobrecargo ya reporto llegada a FBO / aeropuerto.',
-            'created_by' => $request->user()->id,
-        ]);
-
-        return $this->ok([
-            'operation' => $this->formatAssignmentPayload($operation->fresh(['solicitudVuelo', 'aeronave', 'proveedor', 'timeline']), $request->user()->id),
-            'timeline_item' => $timeline,
-        ]);
+            return $this->ok(['operation' => $this->formatAssignmentPayload($locked->fresh(['solicitudVuelo', 'aeronave', 'proveedor', 'timeline', 'checklists.items']), $request->user()->id), 'timeline_item' => $timeline]);
+        }, 3);
     }
 
     public function markCabinReady(Request $request, Operacion $operation)
     {
         abort_if($operation->sobrecargo_user_id !== $request->user()->id, 403);
-
-        abort_if(! $operation->crew_checkin_at, 422, 'Primero confirma tu llegada a aeropuerto o base.');
+        abort_unless(CrewAssignmentStatus::normalize($operation->crew_status) === CrewAssignmentStatus::CABIN_READY, 409, 'Completa primero el checklist prevuelo sin fallas criticas pendientes.');
         abort_if($operation->crew_service_started_at, 422, 'La cabina ya no puede marcarse porque el servicio ya inicio.');
 
         $data = $request->validate([
@@ -253,7 +306,6 @@ class SobrecargoControlador extends ControladorBase
 
         $operation->update([
             'status' => 'cabina_lista',
-            'crew_status' => 'crew_enroute',
             'crew_notes' => $data['note'] ?? $operation->crew_notes,
         ]);
 
@@ -267,7 +319,7 @@ class SobrecargoControlador extends ControladorBase
     {
         abort_if($operation->sobrecargo_user_id !== $request->user()->id, 403);
 
-        abort_if(! $operation->crew_checkin_at, 422, 'Primero confirma tu llegada a aeropuerto o base.');
+        abort_unless(CrewAssignmentStatus::normalize($operation->crew_status) === CrewAssignmentStatus::BOARDING, 409, 'Primero inicia el abordaje desde el estado cabina lista.');
         abort_if($operation->crew_service_started_at, 422, 'Los pasajeros ya no pueden marcarse porque el servicio ya inicio.');
 
         $hasCabinReady = $operation->timeline()
@@ -297,7 +349,7 @@ class SobrecargoControlador extends ControladorBase
 
         $operation->update([
             'status' => 'pasajeros_recibidos',
-            'crew_status' => 'crew_enroute',
+            'crew_status' => CrewAssignmentStatus::BOARDING_COMPLETED,
             'crew_notes' => $data['note'] ?? $operation->crew_notes,
         ]);
 
@@ -320,73 +372,134 @@ class SobrecargoControlador extends ControladorBase
     {
         abort_if($operation->sobrecargo_user_id !== $request->user()->id, 403);
 
-        abort_if(! $operation->crew_checkin_at, 422, 'Primero confirma tu llegada a aeropuerto o base.');
-
-        $hasPassengersReady = $operation->timeline()
-            ->where('status', 'pasajeros_recibidos')
-            ->exists();
-
-        abort_if(! $hasPassengersReady, 422, 'Primero registra que los pasajeros ya fueron recibidos.');
-        abort_if($operation->crew_service_started_at, 422, 'El servicio ya fue iniciado.');
-
-        $operation->update([
-            'status' => 'in_progress',
-            'crew_status' => 'crew_active',
-            'crew_service_started_at' => $operation->crew_service_started_at ?? now(),
-            'started_at' => now(),
-        ]);
-
-        $timeline = LineaTiempoOperacion::create([
-            'operation_id' => $operation->id,
-            'status' => 'servicio_iniciado',
-            'title' => 'Sobrecargo inicia servicio',
-            'description' => 'La atencion al cliente comenzo en el dia del vuelo.',
-            'created_by' => $request->user()->id,
-        ]);
-
-        return $this->ok([
-            'operation' => $operation->fresh(),
-            'timeline_item' => $timeline,
-        ]);
+        abort(403, 'El inicio de vuelo debe ser confirmado por administracion u operaciones.');
     }
 
     public function completeService(Request $request, Operacion $operation)
     {
         abort_if($operation->sobrecargo_user_id !== $request->user()->id, 403);
 
-        $operation->update([
-            'status' => 'completed',
-            'crew_status' => 'crew_completed',
-            'crew_service_completed_at' => now(),
-            'completed_at' => now(),
-        ]);
-
-        $timeline = LineaTiempoOperacion::create([
-            'operation_id' => $operation->id,
-            'status' => 'servicio_finalizado',
-            'title' => 'Vuelo finalizado',
-            'description' => 'El sobrecargo cerro la atencion y dejo el servicio completado.',
-            'created_by' => $request->user()->id,
-        ]);
-
-        return $this->ok([
-            'operation' => $operation->fresh(),
-            'timeline_item' => $timeline,
-        ]);
+        abort(409, 'Completa el checklist postvuelo y envia el reporte final para cerrar tu participacion.');
     }
 
     public function completeChecklist(Request $request, ChecklistOperacion $checklist)
     {
         abort_if($checklist->sobrecargo_user_id !== $request->user()->id, 403);
+        abort(409, 'Completa cada elemento mediante el flujo de checklist para conservar validaciones y trazabilidad.');
+    }
 
-        ChecklistItem::where('checklist_id', $checklist->id)->update([
-            'is_completed' => true,
-            'completed_at' => now(),
+    public function workflow(Request $request, Operacion $operation)
+    {
+        abort_if($operation->sobrecargo_user_id !== $request->user()->id, 403);
+        $operation->loadMissing(['checklists.items', 'timeline' => fn ($query) => $query->oldest('id')]);
+
+        return $this->ok([
+            'status' => CrewAssignmentStatus::normalize($operation->crew_status),
+            'checklists' => $operation->checklists,
+            'report' => $operation->crew_final_report,
+            'timeline' => $operation->timeline,
+        ]);
+    }
+
+    public function updateChecklistItem(Request $request, Operacion $operation, string $type, ChecklistItem $item)
+    {
+        abort_if($operation->sobrecargo_user_id !== $request->user()->id, 403);
+        $data = $request->validate([
+            'status' => ['required', Rule::in(['pending', 'completed', 'not_applicable', 'failed'])],
+            'notes' => ['nullable', 'string', 'max:1000'],
         ]);
 
-        $checklist->update(['status' => 'completado']);
+        $checklist = $this->ensureOperationChecklist($operation, $request->user()->id, $type);
+        abort_if($item->checklist_id !== $checklist->id, 404);
+        if ($data['status'] === 'failed' && $item->is_critical && empty($data['notes'])) {
+            throw ValidationException::withMessages(['notes' => 'Un elemento critico fallido requiere observaciones.']);
+        }
 
-        return $this->ok(['checklist' => $checklist->load('items')]);
+        DB::transaction(function () use ($item, $data, $request, $checklist, $operation, $type) {
+            $lockedOperation = Operacion::query()->lockForUpdate()->findOrFail($operation->id);
+            $lockedItem = ChecklistItem::query()->lockForUpdate()->findOrFail($item->id);
+            abort_if(in_array(CrewAssignmentStatus::normalize($lockedOperation->crew_status), [CrewAssignmentStatus::CREW_COMPLETED, CrewAssignmentStatus::ADMINISTRATIVELY_CLOSED, CrewAssignmentStatus::CANCELLED], true), 409, 'La operacion ya no admite cambios en checklists.');
+            $lockedItem->update([
+                'status' => $data['status'], 'notes' => $data['notes'] ?? null,
+                'is_completed' => in_array($data['status'], ['completed', 'not_applicable'], true),
+                'completed_at' => in_array($data['status'], ['completed', 'not_applicable'], true) ? now() : null,
+                'completed_by' => $request->user()->id,
+            ]);
+            if ($data['status'] === 'failed' && $lockedItem->is_critical) {
+                $assignmentId = AsignacionSobrecargo::query()->where('operation_id', $lockedOperation->id)->latest('id')->value('id');
+                $this->crewAudit->record($request, $request->user(), $lockedOperation, 'critical_item_failed', CrewAssignmentStatus::normalize($lockedOperation->crew_status), CrewAssignmentStatus::normalize($lockedOperation->crew_status), $data['notes'] ?? null, ['assignment_id' => $assignmentId, 'checklist_item_id' => $lockedItem->id]);
+                DB::afterCommit(fn () => $this->notifyAdmins($lockedOperation, 'critical_checklist_failed', 'Falla critica en checklist', $data['notes'] ?? 'Un elemento critico fue marcado como fallido.', 'critical', $assignmentId, ['idempotency_context' => 'item_'.$lockedItem->id]));
+            }
+            $items = $checklist->items()->get();
+            $hasBlockingItem = $items->contains(fn ($entry) => $entry->is_required && ! in_array($entry->status, ['completed', 'not_applicable'], true));
+            if (! $hasBlockingItem) {
+                $checklist->update(['status' => 'completed', 'submitted_at' => now()]);
+                $nextStatus = match ($type) {
+                    'preparation' => CrewAssignmentStatus::READY_FOR_OPERATION,
+                    'preflight' => CrewAssignmentStatus::CABIN_READY,
+                    'postflight' => CrewAssignmentStatus::REPORT_PENDING,
+                    default => CrewAssignmentStatus::normalize($operation->crew_status),
+                };
+                $lockedOperation->update(['crew_status' => $nextStatus]);
+                LineaTiempoOperacion::firstOrCreate(
+                    ['operation_id' => $operation->id, 'status' => $nextStatus],
+                    ['title' => 'Checklist '.str_replace('_', ' ', $type).' completado', 'description' => 'Todos los elementos obligatorios fueron respondidos.', 'created_by' => $request->user()->id]
+                );
+            }
+        });
+
+        return $this->ok(['checklist' => $checklist->fresh('items'), 'operation' => $operation->fresh()]);
+    }
+
+    public function transitionOperation(Request $request, Operacion $operation)
+    {
+        abort_if($operation->sobrecargo_user_id !== $request->user()->id, 403);
+        $data = $request->validate(['status' => ['required', 'string'], 'notes' => ['nullable', 'string']]);
+        $target = CrewAssignmentStatus::normalize($data['status']);
+        $allowedForCrew = [CrewAssignmentStatus::PREPARATION_PENDING, CrewAssignmentStatus::PREFLIGHT_IN_PROGRESS, CrewAssignmentStatus::BOARDING, CrewAssignmentStatus::BOARDING_COMPLETED, CrewAssignmentStatus::POSTFLIGHT_PENDING];
+        abort_unless(in_array($target, $allowedForCrew, true), 403, 'Esta transicion corresponde a operaciones o administracion.');
+
+        return DB::transaction(function () use ($operation, $target, $data, $request) {
+            $locked = Operacion::query()->lockForUpdate()->findOrFail($operation->id);
+            $current = CrewAssignmentStatus::normalize($locked->crew_status);
+            abort_unless(CrewAssignmentStatus::canTransition($current, $target), 409, 'La transicion solicitada no corresponde al estado actual.');
+            $locked->update(['crew_status' => $target]);
+            if ($target === CrewAssignmentStatus::PREFLIGHT_IN_PROGRESS) {
+                $this->ensureOperationChecklist($locked, $request->user()->id, 'preflight');
+            }
+            if ($target === CrewAssignmentStatus::POSTFLIGHT_PENDING) {
+                $this->ensureOperationChecklist($locked, $request->user()->id, 'postflight');
+            }
+            $timeline = LineaTiempoOperacion::create(['operation_id' => $locked->id, 'status' => $target, 'title' => 'Avance operativo: '.str_replace('_', ' ', $target), 'description' => $data['notes'] ?? null, 'created_by' => $request->user()->id]);
+
+            return $this->ok(['operation' => $locked->fresh(), 'timeline_item' => $timeline]);
+        });
+    }
+
+    public function submitFinalReport(Request $request, Operacion $operation)
+    {
+        abort_if($operation->sobrecargo_user_id !== $request->user()->id, 403);
+        $data = $request->validate([
+            'service_rating' => ['required', 'integer', 'between:1,5'],
+            'cabin_condition' => ['required', 'string', 'max:100'],
+            'catering_condition' => ['required', 'string', 'max:100'],
+            'passenger_observations' => ['nullable', 'string'], 'forgotten_items' => ['nullable', 'string'],
+            'damages' => ['nullable', 'string'], 'cleaning_required' => ['required', 'boolean'],
+            'restocking_required' => ['required', 'boolean'], 'general_notes' => ['nullable', 'string'],
+        ]);
+
+        return DB::transaction(function () use ($operation, $data, $request) {
+            $locked = Operacion::query()->lockForUpdate()->findOrFail($operation->id);
+            abort_if($locked->crew_report_submitted_at, 409, 'El reporte final ya fue enviado.');
+            abort_unless(CrewAssignmentStatus::normalize($locked->crew_status) === CrewAssignmentStatus::REPORT_PENDING, 409, 'Completa primero el checklist posterior al vuelo.');
+            $locked->update(['crew_final_report' => $data, 'crew_report_submitted_at' => now(), 'crew_service_completed_at' => now(), 'crew_status' => CrewAssignmentStatus::CREW_COMPLETED]);
+            $timeline = LineaTiempoOperacion::create(['operation_id' => $locked->id, 'status' => CrewAssignmentStatus::CREW_COMPLETED, 'title' => 'Reporte final entregado', 'description' => $data['general_notes'] ?? 'Reporte posterior recibido.', 'created_by' => $request->user()->id]);
+            $assignmentId = AsignacionSobrecargo::query()->where('operation_id', $locked->id)->latest('id')->value('id');
+            $this->crewAudit->record($request, $request->user(), $locked, 'report_submitted', CrewAssignmentStatus::REPORT_PENDING, CrewAssignmentStatus::CREW_COMPLETED, $data['general_notes'] ?? null, ['assignment_id' => $assignmentId]);
+            DB::afterCommit(fn () => $this->notifyAdmins($locked, 'report_submitted', 'Reporte final enviado', 'La sobrecargo envio el reporte final de la operacion.', 'success', $assignmentId));
+
+            return $this->ok(['operation' => $locked->fresh(), 'report' => $locked->crew_final_report, 'timeline_item' => $timeline], 201);
+        });
     }
 
     public function documents(Request $request)
@@ -569,6 +682,11 @@ class SobrecargoControlador extends ControladorBase
             'dias.*.state' => ['nullable', 'string', 'max:100'],
             'dias.*.motivo' => ['nullable', 'string', 'max:255'],
             'dias.*.comentario' => ['nullable', 'string'],
+            'dias.*.hora_inicio' => ['nullable', 'date_format:H:i'],
+            'dias.*.hora_fin' => ['nullable', 'date_format:H:i'],
+            'dias.*.tipo' => ['nullable', Rule::in(['available', 'blocked', 'partial'])],
+            'dias.*.base' => ['nullable', 'string', 'max:100'],
+            'dias.*.inmediata' => ['nullable', 'boolean'],
             'fecha' => ['nullable', 'date'],
             'from' => ['nullable', 'date'],
             'to' => ['nullable', 'date'],
@@ -587,6 +705,10 @@ class SobrecargoControlador extends ControladorBase
             'restriction' => ['nullable', 'string', 'max:255'],
             'notes' => ['nullable', 'string', 'max:255'],
             'operacion_id' => ['nullable', 'exists:operations,id'],
+            'hora_inicio' => ['nullable', 'date_format:H:i'],
+            'hora_fin' => ['nullable', 'date_format:H:i', 'after:hora_inicio'],
+            'tipo' => ['nullable', Rule::in(['available', 'blocked', 'partial'])],
+            'inmediata' => ['nullable', 'boolean'],
         ]);
 
         $saved = collect();
@@ -689,7 +811,6 @@ class SobrecargoControlador extends ControladorBase
 
         $operacion->update([
             'status' => 'incidencia',
-            'crew_status' => 'crew_incident_reported',
             'crew_notes' => $description ?: $operacion->crew_notes,
         ]);
 
@@ -771,6 +892,58 @@ class SobrecargoControlador extends ControladorBase
         ]);
     }
 
+    private function ensureOperationChecklist(Operacion $operation, int $crewUserId, string $type): ChecklistOperacion
+    {
+        $templates = [
+            'preparation' => [
+                ['personal_documents', 'personal', 'Documentacion personal revisada', true],
+                ['uniform_ready', 'personal', 'Uniforme listo', true],
+                ['transfer_confirmed', 'logistics', 'Traslado confirmado', true],
+                ['presentation_reviewed', 'logistics', 'Hora de presentacion revisada', true],
+                ['route_reviewed', 'operation', 'Ruta revisada', true],
+                ['aircraft_reviewed', 'operation', 'Aeronave revisada', true],
+                ['manifest_reviewed', 'passengers', 'Manifiesto consultado', true],
+                ['special_requirements', 'passengers', 'Requerimientos especiales revisados', true],
+                ['catering_reviewed', 'service', 'Catering revisado', false],
+                ['service_material_ready', 'service', 'Material de servicio preparado', false],
+            ],
+            'preflight' => [
+                ['cabin_cleaning', 'cabin', 'Limpieza de cabina', false], ['seatbelts', 'cabin', 'Asientos y cinturones', true],
+                ['baggage_secured', 'cabin', 'Equipaje asegurado', true], ['restroom', 'cabin', 'Baño revisado', false],
+                ['fire_extinguishers', 'safety', 'Extintores', true], ['first_aid', 'safety', 'Botiquin', true],
+                ['emergency_equipment', 'safety', 'Equipo de emergencia', true], ['emergency_exits', 'safety', 'Salidas libres', true],
+                ['oxygen', 'safety', 'Oxigeno', true], ['catering_received', 'service', 'Catering recibido', false],
+                ['special_food', 'service', 'Alimentos especiales', false], ['passenger_manifest', 'passengers', 'Manifiesto revisado', true],
+                ['special_passengers', 'passengers', 'Pasajeros especiales identificados', true], ['pets', 'passengers', 'Mascotas confirmadas', false],
+            ],
+            'postflight' => [
+                ['disembark_confirmed', 'passengers', 'Desembarque confirmado', true], ['forgotten_items', 'cabin', 'Objetos olvidados revisados', true],
+                ['damage_review', 'cabin', 'Daños revisados', true], ['cabin_condition', 'cabin', 'Condicion final de cabina', true],
+                ['leftover_catering', 'service', 'Catering sobrante registrado', false], ['missing_inventory', 'service', 'Faltantes registrados', false],
+                ['cabin_handover', 'operation', 'Entrega de cabina confirmada', true],
+            ],
+        ];
+        abort_unless(array_key_exists($type, $templates), 422, 'Tipo de checklist no soportado.');
+        $checklist = ChecklistOperacion::firstOrCreate(
+            ['operation_id' => $operation->id, 'sobrecargo_user_id' => $crewUserId, 'type' => $type],
+            ['status' => 'pending']
+        );
+        foreach ($templates[$type] as [$code, $category, $label, $critical]) {
+            $checklist->items()->firstOrCreate(['code' => $code], [
+                'category' => $category, 'label' => $label, 'status' => 'pending',
+                'is_required' => true, 'is_critical' => $critical, 'is_completed' => false,
+            ]);
+        }
+
+        return $checklist->load('items');
+    }
+
+    private function notifyAdmins(Operacion $operation, string $type, string $title, string $message, string $level, ?int $assignmentId = null, array $extra = []): void
+    {
+        Usuario::query()->where(fn ($query) => $query->where('role', Usuario::ROLE_ADMIN)->orWhere('operational_role', Usuario::ROLE_ADMIN))
+            ->each(fn (Usuario $admin) => $this->crewNotifications->send($admin, $operation, $type, $title, $message, $level, $assignmentId, $extra));
+    }
+
     private function formatProfilePayload(Usuario $user): array
     {
         $profile = $user->profile;
@@ -833,6 +1006,11 @@ class SobrecargoControlador extends ControladorBase
             'color' => $status?->color,
             'icono' => $status?->icono,
             'permite_asignacion' => (bool) $status?->permite_asignacion,
+            'hora_inicio' => $availability->hora_inicio,
+            'hora_fin' => $availability->hora_fin,
+            'tipo' => $availability->tipo,
+            'base' => $availability->base,
+            'inmediata' => (bool) $availability->inmediata,
             'motivo' => $availability->motivo,
             'comentario' => $availability->comentario,
             'restriction' => $availability->comentario,
@@ -947,6 +1125,19 @@ class SobrecargoControlador extends ControladorBase
         string $date,
         array $data
     ): SobrecargoDisponibilidad {
+        if (! empty($data['hora_inicio']) && ! empty($data['hora_fin'])) {
+            abort_if($data['hora_inicio'] >= $data['hora_fin'], 422, 'La hora final debe ser posterior a la hora inicial.');
+        }
+        if (! $status->permite_asignacion) {
+            $confirmedOperationExists = Operacion::query()
+                ->where('sobrecargo_user_id', $request->user()->id)
+                ->whereNotIn('crew_status', [CrewAssignmentStatus::REJECTED, CrewAssignmentStatus::CANCELLED])
+                ->whereHas('solicitudVuelo', fn ($query) => $query
+                    ->whereDate('departure_datetime', '<=', $date)
+                    ->where(fn ($range) => $range->whereNull('return_datetime')->whereDate('departure_datetime', $date)->orWhereDate('return_datetime', '>=', $date)))
+                ->exists();
+            abort_if($confirmedOperationExists, 409, 'No puedes bloquear disponibilidad sobre una operacion asignada o confirmada.');
+        }
         $existing = SobrecargoDisponibilidad::query()
             ->where('sobrecargo_id', $request->user()->id)
             ->whereDate('fecha', $date)
@@ -966,6 +1157,11 @@ class SobrecargoControlador extends ControladorBase
                 'created_by' => $existing?->created_by ?? $request->user()->id,
                 'updated_by' => $request->user()->id,
                 'bitacora' => $this->buildAvailabilityLog($existing, $status, $request->user()->id, $data),
+                'hora_inicio' => $data['hora_inicio'] ?? null,
+                'hora_fin' => $data['hora_fin'] ?? null,
+                'tipo' => $data['tipo'] ?? (($data['hora_inicio'] ?? null) ? 'partial' : ($status->permite_asignacion ? 'available' : 'blocked')),
+                'base' => $data['base'] ?? null,
+                'inmediata' => (bool) ($data['inmediata'] ?? false),
             ],
         )->loadMissing(['estatus', 'aprobadoPor:id,name', 'createdBy:id,name']);
     }
@@ -1069,11 +1265,15 @@ class SobrecargoControlador extends ControladorBase
 
         $latestResponse = $operation->timeline
             ->first(fn (LineaTiempoOperacion $item) => in_array($item->status, ['confirmada', 'rechazada', 'revision_solicitada'], true));
+        $auditTimeline = RegistroAuditoria::query()->with('user:id,name,role,operational_role')
+            ->where('module', 'crew_operations')->where('entity', 'operations')->where('entity_id', (string) $operation->id)
+            ->oldest('id')->get();
 
         return [
             'id' => $operation->id,
             'status' => $operation->status,
-            'crew_status' => $operation->crew_status,
+            'crew_status' => CrewAssignmentStatus::normalize($operation->crew_status),
+            'workflow_status' => CrewAssignmentStatus::normalize($operation->crew_status),
             'crew_status_label' => $this->humanizeCrewStatus($operation->crew_status),
             'response_status' => $assignment?->status
                 ?? match ($latestResponse?->status) {
@@ -1088,6 +1288,32 @@ class SobrecargoControlador extends ControladorBase
             'crew_checkin_at' => optional($operation->crew_checkin_at)?->toISOString(),
             'crew_service_started_at' => optional($operation->crew_service_started_at)?->toISOString(),
             'crew_service_completed_at' => optional($operation->crew_service_completed_at)?->toISOString(),
+            'assignment' => $assignment ? [
+                'id' => $assignment->id,
+                'role' => $assignment->role,
+                'status' => CrewAssignmentStatus::normalize($assignment->status),
+                'assigned_at' => optional($assignment->assigned_at)?->toISOString(),
+                'response_deadline' => optional($assignment->response_deadline)?->toISOString(),
+                'presentation_time' => optional($assignment->presentation_time)?->toISOString(),
+                'accepted_at' => optional($assignment->accepted_at)?->toISOString(),
+                'rejected_at' => optional($assignment->rejected_at)?->toISOString(),
+                'rejection_reason' => $assignment->rejection_reason,
+                'cancelled_at' => optional($assignment->cancelled_at)?->toISOString(),
+                'cancellation_reason' => $assignment->cancellation_reason,
+            ] : null,
+            'checklists' => $operation->checklists->map(fn (ChecklistOperacion $checklist) => [
+                'id' => $checklist->id,
+                'type' => $checklist->type,
+                'status' => $checklist->status,
+                'submitted_at' => optional($checklist->submitted_at)?->toISOString(),
+                'items' => $checklist->items->map(fn (ChecklistItem $item) => [
+                    'id' => $item->id, 'code' => $item->code, 'category' => $item->category,
+                    'description' => $item->description, 'status' => $item->status,
+                    'is_required' => $item->is_required, 'is_critical' => $item->is_critical,
+                    'notes' => $item->notes,
+                ])->values(),
+            ])->values(),
+            'final_report' => $operation->crew_final_report,
             'departure_datetime' => $operation->solicitudVuelo?->departure_datetime,
             'origin' => $operation->solicitudVuelo?->origin,
             'destination' => $operation->solicitudVuelo?->destination,
@@ -1099,12 +1325,25 @@ class SobrecargoControlador extends ControladorBase
             'provider_name' => $operation->proveedor?->commercial_name ?: $operation->proveedor?->company_name,
             'timeline' => $operation->timeline
                 ->map(fn (LineaTiempoOperacion $item) => [
-                    'id' => $item->id,
+                    'id' => 'timeline-'.$item->id,
                     'status' => $item->status,
                     'title' => $item->title,
                     'description' => $item->description,
                     'created_at' => optional($item->created_at)?->toISOString(),
                 ])
+                ->concat($auditTimeline->map(fn (RegistroAuditoria $item) => [
+                    'id' => 'audit-'.$item->id,
+                    'status' => data_get($item->after, 'status') ?: $item->action,
+                    'title' => str_replace('_', ' ', $item->action),
+                    'description' => $item->reason ?: $item->description,
+                    'actor' => $item->user?->name ?: 'Sistema',
+                    'actor_role' => data_get($item->metadata, 'actor_role') ?: $item->user?->effectiveRole(),
+                    'previous_status' => data_get($item->before, 'status'),
+                    'new_status' => data_get($item->after, 'status'),
+                    'reason' => $item->reason,
+                    'created_at' => optional($item->created_at)?->toISOString(),
+                ]))
+                ->sortBy('created_at')
                 ->values(),
         ];
     }

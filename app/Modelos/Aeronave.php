@@ -176,16 +176,16 @@ class Aeronave extends Model
 
         $this->baseAirportResolved = true;
 
-        $directCode = strtoupper(trim((string) ($this->base_airport ?? '')));
-
-        if ($directCode !== '') {
-            return $this->resolvedBaseAirportCodeCache = $directCode;
-        }
-
         if ($this->relationLoaded('baseAirport')) {
             $relationCode = strtoupper(trim((string) ($this->baseAirport?->icao ?: $this->baseAirport?->iata ?: '')));
+            if ($relationCode !== '') {
+                return $this->resolvedBaseAirportCodeCache = $relationCode;
+            }
+        }
 
-            return $this->resolvedBaseAirportCodeCache = ($relationCode !== '' ? $relationCode : null);
+        $directCode = strtoupper(trim((string) ($this->base_airport ?? '')));
+        if ($directCode !== '') {
+            return $this->resolvedBaseAirportCodeCache = $directCode;
         }
 
         return $this->resolvedBaseAirportCodeCache = null;

@@ -340,7 +340,7 @@ class ProviderAircraftBillingControlador extends ControladorBase
             'approved_at' => $aircraft->approved_at,
             'approved' => (bool) ($reviewState['approved'] ?? false),
             'review_status' => $reviewState['status'] ?? $aircraft->resolvedReviewStatus(),
-            'billing_status' => $billingState['status'] ?? $aircraft->billing_status,
+            'billing_status' => $billingState['billing_status'] ?? $aircraft->billing_status,
             'billing_plan_id' => $aircraft->billing_plan_id,
             'subscription_status' => $billingState['subscription_status'] ?? $aircraft->subscription_status,
             'subscription_started_at' => $aircraft->subscription_started_at,

@@ -176,12 +176,10 @@ class AeronaveControlador extends ControladorBase
         $providerId = $this->resolvedProviderIdOrAbort($request);
         $provider = $request->user()->provider ?: $request->user()->ownedProvider;
         abort_if(! $provider || (int) $provider->id !== $providerId, 422, 'El usuario proveedor no tiene provider_id asignado.');
-        $this->ensureProviderOperationalAccess($request);
-
         $data = $this->normalizeAircraftInput($request->validate($this->rules()));
         $aircraft = $provider->aircraft()->create($data + [
             'status' => 'inactive',
-            'billing_status' => 'unpaid',
+            'billing_status' => 'pending_payment',
             'subscription_status' => 'inactive',
             'currency' => $data['currency'] ?? 'USD',
         ]);
@@ -206,7 +204,7 @@ class AeronaveControlador extends ControladorBase
             'state' => $state,
             'message' => 'Aeronave registrada y enviada a revisión administrativa.',
             'review_status' => $state['review']['status'] ?? 'pending_review',
-            'status' => $state['activation']['commercial_status'] ?? 'inactive',
+            'status' => $aircraft->status,
             'redirect_to' => '/provider/aircraft/'.$aircraft->id.'/billing',
         ], 201);
     }
@@ -268,6 +266,8 @@ class AeronaveControlador extends ControladorBase
 
     public function storeAvailability(Request $request)
     {
+        $this->ensureProviderOperationalAccess($request);
+
         $data = $request->validate([
             'aircraft_id' => ['required', 'exists:aircraft,id'],
             'start_datetime' => ['required', 'date'],
@@ -703,6 +703,8 @@ class AeronaveControlador extends ControladorBase
 
     public function availability(Request $request)
     {
+        $this->ensureProviderOperationalAccess($request);
+
         $query = DisponibilidadAeronave::with('aircraft');
 
         if ($request->user()->hasRole('provider') && ! $request->user()->hasRole('admin')) {
@@ -714,6 +716,7 @@ class AeronaveControlador extends ControladorBase
 
     public function updateAvailability(Request $request, DisponibilidadAeronave $availability)
     {
+        $this->ensureProviderOperationalAccess($request);
         $this->authorizeProveedorAeronave($request, $availability->aircraft);
 
         DB::transaction(function () use ($availability, $request): void {
@@ -735,6 +738,7 @@ class AeronaveControlador extends ControladorBase
 
     public function destroyAvailability(Request $request, DisponibilidadAeronave $availability)
     {
+        $this->ensureProviderOperationalAccess($request);
         $this->authorizeProveedorAeronave($request, $availability->aircraft);
         $aircraft = $availability->aircraft;
         $availability->delete();
@@ -1150,9 +1154,6 @@ class AeronaveControlador extends ControladorBase
 
         abort_if($aircraft->provider_id !== $this->resolvedProviderIdOrAbort($request, 403), 403, 'No puedes gestionar esta aeronave.');
 
-        if (! $request->isMethod('get') && ! $request->isMethod('head')) {
-            $this->ensureProviderOperationalAccess($request);
-        }
     }
 
     private function formatPublicAircraftPayload(Aeronave $aircraft): array
