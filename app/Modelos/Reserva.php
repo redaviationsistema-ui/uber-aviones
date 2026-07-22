@@ -83,6 +83,7 @@ class Reserva extends Model
                 'payments.paid_at',
                 'payments.stripe_checkout_session_id',
                 'payments.stripe_payment_intent_id',
+                'payments.gateway_response',
                 'payments.created_at',
                 'payments.updated_at',
             ]);

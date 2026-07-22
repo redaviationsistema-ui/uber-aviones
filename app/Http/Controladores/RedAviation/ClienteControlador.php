@@ -755,14 +755,20 @@ class ClienteControlador extends ControladorBase
         $acceptedQuote = null,
         ?int $chatId = null,
     ) {
-        $loadedRequest = $solicitud->fresh([
-            'assignedAircraft.images',
-            'matches.aircraft.images',
-            'chatsProtegidos',
-            'operaciones.timeline',
-            'legs',
-            'quotes',
-        ]);
+        $loadedRequest = SolicitudVuelo::query()
+            ->with([
+                'assignedAircraft:id,model,category,capacity',
+                'assignedAircraft.images:id,aircraft_id,kind,title,image_url,sort_order,is_main,visible_to_client',
+                'matches:id,flight_request_id,aircraft_id,status,estimated_price,visibility_payload',
+                'matches.aircraft:id,model,category,capacity',
+                'matches.aircraft.images:id,aircraft_id,kind,title,image_url,sort_order,is_main,visible_to_client',
+                'chatsProtegidos:id,flight_request_id,status',
+                'latestOperation',
+                'latestOperation.timeline:id,operation_id,status,title,description,created_at',
+                'legs:id,flight_request_id,leg_order,origin,destination,departure_datetime,arrival_datetime,passengers,distance_km',
+                'quotes:id,flight_request_id,aircraft_id,provider_id,status,total,currency,expires_at',
+            ])
+            ->findOrFail($solicitud->id);
 
         $acceptedQuote ??= $loadedRequest->quotes
             ->where('status', 'accepted')

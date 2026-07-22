@@ -43,6 +43,7 @@ Route::prefix('cliente')->middleware(['auth.token', 'role:client,admin'])->group
 
     Route::get('/reservas', [ReservaControlador::class, 'index']);
     Route::get('/reservas/{reservation}', [ReservaControlador::class, 'show']);
+    Route::get('/reservas/{reservation}/payment-availability', [ReservaControlador::class, 'paymentAvailability']);
     Route::post('/reservas', [ReservaControlador::class, 'store'])->middleware('premium');
     Route::get('/reservas/{reservation}/contrato', [ReservaControlador::class, 'showContract']);
     Route::get('/reservas/{reservation}/contrato/pdf', [ReservaControlador::class, 'downloadContractPdf']);
@@ -50,6 +51,7 @@ Route::prefix('cliente')->middleware(['auth.token', 'role:client,admin'])->group
     Route::post('/reservas/{reservation}/contrato/docusign', [ReservaControlador::class, 'startEmbeddedSigning']);
     Route::post('/reservas/{reservation}/contrato/firmar', [ReservaControlador::class, 'signContract']);
     Route::get('/solicitudes/{reservation}/contrato', [ReservaControlador::class, 'showContract']);
+    Route::get('/solicitudes/{reservation}/payment-availability', [ReservaControlador::class, 'paymentAvailability']);
     Route::get('/solicitudes/{reservation}/contrato/pdf', [ReservaControlador::class, 'downloadContractPdf']);
     Route::post('/solicitudes/{reservation}/contrato/generar', [ReservaControlador::class, 'generateContract']);
     Route::post('/solicitudes/{reservation}/contrato/docusign', [ReservaControlador::class, 'startEmbeddedSigning']);

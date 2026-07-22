@@ -95,6 +95,27 @@ class ReservaControlador extends ControladorBase
         ]);
     }
 
+    public function paymentAvailability(Request $request, mixed $reservation)
+    {
+        $reservation = $this->resolveReservation($reservation);
+
+        if ($request->user()->hasRole('client') && ! $request->user()->hasRole('admin')) {
+            abort_if($reservation->client_id !== $request->user()->id, 403);
+        }
+
+        if ($request->user()->hasRole('provider') && ! $request->user()->hasRole('admin')) {
+            abort_if($reservation->provider_id !== $request->user()->provider?->id, 403);
+        }
+
+        $availability = $this->aircraftAvailabilityService->evaluateReservationPaymentAvailability($reservation, true);
+        $invalidReason = (string) ($availability['invalid_reason'] ?? '');
+
+        return $this->ok([
+            ...$availability,
+            'message' => $this->paymentAvailabilityMessage($invalidReason, (bool) ($availability['can_pay'] ?? false)),
+        ]);
+    }
+
     public function store(Request $request)
     {
         $data = $request->validate([
@@ -250,6 +271,27 @@ class ReservaControlador extends ControladorBase
         });
 
         return $reservation->fresh(['quote', 'aircraft', 'provider.user', 'flightRequest', 'payments']);
+    }
+
+    private function paymentAvailabilityMessage(string $invalidReason, bool $canPay): string
+    {
+        if ($canPay) {
+            return 'La reserva puede continuar al checkout.';
+        }
+
+        return match ($invalidReason) {
+            'hold_expired' => 'La retencion vencio. Estamos verificando nuevamente la disponibilidad de la aeronave.',
+            'hold_released' => 'La retencion ya fue liberada y necesitamos validar una nueva disponibilidad.',
+            'hold_not_found' => 'No encontramos una retencion valida asociada a esta reserva.',
+            'hold_dates_missing', 'reservation_missing_schedule' => 'No se encontro una fecha y hora confirmadas para esta reserva.',
+            'hold_dates_mismatch' => 'La ventana de la retencion no coincide con la reserva actual.',
+            'hold_aircraft_mismatch' => 'La retencion encontrada pertenece a otra aeronave.',
+            'hold_reservation_mismatch' => 'La retencion encontrada no coincide con esta reserva.',
+            'hold_quote_mismatch' => 'La retencion encontrada no coincide con la cotizacion aceptada.',
+            'aircraft_booked_by_other_reservation' => 'La aeronave ya fue reservada para ese horario. Selecciona otra opcion.',
+            'invalid_timezone' => 'No fue posible validar la zona horaria de esta reserva.',
+            default => 'No fue posible validar la disponibilidad actual de la aeronave.',
+        };
     }
 
     private function appendReservationStripeState(Reserva $reservation): Reserva

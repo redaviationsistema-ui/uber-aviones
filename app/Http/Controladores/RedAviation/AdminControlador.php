@@ -2475,7 +2475,8 @@ class AdminControlador extends ControladorBase
             $adminEta = $data['admin_delay_eta'] ?? $data['delay_eta'] ?? $data['hold_eta'] ?? '';
             $adminNote = $data['admin_note'] ?? '';
             $contractStatus = null;
-            $paymentStatus = $data['payment_status'] ?? $flightRequest->payment_status;
+            $normalizedRequestedPaymentStatus = $this->normalizeWorkflowPaymentStatus($data['payment_status'] ?? null);
+            $paymentStatus = $normalizedRequestedPaymentStatus ?? $this->normalizeWorkflowPaymentStatus($flightRequest->payment_status);
             $operation = Operacion::query()
                 ->where('flight_request_id', $flightRequest->id)
                 ->latest('id')
@@ -2511,7 +2512,7 @@ class AdminControlador extends ControladorBase
             $flightRequest->fill([
                 'status' => $nextRequestStatus,
                 'workflow_status' => $requestedWorkflowStatus ?? $flightRequest->workflow_status,
-                'payment_status' => $data['payment_status'] ?? $flightRequest->payment_status,
+                'payment_status' => $normalizedRequestedPaymentStatus ?? $flightRequest->payment_status,
                 'notes' => $data['notes'] ?? $flightRequest->notes,
                 'visibility_payload' => [
                     ...$visibilityPayload,
@@ -2547,6 +2548,10 @@ class AdminControlador extends ControladorBase
                     };
                 }
 
+                if (($reservationUpdates['status'] ?? null) === 'confirmed' && ! $reservation->confirmed_at) {
+                    $reservationUpdates['confirmed_at'] = now();
+                }
+
                 if (! empty($reservationUpdates)) {
                     $reservation->update($reservationUpdates);
                 }
@@ -2568,17 +2573,17 @@ class AdminControlador extends ControladorBase
                 if (! empty($data['payment_status'])) {
                     $payment = $reservation->payments()->latest('id')->first();
                     if ($payment) {
-                        $normalizedPaymentStatus = Str::lower(trim((string) $data['payment_status']));
+                        $normalizedPaymentStatus = $this->normalizeWorkflowPaymentStatus($data['payment_status']);
                         $payment->update([
                             'status' => match ($normalizedPaymentStatus) {
-                                'pagado', 'paid' => 'paid',
-                                'pendiente', 'pending', 'pendiente de pago' => 'pending',
-                                'retenido', 'held' => 'held',
-                                'reembolsado', 'refunded' => 'refunded',
-                                'fallido', 'failed' => 'failed',
+                                'paid' => 'paid',
+                                'pending' => 'pending',
+                                'held' => 'held',
+                                'refunded' => 'refunded',
+                                'failed' => 'failed',
                                 default => $payment->status,
                             },
-                            'paid_at' => in_array($normalizedPaymentStatus, ['pagado', 'paid'], true)
+                            'paid_at' => $normalizedPaymentStatus === 'paid'
                                 ? ($payment->paid_at ?? now())
                                 : $payment->paid_at,
                         ]);
@@ -3937,6 +3942,22 @@ class AdminControlador extends ControladorBase
             'released' => 'Bloqueo liberado',
             'cancelled' => 'Bloqueo cancelado',
             default => $block->reservation_id ? 'Reserva bloqueada' : 'Bloqueo manual',
+        };
+    }
+
+    private function normalizeWorkflowPaymentStatus(?string $value): ?string
+    {
+        $normalizedValue = Str::lower(trim((string) ($value ?? '')));
+
+        return match ($normalizedValue) {
+            '', null => null,
+            'pagado', 'paid', 'pago confirmado', 'payment_confirmed', 'confirmado', 'confirmed' => 'paid',
+            'pendiente', 'pending', 'pendiente de pago', 'payment_pending', 'processing', 'en proceso' => 'pending',
+            'retenido', 'held' => 'held',
+            'reembolsado', 'refunded' => 'refunded',
+            'cancelado', 'cancelled', 'canceled' => 'cancelled',
+            'fallido', 'failed' => 'failed',
+            default => $normalizedValue,
         };
     }
 

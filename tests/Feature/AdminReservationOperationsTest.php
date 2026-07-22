@@ -5,12 +5,14 @@ namespace Tests\Feature;
 use App\Modelos\AircraftAvailabilityBlock;
 use App\Modelos\Aeronave;
 use App\Modelos\AsignacionSobrecargo;
+use App\Modelos\Cotizacion;
 use App\Modelos\Operacion;
 use App\Modelos\Proveedor;
 use App\Modelos\Reserva;
 use App\Modelos\SolicitudVuelo;
 use App\Modelos\TramoReserva;
 use App\Modelos\Usuario;
+use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
@@ -21,6 +23,8 @@ class AdminReservationOperationsTest extends TestCase
     public function test_admin_can_reschedule_paid_reservation_without_creating_duplicate_blocks(): void
     {
         [$token, $provider, $client] = $this->bootstrapAdminScenario();
+        $originalSchedule = $this->makeSchedule(startDays: 4, startHour: 9, durationHours: 4.5);
+        $rescheduled = $this->makeSchedule(startDays: 5, startHour: 10, durationHours: 4);
 
         $aircraftA = $this->createAircraft($provider, 'XA-RED1', 'Learjet 31A');
         $aircraftB = $this->createAircraft($provider, 'XA-RED2', 'Citation XLS');
@@ -28,8 +32,8 @@ class AdminReservationOperationsTest extends TestCase
         [$flightRequest, $reservation] = $this->createPaidReservation($client, $provider, $aircraftA, [
             'origin' => 'MMTO',
             'destination' => 'MMMX',
-            'departure_datetime' => '2026-07-10 09:00:00',
-            'return_datetime' => '2026-07-10 13:30:00',
+            'departure_datetime' => $originalSchedule['departure_datetime'],
+            'return_datetime' => $originalSchedule['return_datetime'],
         ]);
 
         $response = $this
@@ -39,8 +43,8 @@ class AdminReservationOperationsTest extends TestCase
                 'aircraft_id' => $aircraftB->id,
                 'origin' => 'MMMX',
                 'destination' => 'MMTO',
-                'departure_datetime' => '2026-07-11 10:00:00',
-                'return_datetime' => '2026-07-11 14:00:00',
+                'departure_datetime' => $rescheduled['departure_datetime'],
+                'return_datetime' => $rescheduled['return_datetime'],
             ]);
 
         $response
@@ -65,8 +69,8 @@ class AdminReservationOperationsTest extends TestCase
         $this->assertSame($aircraftB->id, $block->aircraft_id);
         $this->assertSame('booked', $block->status);
         $this->assertNull($block->released_at);
-        $this->assertSame('2026-07-11 10:00:00', $block->start_datetime->format('Y-m-d H:i:s'));
-        $this->assertSame('2026-07-11 14:00:00', $block->end_datetime->format('Y-m-d H:i:s'));
+        $this->assertSame($rescheduled['departure_datetime'], $block->start_datetime->format('Y-m-d H:i:s'));
+        $this->assertSame($rescheduled['return_datetime'], $block->end_datetime->format('Y-m-d H:i:s'));
         $this->assertSame('MMMX', $flightRequest->origin);
         $this->assertSame('MMTO', $flightRequest->destination);
         $this->assertTrue($releasedBlocks->contains(fn ($releasedBlock) => $releasedBlock->aircraft_id === $aircraftA->id));
@@ -75,13 +79,14 @@ class AdminReservationOperationsTest extends TestCase
     public function test_admin_cancel_reservation_releases_block_and_crew_assignment(): void
     {
         [$token, $provider, $client] = $this->bootstrapAdminScenario();
+        $schedule = $this->makeSchedule(startDays: 6, startHour: 8, durationHours: 3.5);
 
         $aircraft = $this->createAircraft($provider, 'XA-RED3', 'Hawker 800XP');
         [$flightRequest, $reservation] = $this->createPaidReservation($client, $provider, $aircraft, [
             'origin' => 'MMMX',
             'destination' => 'MMTO',
-            'departure_datetime' => '2026-07-12 08:00:00',
-            'return_datetime' => '2026-07-12 11:30:00',
+            'departure_datetime' => $schedule['departure_datetime'],
+            'return_datetime' => $schedule['return_datetime'],
         ]);
 
         $crew = Usuario::factory()->create([
@@ -135,6 +140,7 @@ class AdminReservationOperationsTest extends TestCase
     public function test_admin_can_create_and_release_manual_aircraft_blocks(): void
     {
         [$token, $provider] = $this->bootstrapAdminScenario();
+        $schedule = $this->makeSchedule(startDays: 9, startHour: 7, durationHours: 12);
         $aircraft = $this->createAircraft($provider, 'XA-RED4', 'Phenom 300');
 
         $createResponse = $this
@@ -142,8 +148,8 @@ class AdminReservationOperationsTest extends TestCase
             ->postJson('/api/v1/admin/operations/aircraft-blocks', [
                 'aircraft_id' => $aircraft->id,
                 'block_type' => 'maintenance',
-                'start_datetime' => '2026-07-15 07:00:00',
-                'end_datetime' => '2026-07-15 19:00:00',
+                'start_datetime' => $schedule['departure_datetime'],
+                'end_datetime' => $schedule['return_datetime'],
                 'reason' => 'Inspeccion mayor',
             ]);
 
@@ -167,6 +173,103 @@ class AdminReservationOperationsTest extends TestCase
             'status' => 'released',
             'reason' => 'Mantenimiento concluido.',
         ]);
+    }
+
+    public function test_admin_workflow_normalizes_paid_status_and_creates_booked_block(): void
+    {
+        [$token, $provider, $client] = $this->bootstrapAdminScenario();
+        $holdWindow = $this->makeSchedule(startDays: 14, startHour: 15, durationHours: 99);
+
+        $aircraft = $this->createAircraft($provider, 'XA-RED5', 'Learjet 45');
+        [$flightRequest, $reservation] = $this->createPaidReservation($client, $provider, $aircraft, [
+            'origin' => 'MMTO',
+            'destination' => 'MMMM',
+            'departure_datetime' => $holdWindow['departure_datetime'],
+            'return_datetime' => $holdWindow['return_datetime'],
+        ]);
+
+        $flightRequest->update([
+            'payment_status' => 'pending',
+            'status' => 'reserved',
+            'workflow_status' => 'pago pendiente',
+        ]);
+
+        $reservation->update([
+            'status' => 'pending_payment',
+            'confirmed_at' => null,
+        ]);
+
+        $quote = Cotizacion::query()->create([
+            'flight_request_id' => $flightRequest->id,
+            'provider_id' => $provider->id,
+            'aircraft_id' => $aircraft->id,
+            'subtotal' => 12000,
+            'taxes' => 1900,
+            'fees' => 400,
+            'total' => 14300,
+            'currency' => 'USD',
+            'status' => 'accepted',
+            'expires_at' => now()->addDay(),
+        ]);
+
+        $reservation->update([
+            'quote_id' => $quote->id,
+        ]);
+
+        $reservation->payments()->latest('id')->first()?->update([
+            'status' => 'pending',
+            'paid_at' => null,
+        ]);
+
+        AircraftAvailabilityBlock::query()
+            ->where('aircraft_id', $aircraft->id)
+            ->delete();
+
+        AircraftAvailabilityBlock::query()->create([
+            'aircraft_id' => $aircraft->id,
+            'reservation_id' => null,
+            'quote_id' => $reservation->quote_id,
+            'flight_request_id' => $reservation->flight_request_id,
+            'user_id' => $reservation->client_id,
+            'block_type' => 'payment_hold',
+            'start_datetime' => $holdWindow['departure_datetime'],
+            'end_datetime' => $holdWindow['return_datetime'],
+            'status' => 'held',
+            'payment_status' => 'pending',
+            'source' => 'quote_checkout',
+            'reason' => 'Retencion temporal para completar el pago del vuelo.',
+            'hold_expires_at' => now()->addMinutes(15),
+        ]);
+
+        $this
+            ->withToken($token)
+            ->putJson("/api/v1/admin/requests/{$flightRequest->id}/workflow", [
+                'workflow_status' => 'pago confirmado',
+                'payment_status' => 'Pagado',
+                'contract_status' => 'signed',
+            ])
+            ->assertOk()
+            ->assertJsonPath('request.payment_status', 'paid');
+
+        $flightRequest->refresh();
+        $reservation->refresh();
+        $bookedBlock = AircraftAvailabilityBlock::query()
+            ->where('reservation_id', $reservation->id)
+            ->where('status', 'booked')
+            ->sole();
+        $releasedHold = AircraftAvailabilityBlock::query()
+            ->where('flight_request_id', $flightRequest->id)
+            ->whereNull('reservation_id')
+            ->where('status', 'released')
+            ->latest('id')
+            ->first();
+
+        $this->assertSame('paid', $flightRequest->payment_status);
+        $this->assertSame('confirmed', $reservation->status);
+        $this->assertNotNull($reservation->confirmed_at);
+        $this->assertSame($holdWindow['departure_datetime'], $bookedBlock->start_datetime->format('Y-m-d H:i:s'));
+        $this->assertSame($holdWindow['return_datetime'], $bookedBlock->end_datetime->format('Y-m-d H:i:s'));
+        $this->assertSame('released', $releasedHold?->status);
     }
 
     private function bootstrapAdminScenario(): array
@@ -269,5 +372,22 @@ class AdminReservationOperationsTest extends TestCase
         ]);
 
         return [$flightRequest, $reservation];
+    }
+
+    private function makeSchedule(int $startDays, int $startHour, float $durationHours): array
+    {
+        $departure = now()->copy()->addDays($startDays)->setTime($startHour, 0, 0);
+        $return = $departure->copy()->addMinutes((int) round($durationHours * 60));
+
+        return [
+            'departure' => $departure,
+            'return' => $return,
+            'departure_datetime' => $departure->format('Y-m-d H:i:s'),
+            'return_datetime' => $return->format('Y-m-d H:i:s'),
+            'departure_date' => $departure->toDateString(),
+            'departure_time' => $departure->format('H:i'),
+            'return_date' => $return->toDateString(),
+            'return_time' => $return->format('H:i'),
+        ];
     }
 }

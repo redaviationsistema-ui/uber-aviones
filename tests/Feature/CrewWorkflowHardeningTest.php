@@ -11,8 +11,10 @@ use App\Modelos\Proveedor;
 use App\Modelos\RegistroAuditoria;
 use App\Modelos\SolicitudVuelo;
 use App\Modelos\Usuario;
+use App\Servicios\Sobrecargo\CrewOperationalNotificationService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
@@ -144,6 +146,44 @@ class CrewWorkflowHardeningTest extends TestCase
         $this->artisan('crew:send-operational-reminders')->assertSuccessful();
         $this->artisan('crew:send-operational-reminders')->assertSuccessful();
         $this->assertSame(1, Notificacion::where('user_id', $crew->id)->where('type', 'assignment_deadline_soon')->count());
+    }
+
+    public function test_operational_notifications_remain_idempotent_when_notifications_table_lacks_idempotency_key(): void
+    {
+        [$operation, $crew] = $this->crewOperation();
+
+        Schema::shouldReceive('hasColumn')
+            ->once()
+            ->with('notifications', 'idempotency_key')
+            ->andReturn(false);
+
+        /** @var CrewOperationalNotificationService $service */
+        $service = app(CrewOperationalNotificationService::class);
+
+        $first = $service->send(
+            $crew,
+            $operation,
+            'new_assignment',
+            'Nueva asignacion operativa',
+            'Tienes una nueva asignacion pendiente de respuesta.',
+            'info',
+            12,
+            ['response_deadline' => now()->addHours(3)->toISOString()],
+        );
+
+        $second = $service->send(
+            $crew,
+            $operation,
+            'new_assignment',
+            'Nueva asignacion operativa',
+            'Tienes una nueva asignacion pendiente de respuesta.',
+            'info',
+            12,
+            ['response_deadline' => data_get($first->payload, 'response_deadline')],
+        );
+
+        $this->assertSame($first->id, $second->id);
+        $this->assertSame(1, Notificacion::query()->where('user_id', $crew->id)->where('type', 'new_assignment')->count());
     }
 
     private function crewOperation(string $status = CrewAssignmentStatus::PENDING_CONFIRMATION): array

@@ -54,10 +54,24 @@ class StripePagoControlador extends ControladorBase
         abort_if($flightRequest->client_id !== $request->user()->id, 403, 'No puedes confirmar el pago de esta solicitud.');
 
         $reservation = $this->ensureReservationForFlightRequest($flightRequest, $request->user()->id);
-        try {
-            $this->ensureReservationAircraftHold($flightRequest, $reservation, (int) $request->user()->id);
-        } catch (RuntimeException $exception) {
-            abort(409, $exception->getMessage());
+        $paymentAvailability = $this->aircraftAvailabilityService->evaluateReservationPaymentAvailability(
+            $reservation->fresh(['flightRequest.legs', 'legs', 'quote', 'latestPayment', 'contract'])
+        );
+
+        if (! ($paymentAvailability['can_pay'] ?? false)) {
+            return response()->json([
+                'success' => false,
+                'can_pay' => false,
+                'hold_valid' => (bool) ($paymentAvailability['hold_valid'] ?? false),
+                'reservation_booked' => (bool) ($paymentAvailability['reservation_booked'] ?? false),
+                'reason' => $paymentAvailability['invalid_reason'] ?? 'hold_not_found',
+                'invalid_reason' => $paymentAvailability['invalid_reason'] ?? 'hold_not_found',
+                'message' => $this->reservationPaymentAvailabilityMessage(
+                    (string) ($paymentAvailability['invalid_reason'] ?? '')
+                ),
+                'availability' => $paymentAvailability['availability'] ?? null,
+                'hold' => $paymentAvailability['hold'] ?? null,
+            ], 409);
         }
 
         $checkoutSessionId = trim((string) ($data['checkout_session_id'] ?? ''));
@@ -687,17 +701,25 @@ class StripePagoControlador extends ControladorBase
                 $payment->refresh();
             }
 
-            if ($payment && $payment->status !== 'paid') {
+            if (
+                $payment
+                && $payment->status !== 'paid'
+                && ! $this->isReservationPaymentAlreadyFinalized(
+                    payment: $payment,
+                    reservation: $reservation,
+                    flightRequest: $flightRequest,
+                )
+            ) {
                 $this->finalizePendingStoredStripePayment($payment);
                 $payment->refresh();
             }
 
-            $reservation = $reservation?->fresh(['contract', 'payments', 'flightRequest'])
-                ?? $payment?->reservation?->fresh(['contract', 'payments', 'flightRequest']);
+            $reservation = $reservation?->fresh(['contract', 'latestPayment', 'flightRequest'])
+                ?? $payment?->reservation?->fresh(['contract', 'latestPayment', 'flightRequest']);
             $flightRequest = $flightRequest?->fresh(['reservation'])
                 ?? $reservation?->flightRequest?->fresh(['reservation'])
                 ?? $payment?->flightRequest?->fresh(['reservation']);
-            $latestPayment = $reservation?->payments?->sortByDesc('id')->first() ?? $payment?->fresh();
+            $latestPayment = $reservation?->latestPayment ?? $payment?->fresh();
             $resolvedSessionId = $sessionId !== ''
                 ? $sessionId
                 : (string) ($flightRequest?->stripe_checkout_session_id ?? $latestPayment?->stripe_checkout_session_id ?? '');
@@ -887,6 +909,15 @@ class StripePagoControlador extends ControladorBase
 
     private function finalizePendingStoredStripePayment(Pago $payment): void
     {
+        $payment->loadMissing(['reservation.latestPayment', 'flightRequest']);
+        if ($this->isReservationPaymentAlreadyFinalized(
+            payment: $payment,
+            reservation: $payment->reservation,
+            flightRequest: $payment->flightRequest,
+        )) {
+            return;
+        }
+
         $paymentIntentId = trim((string) $payment->stripe_payment_intent_id);
         if ($paymentIntentId === '') {
             return;
@@ -974,7 +1005,12 @@ class StripePagoControlador extends ControladorBase
     {
         $existing = $flightRequest->reservation()->latest('id')->first();
         if ($existing) {
-            $this->ensureReservationAircraftAvailability((int) $existing->aircraft_id, $flightRequest);
+            $this->ensureReservationAircraftAvailability(
+                (int) $existing->aircraft_id,
+                $flightRequest,
+                (int) $existing->id,
+                $existing->quote_id ? (int) $existing->quote_id : null,
+            );
             return $existing;
         }
 
@@ -989,7 +1025,12 @@ class StripePagoControlador extends ControladorBase
 
         abort_if(! $providerId || ! $aircraftId, 409, 'La solicitud aun no tiene proveedor y aeronave confirmados.');
         abort_if($amount <= 0, 422, 'La solicitud no tiene un monto valido para crear la reserva.');
-        $this->ensureReservationAircraftAvailability((int) $aircraftId, $flightRequest);
+        $this->ensureReservationAircraftAvailability(
+            (int) $aircraftId,
+            $flightRequest,
+            null,
+            $acceptedQuote?->id ? (int) $acceptedQuote->id : null,
+        );
 
         return Reserva::create([
             'client_id' => $userId,
@@ -1006,12 +1047,21 @@ class StripePagoControlador extends ControladorBase
 
     private function ensureReservationAircraftHold(SolicitudVuelo $flightRequest, Reserva $reservation, int $userId): void
     {
-        $acceptedQuote = $this->resolveAcceptedQuoteForFlightRequest($flightRequest, $reservation);
-        if (! $acceptedQuote) {
+        $availability = $this->aircraftAvailabilityService->evaluateReservationPaymentAvailability($reservation, true);
+
+        if ((bool) ($availability['can_pay'] ?? false)) {
             return;
         }
 
-        $this->aircraftAvailabilityService->holdAircraftForQuote($acceptedQuote->loadMissing(['flightRequest.legs', 'aircraft']), $userId, $reservation);
+        throw new RuntimeException((string) (
+            $availability['message']
+            ?? match ((string) ($availability['invalid_reason'] ?? '')) {
+                'reservation_missing_schedule', 'hold_dates_missing' => 'No se encontro una fecha y hora confirmadas para esta reserva.',
+                'hold_expired' => 'La retencion vencio. Estamos verificando nuevamente la disponibilidad de la aeronave.',
+                'aircraft_booked_by_other_reservation' => 'La aeronave ya fue reservada para ese horario. Selecciona otra opcion.',
+                default => 'No fue posible validar la disponibilidad actual de la aeronave.',
+            }
+        ));
     }
 
     private function resolveAcceptedQuoteForFlightRequest(SolicitudVuelo $flightRequest, ?Reserva $reservation = null): ?Cotizacion
@@ -1138,8 +1188,8 @@ class StripePagoControlador extends ControladorBase
             $this->aircraftAvailabilityService->blockAircraftForPaidReservation($reservation->fresh(['flightRequest.legs', 'legs']));
         });
 
-        $reservation->refresh()->load(['contract', 'payments', 'flightRequest']);
-        $paymentOrder = $reservation->payments->sortByDesc('id')->first();
+        $reservation = $reservation->fresh(['contract', 'latestPayment', 'flightRequest']);
+        $paymentOrder = $reservation?->latestPayment;
         $flightRequest->refresh();
 
         Log::info('Pago Stripe confirmado manualmente/sincronizado.', [
@@ -1201,8 +1251,8 @@ class StripePagoControlador extends ControladorBase
 
     private function confirmedReservationPaymentResponse(SolicitudVuelo $flightRequest, Reserva $reservation): JsonResponse
     {
-        $reservation = $reservation->fresh(['contract', 'payments', 'flightRequest']);
-        $paymentOrder = $reservation?->payments?->sortByDesc('id')->first();
+        $reservation = $reservation->fresh(['contract', 'latestPayment', 'flightRequest']);
+        $paymentOrder = $reservation?->latestPayment;
 
         return $this->ok([
             'reservation' => $reservation ? $this->appendReservationStripeState($reservation) : null,
@@ -1226,6 +1276,15 @@ class StripePagoControlador extends ControladorBase
     {
         $sessionId = trim($sessionId);
         if ($sessionId === '') {
+            return;
+        }
+
+        $payment->loadMissing(['reservation.latestPayment', 'flightRequest']);
+        if ($this->isReservationPaymentAlreadyFinalized(
+            payment: $payment,
+            reservation: $payment->reservation,
+            flightRequest: $payment->flightRequest,
+        )) {
             return;
         }
 
@@ -1349,7 +1408,12 @@ class StripePagoControlador extends ControladorBase
         ]);
     }
 
-    private function ensureReservationAircraftAvailability(int $aircraftId, ?SolicitudVuelo $flightRequest): void
+    private function ensureReservationAircraftAvailability(
+        int $aircraftId,
+        ?SolicitudVuelo $flightRequest,
+        ?int $ignoreReservationId = null,
+        ?int $ignoreQuoteId = null,
+    ): void
     {
         if ($aircraftId <= 0 || ! $flightRequest) {
             return;
@@ -1366,7 +1430,15 @@ class StripePagoControlador extends ControladorBase
             )->values()->all(),
         ]);
 
-        if (! $this->aircraftAvailabilityService->aircraftHasConflict($aircraftId, $requestedStart, $requestedEnd)) {
+        if (! $this->aircraftAvailabilityService->aircraftHasConflictExcluding(
+            $aircraftId,
+            $requestedStart,
+            $requestedEnd,
+            $ignoreReservationId,
+            null,
+            $ignoreQuoteId,
+            null,
+        )) {
             return;
         }
 
@@ -1519,6 +1591,13 @@ class StripePagoControlador extends ControladorBase
 
         if ($checkoutIsPaid && $flightRequest) {
             $reservation = $reservation ?: $this->ensureReservationForFlightRequest($flightRequest, $userId);
+            if ($this->isReservationPaymentAlreadyFinalized(
+                payment: $payment,
+                reservation: $reservation,
+                flightRequest: $flightRequest,
+            )) {
+                return;
+            }
             $this->finalizeSuccessfulPayment(
                 flightRequest: $flightRequest,
                 reservation: $reservation,
@@ -1562,6 +1641,22 @@ class StripePagoControlador extends ControladorBase
         return null;
     }
 
+    private function isReservationPaymentAlreadyFinalized(
+        ?Pago $payment = null,
+        ?Reserva $reservation = null,
+        ?SolicitudVuelo $flightRequest = null,
+    ): bool {
+        $paymentStatus = strtolower(trim((string) ($payment?->status ?? '')));
+        $reservationStatus = strtolower(trim((string) ($reservation?->status ?? '')));
+        $flightRequestPaymentStatus = strtolower(trim((string) ($flightRequest?->payment_status ?? '')));
+        $flightRequestStatus = strtolower(trim((string) ($flightRequest?->status ?? '')));
+
+        return $paymentStatus === 'paid'
+            || in_array($reservationStatus, ['paid', 'confirmed'], true)
+            || $flightRequestPaymentStatus === 'paid'
+            || $flightRequestStatus === 'confirmed';
+    }
+
     private function auditStripeAction(
         ?int $userId,
         string $action,
@@ -1578,5 +1673,22 @@ class StripePagoControlador extends ControladorBase
             $request?->ip(),
             $request?->userAgent(),
         );
+    }
+
+    private function reservationPaymentAvailabilityMessage(string $invalidReason): string
+    {
+        return match ($invalidReason) {
+            'hold_expired' => 'La retencion vencio. Estamos verificando nuevamente la disponibilidad de la aeronave.',
+            'hold_released' => 'La retencion ya fue liberada y necesitamos validar una nueva disponibilidad.',
+            'hold_not_found' => 'No encontramos una retencion valida asociada a esta reserva.',
+            'hold_dates_missing', 'reservation_missing_schedule' => 'No se encontro una fecha y hora confirmadas para esta reserva.',
+            'hold_dates_mismatch' => 'La ventana de la retencion no coincide con la reserva actual.',
+            'hold_aircraft_mismatch' => 'La retencion encontrada pertenece a otra aeronave.',
+            'hold_reservation_mismatch' => 'La retencion encontrada no coincide con esta reserva.',
+            'hold_quote_mismatch' => 'La retencion encontrada no coincide con la cotizacion aceptada.',
+            'aircraft_booked_by_other_reservation' => 'La aeronave ya fue reservada para ese horario. Selecciona otra opcion.',
+            'invalid_timezone' => 'No fue posible validar la zona horaria de esta reserva.',
+            default => 'No fue posible validar la disponibilidad actual de la aeronave.',
+        };
     }
 }

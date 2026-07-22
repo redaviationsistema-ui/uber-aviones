@@ -11,6 +11,7 @@ use Carbon\Carbon;
 use DateTimeInterface;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use RuntimeException;
 use Throwable;
@@ -53,14 +54,17 @@ class AircraftAvailabilityService
 
     public function blockAircraftForPaidReservation(Reserva $reservation): AircraftAvailabilityBlock
     {
-        $reservation->loadMissing(['flightRequest.legs', 'legs']);
+        $reservation->loadMissing(['flightRequest.legs', 'legs', 'aircraft']);
 
         $aircraftId = (int) ($reservation->aircraft_id ?: $reservation->flightRequest?->assigned_aircraft_id);
         if ($aircraftId <= 0) {
             throw new RuntimeException('La reserva no tiene una aeronave asignada para bloquear disponibilidad.');
         }
 
-        [$start, $end] = $this->resolveReservationWindow($reservation);
+        [$start, $end] = $this->resolvePaidReservationWindow($reservation, $aircraftId);
+        $logContext = $this->buildPaidReservationBlockLogContext($reservation, $aircraftId, $start, $end);
+
+        Log::info('aircraft_paid_reservation_block_started', $logContext);
         $this->ensureAircraftAvailable(
             aircraftId: $aircraftId,
             requestedStart: $start,
@@ -100,7 +104,31 @@ class AircraftAvailabilityService
             $attributes,
         );
 
-        AircraftAvailabilityBlock::query()
+        $persistedBlock = AircraftAvailabilityBlock::query()->find($block->id);
+        if (
+            ! $persistedBlock
+            || (int) $persistedBlock->aircraft_id !== $aircraftId
+            || (int) $persistedBlock->reservation_id !== (int) $reservation->id
+            || $persistedBlock->status !== self::STATUS_BOOKED
+            || ! $persistedBlock->start_datetime
+            || ! $persistedBlock->end_datetime
+        ) {
+            Log::error('aircraft_paid_reservation_block_failed', $logContext + [
+                'booked_created' => false,
+                'booked_id' => $block->id ?? null,
+                'persisted' => $persistedBlock?->toArray(),
+            ]);
+
+            throw new RuntimeException('No fue posible persistir el bloqueo definitivo de la reserva pagada.');
+        }
+
+        Log::info('aircraft_booked_block_created', $logContext + [
+            'booked_created' => true,
+            'booked_id' => $persistedBlock->id,
+            'final_status' => $persistedBlock->status,
+        ]);
+
+        $releasedRows = AircraftAvailabilityBlock::query()
             ->where('aircraft_id', $aircraftId)
             ->where(function ($query) use ($reservation) {
                 $query->where('reservation_id', $reservation->id)
@@ -119,6 +147,12 @@ class AircraftAvailabilityService
                 'released_at' => $this->availabilityBlockSupports('released_at') ? now() : null,
             ]);
 
+        Log::info('aircraft_previous_hold_released', $logContext + [
+            'hold_found' => $releasedRows > 0,
+            'rows_affected' => $releasedRows,
+            'booked_id' => $persistedBlock->id,
+        ]);
+
         $staleBlockReleasePayload = [
             'status' => self::STATUS_RELEASED,
             'reason' => 'Bloqueo anterior liberado por reprogramacion de la reserva.',
@@ -134,7 +168,7 @@ class AircraftAvailabilityService
             ->whereKeyNot($block->id)
             ->update($staleBlockReleasePayload);
 
-        return $block->fresh();
+        return $persistedBlock->fresh();
     }
 
     public function releaseReservationBlock(Reserva $reservation, ?string $reasonOverride = null): ?AircraftAvailabilityBlock
@@ -178,6 +212,234 @@ class AircraftAvailabilityService
         return $blocks->first()?->fresh();
     }
 
+    public function evaluateReservationPaymentAvailability(Reserva $reservation, bool $recoverHold = false): array
+    {
+        $reservation->loadMissing([
+            'flightRequest.legs',
+            'legs',
+            'quote',
+            'latestPayment',
+            'contract',
+        ]);
+
+        $aircraftId = (int) ($reservation->aircraft_id ?: $reservation->flightRequest?->assigned_aircraft_id ?: 0);
+        if ($aircraftId > 0) {
+            $this->expireStaleHoldsForAircraft($aircraftId);
+        }
+
+        $blocks = AircraftAvailabilityBlock::query()
+            ->where('aircraft_id', $aircraftId > 0 ? $aircraftId : -1)
+            ->where(function ($query) use ($reservation) {
+                $query->where('reservation_id', $reservation->id)
+                    ->orWhere(function ($inner) use ($reservation) {
+                        $inner->whereNull('reservation_id')
+                            ->where('flight_request_id', $reservation->flight_request_id)
+                            ->where('quote_id', $reservation->quote_id)
+                            ->where('user_id', $reservation->client_id);
+                    });
+            })
+            ->orderByDesc('id')
+            ->get();
+
+        $ownBookedBlock = $blocks->first(fn (AircraftAvailabilityBlock $block) => $this->normalizeAvailabilityStatus($block->status) === self::STATUS_BOOKED);
+        $currentHold = $blocks->first(fn (AircraftAvailabilityBlock $block) => in_array(
+            $this->normalizeAvailabilityStatus($block->status),
+            [self::STATUS_HELD, self::STATUS_ACTIVE_LEGACY, self::STATUS_RELEASED, self::STATUS_EXPIRED, self::STATUS_CANCELLED],
+            true,
+        ));
+
+        [$start, $end, $scheduleSource, $scheduleInvalidReason] = $this->resolveReservationPaymentSchedule(
+            $reservation,
+            $ownBookedBlock,
+            $currentHold,
+        );
+
+        $normalizedHoldStatus = $this->normalizeAvailabilityStatus($currentHold?->status);
+        $holdExpired = $currentHold?->hold_expires_at
+            ? $currentHold->hold_expires_at->lessThanOrEqualTo(now())
+            : false;
+        $holdIsActive = in_array($normalizedHoldStatus, [self::STATUS_HELD, self::STATUS_ACTIVE_LEGACY], true)
+            && $currentHold?->hold_expires_at
+            && $currentHold->hold_expires_at->isFuture();
+
+        $availability = [
+            'available' => $aircraftId > 0 && $start && $end,
+            'conflict_type' => null,
+            'conflicting_block_id' => null,
+        ];
+
+        $invalidReason = null;
+        $reservationBooked = false;
+        $holdValid = false;
+
+        $conflictingBlock = null;
+        if ($aircraftId > 0 && $start && $end) {
+            $conflictingBlock = $this->findConflictingAvailabilityBlock(
+                aircraftId: $aircraftId,
+                requestedStart: $start,
+                requestedEnd: $end,
+                ignoreReservationId: $reservation->id,
+                ignoreBlockIds: array_values(array_filter([
+                    $currentHold?->id,
+                    $ownBookedBlock?->id,
+                ])),
+                ignoreQuoteId: $reservation->quote_id ? (int) $reservation->quote_id : null,
+            );
+
+            if ($conflictingBlock) {
+                $availability = [
+                    'available' => false,
+                    'conflict_type' => $this->normalizeAvailabilityStatus($conflictingBlock->status),
+                    'conflicting_block_id' => $conflictingBlock->id,
+                ];
+            }
+        }
+
+        if (! $start || ! $end) {
+            $availability['available'] = false;
+            $invalidReason = $scheduleInvalidReason ?: 'reservation_missing_schedule';
+        } elseif ($conflictingBlock) {
+            $invalidReason = 'aircraft_booked_by_other_reservation';
+        } elseif ($ownBookedBlock && $ownBookedBlock->start_datetime && $ownBookedBlock->end_datetime) {
+            $reservationBooked = true;
+        } elseif (! $currentHold) {
+            $invalidReason = 'hold_not_found';
+        } elseif ($holdIsActive) {
+            $holdValid = true;
+        } elseif ($normalizedHoldStatus === self::STATUS_RELEASED || $normalizedHoldStatus === self::STATUS_CANCELLED) {
+            $invalidReason = 'hold_released';
+        } elseif ($normalizedHoldStatus === self::STATUS_EXPIRED || $holdExpired) {
+            $invalidReason = 'hold_expired';
+        } else {
+            $invalidReason = 'hold_not_found';
+        }
+
+        if (
+            $recoverHold
+            && ! $holdValid
+            && ! $reservationBooked
+            && $availability['available'] === true
+            && in_array($invalidReason, ['hold_expired', 'hold_released', 'hold_not_found'], true)
+        ) {
+            $recoveredHold = $this->recoverReservationPaymentHold($reservation, $start, $end);
+
+            if ($recoveredHold) {
+                $currentHold = $recoveredHold;
+                $normalizedHoldStatus = $this->normalizeAvailabilityStatus($currentHold->status);
+                $holdValid = $normalizedHoldStatus === self::STATUS_HELD
+                    && $currentHold->hold_expires_at
+                    && $currentHold->hold_expires_at->isFuture();
+                $invalidReason = $holdValid ? null : $invalidReason;
+            }
+        }
+
+        $holdPayload = $this->buildReservationPaymentAvailabilityHoldPayload(
+            $currentHold,
+            $reservation,
+            $invalidReason,
+            $holdValid,
+            $ownBookedBlock,
+            $start,
+            $end,
+        );
+
+        $result = [
+            'success' => $holdValid || $reservationBooked,
+            'can_pay' => $holdValid || $reservationBooked,
+            'hold_valid' => $holdValid,
+            'reservation_booked' => $reservationBooked,
+            'reservation_id' => $reservation->id,
+            'flight_request_id' => $reservation->flight_request_id,
+            'quote_id' => $reservation->quote_id,
+            'aircraft_id' => $aircraftId > 0 ? $aircraftId : null,
+            'schedule' => [
+                'start_at' => $start?->toIso8601String(),
+                'end_at' => $end?->toIso8601String(),
+                'source' => $scheduleSource,
+            ],
+            'hold' => $holdPayload,
+            'availability' => $availability,
+            'invalid_reason' => $invalidReason,
+            'timezone' => (string) config('app.timezone', 'UTC'),
+        ];
+
+        Log::info('reservation_payment_availability_evaluated', [
+            'reservation_id' => $reservation->id,
+            'flight_request_id' => $reservation->flight_request_id,
+            'quote_id' => $reservation->quote_id,
+            'aircraft_id' => $aircraftId > 0 ? $aircraftId : null,
+            'hold_id' => $currentHold?->id,
+            'block_id' => $ownBookedBlock?->id,
+            'start_at' => $start?->toIso8601String(),
+            'end_at' => $end?->toIso8601String(),
+            'expires_at' => $currentHold?->hold_expires_at?->toIso8601String(),
+            'current_time' => now()->toIso8601String(),
+            'timezone' => (string) config('app.timezone', 'UTC'),
+            'hold_status' => $normalizedHoldStatus,
+            'block_status' => $ownBookedBlock ? $this->normalizeAvailabilityStatus($ownBookedBlock->status) : null,
+            'excluded_reservation_id' => $reservation->id,
+            'excluded_hold_id' => $currentHold?->id,
+            'invalid_reason' => $invalidReason,
+            'can_pay' => $result['can_pay'],
+            'hold_valid' => $result['hold_valid'],
+            'reservation_booked' => $result['reservation_booked'],
+        ]);
+
+        return $result;
+    }
+
+    private function recoverReservationPaymentHold(
+        Reserva $reservation,
+        ?Carbon $start = null,
+        ?Carbon $end = null,
+    ): ?AircraftAvailabilityBlock {
+        $quote = $reservation->quote;
+        $flightRequest = $reservation->flightRequest;
+
+        if (! $quote || ! $flightRequest) {
+            return null;
+        }
+
+        $payload = [
+            'quote_id' => $quote->id,
+            'aircraft_id' => $reservation->aircraft_id ?: $quote->aircraft_id,
+            'departure_datetime' => $start?->format('Y-m-d H:i:s'),
+            'start_datetime' => $start?->format('Y-m-d H:i:s'),
+            'return_datetime' => $end?->format('Y-m-d H:i:s'),
+            'legs' => collect($flightRequest->legs ?? [])
+                ->map(fn ($leg) => [
+                    'departure_datetime' => $leg->departure_datetime?->format('Y-m-d H:i:s'),
+                    'arrival_datetime' => $leg->arrival_datetime?->format('Y-m-d H:i:s'),
+                ])
+                ->values()
+                ->all(),
+        ];
+
+        try {
+            return $this->holdAircraftForQuote(
+                $quote->loadMissing(['flightRequest.legs', 'aircraft']),
+                (int) $reservation->client_id,
+                $reservation,
+                null,
+                $payload,
+            );
+        } catch (RuntimeException $exception) {
+            Log::warning('reservation_payment_hold_recovery_failed', [
+                'reservation_id' => $reservation->id,
+                'flight_request_id' => $reservation->flight_request_id,
+                'quote_id' => $reservation->quote_id,
+                'aircraft_id' => $reservation->aircraft_id,
+                'start_at' => $start?->toIso8601String(),
+                'end_at' => $end?->toIso8601String(),
+                'current_time' => now()->toIso8601String(),
+                'timezone' => (string) config('app.timezone', 'UTC'),
+                'message' => $exception->getMessage(),
+            ]);
+
+            return null;
+        }
+    }
+
     public function aircraftHasConflict(int $aircraftId, $requestedStart, $requestedEnd): bool
     {
         return $this->aircraftHasConflictExcluding($aircraftId, $requestedStart, $requestedEnd);
@@ -217,6 +479,41 @@ class AircraftAvailabilityService
             ->where('start_datetime', '<', $end)
             ->where('end_datetime', '>', $start)
             ->exists();
+    }
+
+    public function findConflictingAvailabilityBlock(
+        int $aircraftId,
+        $requestedStart,
+        $requestedEnd,
+        ?int $ignoreReservationId = null,
+        array $ignoreBlockIds = [],
+        ?int $ignoreQuoteId = null,
+    ): ?AircraftAvailabilityBlock {
+        [$start, $end] = $this->normalizeWindow($requestedStart, $requestedEnd);
+
+        return AircraftAvailabilityBlock::query()
+            ->where('aircraft_id', $aircraftId)
+            ->where(function ($query) {
+                $query->whereIn('status', [self::STATUS_BOOKED, self::STATUS_ACTIVE_LEGACY])
+                    ->orWhere(function ($inner) {
+                        $inner->where('status', self::STATUS_HELD)
+                            ->whereNotNull('hold_expires_at')
+                            ->where('hold_expires_at', '>', now());
+                    });
+            })
+            ->when($ignoreReservationId, fn ($query) => $query->where(function ($inner) use ($ignoreReservationId) {
+                $inner->whereNull('reservation_id')
+                    ->orWhere('reservation_id', '!=', $ignoreReservationId);
+            }))
+            ->when($ignoreQuoteId, fn ($query) => $query->where(function ($inner) use ($ignoreQuoteId) {
+                $inner->whereNull('quote_id')
+                    ->orWhere('quote_id', '!=', $ignoreQuoteId);
+            }))
+            ->when(! empty($ignoreBlockIds), fn ($query) => $query->whereKeyNot($ignoreBlockIds))
+            ->where('start_datetime', '<', $end)
+            ->where('end_datetime', '>', $start)
+            ->latest('id')
+            ->first();
     }
 
     public function ensureAircraftAvailable(
@@ -423,7 +720,22 @@ class AircraftAvailabilityService
                 $attributes['block_type'] = 'payment_hold';
             }
 
-            $hold = AircraftAvailabilityBlock::query()->create($attributes);
+            if ($this->availabilityBlockSupports('released_at')) {
+                $attributes['released_at'] = null;
+            }
+
+            $shouldReuseExistingReservationBlock =
+                $reservation?->id
+                && $existing
+                && (int) ($existing->reservation_id ?? 0) === (int) $reservation->id;
+
+            if ($shouldReuseExistingReservationBlock) {
+                $existing->update($attributes);
+                $hold = $existing->fresh();
+            } else {
+                $hold = AircraftAvailabilityBlock::query()->create($attributes);
+            }
+
             $hold->setAttribute('hold_reused', false);
 
             return $hold;
@@ -524,6 +836,82 @@ class AircraftAvailabilityService
             ]);
     }
 
+    private function normalizeAvailabilityStatus(mixed $status): string
+    {
+        $normalized = strtolower(trim((string) $status));
+
+        return match ($normalized) {
+            'held', 'hold', 'active' => $normalized === 'active' ? self::STATUS_ACTIVE_LEGACY : self::STATUS_HELD,
+            'booked', 'reserved', 'confirmado', 'confirmed' => self::STATUS_BOOKED,
+            'released', 'liberado', 'liberada' => self::STATUS_RELEASED,
+            'expired', 'expirada', 'expirado' => self::STATUS_EXPIRED,
+            'cancelled', 'canceled', 'cancelada', 'cancelado' => self::STATUS_CANCELLED,
+            default => $normalized,
+        };
+    }
+
+    private function resolveReservationPaymentSchedule(
+        Reserva $reservation,
+        ?AircraftAvailabilityBlock $ownBookedBlock = null,
+        ?AircraftAvailabilityBlock $currentHold = null,
+    ): array {
+        if ($ownBookedBlock?->start_datetime && $ownBookedBlock?->end_datetime) {
+            return [$ownBookedBlock->start_datetime->copy(), $ownBookedBlock->end_datetime->copy(), 'booked_block', null];
+        }
+
+        if ($currentHold?->start_datetime && $currentHold?->end_datetime) {
+            return [$currentHold->start_datetime->copy(), $currentHold->end_datetime->copy(), 'hold_block', null];
+        }
+
+        try {
+            [$quoteStart, $quoteEnd] = $reservation->quote
+                ? $this->resolveQuoteWindow($reservation->quote->loadMissing('flightRequest.legs'))
+                : [null, null];
+
+            if ($quoteStart && $quoteEnd) {
+                return [$quoteStart, $quoteEnd, 'accepted_quote', null];
+            }
+        } catch (Throwable) {
+            // Seguimos con fuentes secundarias.
+        }
+
+        try {
+            [$reservationStart, $reservationEnd] = $this->resolveReservationWindow($reservation);
+
+            return [$reservationStart, $reservationEnd, 'flight_request_legs', null];
+        } catch (Throwable) {
+            return [null, null, null, 'reservation_missing_schedule'];
+        }
+    }
+
+    private function buildReservationPaymentAvailabilityHoldPayload(
+        ?AircraftAvailabilityBlock $hold,
+        Reserva $reservation,
+        ?string $invalidReason,
+        bool $holdValid,
+        ?AircraftAvailabilityBlock $ownBookedBlock = null,
+        ?Carbon $start = null,
+        ?Carbon $end = null,
+    ): array {
+        return [
+            'id' => $hold?->id,
+            'status' => $hold?->status,
+            'aircraft_id' => $hold?->aircraft_id ?: $reservation->aircraft_id,
+            'quote_id' => $hold?->quote_id ?: $reservation->quote_id,
+            'flight_request_id' => $hold?->flight_request_id ?: $reservation->flight_request_id,
+            'reservation_id' => $hold?->reservation_id ?: $reservation->id,
+            'start_at' => ($hold?->start_datetime ?: $start)?->toIso8601String(),
+            'end_at' => ($hold?->end_datetime ?: $end)?->toIso8601String(),
+            'expires_at' => $hold?->hold_expires_at?->toIso8601String(),
+            'released_at' => $hold?->released_at?->toIso8601String(),
+            'booked_at' => $ownBookedBlock
+                ? optional($ownBookedBlock->updated_at ?: $ownBookedBlock->created_at)?->toIso8601String()
+                : null,
+            'is_valid' => $holdValid,
+            'invalid_reason' => $invalidReason,
+        ];
+    }
+
     private function aircraftStatusAllowsHold(mixed $status): bool
     {
         return in_array($this->normalizeStatus($status), self::RESERVABLE_AIRCRAFT_STATUSES, true);
@@ -541,8 +929,8 @@ class AircraftAvailabilityService
 
     public function resolveWindowFromPayload(array $payload = []): array
     {
-        $startCandidates = [];
-        $endCandidates = [];
+        $legStartCandidates = [];
+        $legEndCandidates = [];
         $legs = is_array($payload['legs'] ?? null) ? $payload['legs'] : [];
 
         foreach ($legs as $leg) {
@@ -556,12 +944,12 @@ class AircraftAvailabilityService
             $arrival = $this->toCarbon($leg['arrival_datetime'] ?? null);
 
             if ($departure) {
-                $startCandidates[] = $departure;
-                $endCandidates[] = $departure;
+                $legStartCandidates[] = $departure;
+                $legEndCandidates[] = $departure;
             }
 
             if ($arrival) {
-                $endCandidates[] = $arrival;
+                $legEndCandidates[] = $arrival;
             }
         }
 
@@ -572,18 +960,19 @@ class AircraftAvailabilityService
                 ?? (($payload['departure_date'] ?? null) ? (($payload['departure_date'] ?? '').' '.($payload['departure_time'] ?? '09:00')) : null)
         );
         $topLevelReturn = $this->toCarbon($payload['return_datetime'] ?? null);
+        $firstLegStart = collect($legStartCandidates)->sort()->first();
+        $lastLegEnd = collect($legEndCandidates)->sort()->last();
 
-        if ($topLevelDeparture) {
-            $startCandidates[] = $topLevelDeparture;
-            $endCandidates[] = $topLevelDeparture;
+        $start = $topLevelDeparture ?: $firstLegStart;
+        $end = $topLevelReturn ?: $lastLegEnd;
+
+        if ($topLevelReturn && $lastLegEnd && $lastLegEnd->greaterThan($topLevelReturn)) {
+            $end = $lastLegEnd;
         }
 
-        if ($topLevelReturn) {
-            $endCandidates[] = $topLevelReturn;
+        if ($start && ! $end && $lastLegEnd) {
+            $end = $lastLegEnd;
         }
-
-        $start = collect($startCandidates)->sort()->first();
-        $end = collect($endCandidates)->sort()->last();
 
         return $this->normalizeWindow($start, $end);
     }
@@ -615,6 +1004,38 @@ class AircraftAvailabilityService
         }
 
         return $this->resolveWindowFromPayload($payload);
+    }
+
+    private function resolvePaidReservationWindow(Reserva $reservation, int $aircraftId): array
+    {
+        [$start, $end] = $this->resolveReservationWindow($reservation);
+
+        $matchingHold = AircraftAvailabilityBlock::query()
+            ->where('aircraft_id', $aircraftId)
+            ->where(function ($query) use ($reservation) {
+                $query->where('reservation_id', $reservation->id)
+                    ->orWhere(function ($inner) use ($reservation) {
+                        $inner->whereNull('reservation_id')
+                            ->where('flight_request_id', $reservation->flight_request_id)
+                            ->where('quote_id', $reservation->quote_id)
+                            ->where('user_id', $reservation->client_id);
+                    });
+            })
+            ->whereIn('status', [
+                self::STATUS_HELD,
+                self::STATUS_ACTIVE_LEGACY,
+                self::STATUS_RELEASED,
+                self::STATUS_BOOKED,
+            ])
+            ->orderByRaw("case when status in ('held', 'active', 'released') then 0 else 1 end")
+            ->latest('id')
+            ->first();
+
+        if ($matchingHold?->start_datetime && $matchingHold?->end_datetime) {
+            return [$matchingHold->start_datetime->copy(), $matchingHold->end_datetime->copy()];
+        }
+
+        return [$start, $end];
     }
 
     public function resolveFlightRequestWindow(SolicitudVuelo $flightRequest): array
@@ -691,5 +1112,20 @@ class AircraftAvailabilityService
         $normalizedValue = trim((string) ($value ?? ''));
 
         return $normalizedValue !== '' ? $normalizedValue : null;
+    }
+
+    private function buildPaidReservationBlockLogContext(Reserva $reservation, int $aircraftId, Carbon $start, Carbon $end): array
+    {
+        $aircraft = $reservation->aircraft;
+
+        return [
+            'reservation_id' => $reservation->id,
+            'flight_request_id' => $reservation->flight_request_id,
+            'aircraft_id' => $aircraftId,
+            'registration' => trim((string) ($aircraft?->registration ?? '')),
+            'model' => trim((string) ($aircraft?->model ?? '')),
+            'start_at' => $start->toDateTimeString(),
+            'end_at' => $end->toDateTimeString(),
+        ];
     }
 }

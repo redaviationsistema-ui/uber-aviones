@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Modelos\Aeronave;
+use App\Modelos\AircraftAvailabilityBlock;
 use App\Modelos\Cotizacion;
 use App\Modelos\Pago;
 use App\Modelos\Proveedor;
@@ -123,6 +124,49 @@ class StripeFlightCheckoutFlowTest extends TestCase
             );
 
         $this->assertSame(1, Pago::query()->where('flight_request_id', $context['flightRequest']->id)->count());
+    }
+
+    public function test_create_checkout_allows_clients_to_pay_when_conflict_is_only_their_own_hold(): void
+    {
+        $this->seed();
+        $this->configureStripe();
+
+        $context = $this->createFlightPaymentContext();
+
+        AircraftAvailabilityBlock::query()->create([
+            'aircraft_id' => $context['aircraft']->id,
+            'quote_id' => $context['quote']->id,
+            'flight_request_id' => $context['flightRequest']->id,
+            'reservation_id' => $context['reservation']->id,
+            'user_id' => $context['user']->id,
+            'start_datetime' => $context['flightRequest']->departure_datetime,
+            'end_datetime' => $context['flightRequest']->departure_datetime->copy()->addHours(3),
+            'hold_expires_at' => now()->addMinutes(15),
+            'payment_status' => 'pending',
+            'source' => 'quote_checkout',
+            'status' => 'held',
+            'reason' => 'Retencion propia activa para checkout.',
+        ]);
+
+        $sessionAlias = Mockery::mock('alias:Stripe\Checkout\Session');
+        $sessionAlias
+            ->shouldReceive('create')
+            ->once()
+            ->andReturn((object) [
+                'id' => 'cs_test_reservation_own_hold',
+                'url' => 'https://checkout.stripe.com/c/pay/cs_test_reservation_own_hold',
+            ]);
+
+        $this
+            ->withHeader('Authorization', 'Bearer '.$context['token'])
+            ->postJson('/api/v1/cliente/stripe/checkout/create', [
+                'flight_request_id' => $context['flightRequest']->id,
+                'contact_email' => $context['user']->email,
+                'success_url' => 'https://example.com/success',
+                'cancel_url' => 'https://example.com/cancel',
+            ])
+            ->assertOk()
+            ->assertJsonPath('checkout_session_id', 'cs_test_reservation_own_hold');
     }
 
     public function test_success_returns_checkout_url_for_pending_checkout_recovery(): void

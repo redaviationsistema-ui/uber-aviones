@@ -155,9 +155,10 @@ class AircraftHoldFlowTest extends TestCase
         $this->seed();
 
         [, $token, $quote, $aircraft] = $this->createAcceptedQuoteContext('XA-HOLD3');
+        $window = $this->makeWindow(startDays: 7, startHour: 15, durationHours: 99);
 
         $this->withHeader('Authorization', 'Bearer '.$token)
-            ->postJson("/api/v1/cliente/cotizaciones/{$quote->id}/aircraft-hold")
+            ->postJson("/api/v1/cliente/cotizaciones/{$quote->id}/aircraft-hold", $window['payload'])
             ->assertCreated();
 
         AircraftAvailabilityBlock::query()->where('quote_id', $quote->id)->update([
@@ -260,6 +261,79 @@ class AircraftHoldFlowTest extends TestCase
             'status' => 'booked',
         ]);
         $this->assertSame(1, AircraftAvailabilityBlock::query()->where('reservation_id', $reservation->id)->where('status', 'booked')->count());
+    }
+
+    public function test_paid_reservation_booked_block_reuses_hold_window_when_request_legs_are_stale(): void
+    {
+        $this->seed();
+
+        [$client, $token, $quote, $aircraft, $flightRequest] = $this->createAcceptedQuoteContext('XA-HOLD4B');
+        $holdWindow = $this->makeWindow(startDays: 14, startHour: 15, durationHours: 99);
+        $staleLegWindow = $this->makeWindow(startDays: 11, startHour: 14, durationHours: 2);
+
+        $flightRequest->update([
+            'departure_datetime' => $holdWindow['departure'],
+            'return_datetime' => $holdWindow['return'],
+            'departure_date' => $holdWindow['departure_date'],
+            'departure_time' => $holdWindow['departure_time'],
+            'return_date' => $holdWindow['return_date'],
+            'return_time' => $holdWindow['return_time'],
+        ]);
+        $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson("/api/v1/cliente/cotizaciones/{$quote->id}/aircraft-hold", $holdWindow['payload'])
+            ->assertCreated();
+
+        $reservation = Reserva::query()->create([
+            'client_id' => $client->id,
+            'provider_id' => $quote->provider_id,
+            'aircraft_id' => $aircraft->id,
+            'flight_request_id' => $flightRequest->id,
+            'quote_id' => $quote->id,
+            'reservation_code' => 'PV-HOLD-001-B',
+            'status' => 'pending_payment',
+            'total_amount' => $quote->total,
+            'currency' => 'USD',
+        ]);
+
+        $flightRequest->update([
+            'departure_datetime' => $holdWindow['departure'],
+            'return_datetime' => $holdWindow['return'],
+        ]);
+
+        $flightRequest->legs()->delete();
+        $flightRequest->legs()->create([
+            'leg_order' => 1,
+            'origin' => 'MMTO',
+            'destination' => 'MMMM',
+            'departure_datetime' => $staleLegWindow['departure'],
+            'arrival_datetime' => null,
+            'passengers' => 1,
+            'status' => 'scheduled',
+        ]);
+
+        Pago::query()->create([
+            'user_id' => $client->id,
+            'reservation_id' => $reservation->id,
+            'flight_request_id' => $flightRequest->id,
+            'payment_type' => 'reservation',
+            'amount' => $quote->total,
+            'currency' => 'USD',
+            'provider' => 'manual',
+            'transaction_reference' => 'pay_manual_hold_reuse',
+            'status' => 'paid',
+            'paid_at' => now(),
+        ]);
+
+        app(\App\Servicios\Aeronaves\AircraftAvailabilityService::class)
+            ->blockAircraftForPaidReservation($reservation->fresh(['flightRequest.legs', 'legs']));
+
+        $bookedBlock = AircraftAvailabilityBlock::query()
+            ->where('reservation_id', $reservation->id)
+            ->where('status', 'booked')
+            ->sole();
+
+        $this->assertSame($holdWindow['departure_datetime'], $bookedBlock->start_datetime->format('Y-m-d H:i:s'));
+        $this->assertSame($holdWindow['return_datetime'], $bookedBlock->end_datetime->format('Y-m-d H:i:s'));
     }
 
     public function test_booked_block_excludes_aircraft_but_non_overlapping_slots_allow_it(): void
@@ -446,6 +520,164 @@ class AircraftHoldFlowTest extends TestCase
             ->assertJsonPath('data.is_active', true);
     }
 
+    public function test_payment_availability_allows_checkout_with_active_hold(): void
+    {
+        $this->seed();
+
+        [$client, $token, $quote, $aircraft, $flightRequest] = $this->createAcceptedQuoteContext('XA-HOLD12');
+        $reservation = $this->createPendingReservation($client, $quote, $aircraft, $flightRequest);
+
+        $holdResponse = $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson("/api/v1/cliente/cotizaciones/{$quote->id}/aircraft-hold")
+            ->assertCreated();
+
+        $this->withHeader('Authorization', 'Bearer '.$token)
+            ->getJson("/api/v1/cliente/reservas/{$reservation->id}/payment-availability")
+            ->assertOk()
+            ->assertJsonPath('can_pay', true)
+            ->assertJsonPath('hold_valid', true)
+            ->assertJsonPath('reservation_booked', false)
+            ->assertJsonPath('hold.id', $holdResponse->json('data.hold_id'))
+            ->assertJsonPath('invalid_reason', null);
+    }
+
+    public function test_payment_availability_recovers_checkout_when_hold_expired_but_aircraft_is_still_free(): void
+    {
+        $this->seed();
+
+        [$client, $token, $quote, $aircraft, $flightRequest] = $this->createAcceptedQuoteContext('XA-HOLD13');
+        $reservation = $this->createPendingReservation($client, $quote, $aircraft, $flightRequest);
+
+        $holdResponse = $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson("/api/v1/cliente/cotizaciones/{$quote->id}/aircraft-hold")
+            ->assertCreated();
+
+        AircraftAvailabilityBlock::query()->whereKey($holdResponse->json('data.hold_id'))->update([
+            'hold_expires_at' => now()->subMinute(),
+        ]);
+
+        $availabilityResponse = $this->withHeader('Authorization', 'Bearer '.$token)
+            ->getJson("/api/v1/cliente/reservas/{$reservation->id}/payment-availability")
+            ->assertOk()
+            ->assertJsonPath('can_pay', true)
+            ->assertJsonPath('hold_valid', true)
+            ->assertJsonPath('reservation_booked', false)
+            ->assertJsonPath('invalid_reason', null);
+
+        $this->assertDatabaseHas('aircraft_availability_blocks', [
+            'id' => $holdResponse->json('data.hold_id'),
+            'reservation_id' => $reservation->id,
+            'status' => 'held',
+        ]);
+        $this->assertNotEmpty($availabilityResponse->json('hold.expires_at'));
+    }
+
+    public function test_payment_availability_allows_checkout_when_own_reservation_is_already_booked(): void
+    {
+        $this->seed();
+
+        [$client, $token, $quote, $aircraft, $flightRequest] = $this->createAcceptedQuoteContext('XA-HOLD14');
+        $holdResponse = $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson("/api/v1/cliente/cotizaciones/{$quote->id}/aircraft-hold")
+            ->assertCreated();
+
+        $reservation = $this->createPendingReservation($client, $quote, $aircraft, $flightRequest);
+        $hold = AircraftAvailabilityBlock::query()->findOrFail($holdResponse->json('data.hold_id'));
+        $hold->update([
+            'hold_expires_at' => now()->subMinute(),
+        ]);
+
+        AircraftAvailabilityBlock::query()->create([
+            'aircraft_id' => $aircraft->id,
+            'quote_id' => $quote->id,
+            'flight_request_id' => $flightRequest->id,
+            'reservation_id' => $reservation->id,
+            'user_id' => $client->id,
+            'block_type' => 'confirmed_flight',
+            'start_datetime' => $hold->start_datetime,
+            'end_datetime' => $hold->end_datetime,
+            'status' => 'booked',
+            'payment_status' => 'paid',
+            'source' => 'reservation_payment_confirmed',
+            'reason' => 'Reserva confirmada para la misma ventana.',
+        ]);
+
+        $this->withHeader('Authorization', 'Bearer '.$token)
+            ->getJson("/api/v1/cliente/reservas/{$reservation->id}/payment-availability")
+            ->assertOk()
+            ->assertJsonPath('can_pay', true)
+            ->assertJsonPath('hold_valid', false)
+            ->assertJsonPath('reservation_booked', true)
+            ->assertJsonPath('invalid_reason', null);
+    }
+
+    public function test_payment_availability_detects_booked_block_from_other_reservation(): void
+    {
+        $this->seed();
+
+        [$client, $token, $quote, $aircraft, $flightRequest] = $this->createAcceptedQuoteContext('XA-HOLD15');
+        $reservation = $this->createPendingReservation($client, $quote, $aircraft, $flightRequest);
+
+        $holdResponse = $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson("/api/v1/cliente/cotizaciones/{$quote->id}/aircraft-hold")
+            ->assertCreated();
+
+        $hold = AircraftAvailabilityBlock::query()->findOrFail($holdResponse->json('data.hold_id'));
+
+        $otherClient = Usuario::factory()->create([
+            'role' => Usuario::ROLE_CLIENT,
+            'status' => 'active',
+            'email' => uniqid('clientc.', true).'@test.dev',
+        ]);
+        $otherFlightRequest = $this->createFlightRequest($otherClient, $aircraft->provider, $aircraft);
+        $otherQuote = $this->createAcceptedQuote($otherFlightRequest, $aircraft->provider, $aircraft);
+        $otherReservation = $this->createPendingReservation($otherClient, $otherQuote, $aircraft, $otherFlightRequest);
+
+        AircraftAvailabilityBlock::query()->create([
+            'aircraft_id' => $aircraft->id,
+            'quote_id' => $otherQuote->id,
+            'flight_request_id' => $otherFlightRequest->id,
+            'reservation_id' => $otherReservation->id,
+            'user_id' => $otherClient->id,
+            'block_type' => 'confirmed_flight',
+            'start_datetime' => $hold->start_datetime,
+            'end_datetime' => $hold->end_datetime,
+            'status' => 'booked',
+            'payment_status' => 'paid',
+            'source' => 'reservation_payment_confirmed',
+            'reason' => 'Otra reserva confirmada.',
+        ]);
+
+        $this->withHeader('Authorization', 'Bearer '.$token)
+            ->getJson("/api/v1/cliente/reservas/{$reservation->id}/payment-availability")
+            ->assertOk()
+            ->assertJsonPath('can_pay', false)
+            ->assertJsonPath('invalid_reason', 'aircraft_booked_by_other_reservation')
+            ->assertJsonPath('availability.available', false);
+    }
+
+    public function test_payment_availability_rejects_reservation_without_schedule(): void
+    {
+        $this->seed();
+
+        [$client, $token, $quote, $aircraft, $flightRequest] = $this->createAcceptedQuoteContext('XA-HOLD16');
+        $flightRequest->update([
+            'departure_datetime' => null,
+            'return_datetime' => null,
+            'departure_date' => null,
+            'departure_time' => null,
+            'return_date' => null,
+            'return_time' => null,
+        ]);
+        $reservation = $this->createPendingReservation($client, $quote, $aircraft, $flightRequest);
+
+        $this->withHeader('Authorization', 'Bearer '.$token)
+            ->getJson("/api/v1/cliente/reservas/{$reservation->id}/payment-availability")
+            ->assertOk()
+            ->assertJsonPath('can_pay', false)
+            ->assertJsonPath('invalid_reason', 'reservation_missing_schedule');
+    }
+
     public function test_expired_quote_cannot_create_hold(): void
     {
         $this->seed();
@@ -478,6 +710,25 @@ class AircraftHoldFlowTest extends TestCase
         $quote = $this->createAcceptedQuote($flightRequest, $provider, $aircraft);
 
         return [$client, TokenApi::issue($client), $quote, $aircraft, $flightRequest];
+    }
+
+    private function createPendingReservation(
+        Usuario $client,
+        Cotizacion $quote,
+        Aeronave $aircraft,
+        SolicitudVuelo $flightRequest,
+    ): Reserva {
+        return Reserva::query()->create([
+            'client_id' => $client->id,
+            'provider_id' => $quote->provider_id,
+            'aircraft_id' => $aircraft->id,
+            'flight_request_id' => $flightRequest->id,
+            'quote_id' => $quote->id,
+            'reservation_code' => 'PV-'.now()->format('ymd').'-TEST'.random_int(100, 999),
+            'status' => 'pending_payment',
+            'total_amount' => $quote->total,
+            'currency' => 'USD',
+        ]);
     }
 
     private function createAcceptedQuoteForSameAircraftAndFlight(Aeronave $aircraft, SolicitudVuelo $flightRequest): array
@@ -565,16 +816,18 @@ class AircraftHoldFlowTest extends TestCase
 
     private function createFlightRequest(Usuario $client, Proveedor $provider, Aeronave $aircraft): SolicitudVuelo
     {
+        $window = $this->makeWindow();
+
         return SolicitudVuelo::query()->create([
             'client_id' => $client->id,
             'origin' => 'MMMX',
             'destination' => 'MMTO',
-            'departure_datetime' => Carbon::parse('2026-08-20 10:00:00'),
-            'return_datetime' => Carbon::parse('2026-08-20 14:00:00'),
-            'departure_date' => '2026-08-20',
-            'departure_time' => '10:00',
-            'return_date' => '2026-08-20',
-            'return_time' => '14:00',
+            'departure_datetime' => $window['departure'],
+            'return_datetime' => $window['return'],
+            'departure_date' => $window['departure_date'],
+            'departure_time' => $window['departure_time'],
+            'return_date' => $window['return_date'],
+            'return_time' => $window['return_time'],
             'passengers' => 4,
             'trip_type' => 'one_way',
             'assigned_provider_id' => $provider->id,
@@ -603,15 +856,42 @@ class AircraftHoldFlowTest extends TestCase
         ]);
     }
 
-    private function previewPayload(string $departure = '2026-08-20 10:00:00', string $return = '2026-08-20 14:00:00'): array
+    private function previewPayload(?string $departure = null, ?string $return = null): array
     {
+        $window = $this->makeWindow();
+
         return [
             'origin' => 'MMMX',
             'destination' => 'MMTO',
-            'departure_datetime' => $departure,
-            'return_datetime' => $return,
+            'departure_datetime' => $departure ?: $window['departure_datetime'],
+            'return_datetime' => $return ?: $window['return_datetime'],
             'passengers' => 4,
             'trip_type' => 'one_way',
+        ];
+    }
+
+    private function makeWindow(int $startDays = 30, int $startHour = 10, int $durationHours = 4): array
+    {
+        $departure = now()->copy()->addDays($startDays)->setTime($startHour, 0, 0);
+        $return = $departure->copy()->addHours($durationHours);
+
+        return [
+            'departure' => $departure,
+            'return' => $return,
+            'departure_datetime' => $departure->format('Y-m-d H:i:s'),
+            'return_datetime' => $return->format('Y-m-d H:i:s'),
+            'departure_date' => $departure->toDateString(),
+            'departure_time' => $departure->format('H:i'),
+            'return_date' => $return->toDateString(),
+            'return_time' => $return->format('H:i'),
+            'payload' => [
+                'departure_datetime' => $departure->format('Y-m-d H:i:s'),
+                'return_datetime' => $return->format('Y-m-d H:i:s'),
+                'departure_date' => $departure->toDateString(),
+                'departure_time' => $departure->format('H:i'),
+                'return_date' => $return->toDateString(),
+                'return_time' => $return->format('H:i'),
+            ],
         ];
     }
 
