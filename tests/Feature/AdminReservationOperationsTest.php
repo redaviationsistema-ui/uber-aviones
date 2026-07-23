@@ -272,6 +272,147 @@ class AdminReservationOperationsTest extends TestCase
         $this->assertSame('released', $releasedHold?->status);
     }
 
+    public function test_admin_workflow_keeps_request_status_valid_when_payment_pending_alias_is_sent(): void
+    {
+        [$token, $provider, $client] = $this->bootstrapAdminScenario();
+        $schedule = $this->makeSchedule(startDays: 7, startHour: 13, durationHours: 2);
+        $aircraft = $this->createAircraft($provider, 'XA-RED8', 'Pilatus PC-24');
+        [$flightRequest, $reservation] = $this->createPaidReservation($client, $provider, $aircraft, [
+            'origin' => 'MMTO',
+            'destination' => 'MMMM',
+            'departure_datetime' => $schedule['departure_datetime'],
+            'return_datetime' => $schedule['return_datetime'],
+        ]);
+
+        $flightRequest->update([
+            'status' => 'matched',
+            'workflow_status' => 'contrato firmado',
+            'payment_status' => 'pending',
+        ]);
+
+        $reservation->update([
+            'status' => 'reserved',
+            'confirmed_at' => null,
+        ]);
+
+        $this
+            ->withToken($token)
+            ->putJson("/api/v1/admin/requests/{$flightRequest->id}/workflow", [
+                'status' => 'pending_payment',
+                'workflow_status' => 'pago pendiente',
+                'payment_status' => 'Pendiente',
+                'contract_status' => 'signed',
+            ])
+            ->assertOk()
+            ->assertJsonPath('request.status', 'reserved')
+            ->assertJsonPath('request.workflow_status', 'pago pendiente');
+
+        $this->assertDatabaseHas('flight_requests', [
+            'id' => $flightRequest->id,
+            'status' => 'reserved',
+            'workflow_status' => 'pago pendiente',
+        ]);
+    }
+
+    public function test_legacy_admin_reservation_update_normalizes_payment_pending_alias(): void
+    {
+        [$token, $provider, $client] = $this->bootstrapAdminScenario();
+        $schedule = $this->makeSchedule(startDays: 4, startHour: 12, durationHours: 2.5);
+        $aircraft = $this->createAircraft($provider, 'XA-RED6', 'King Air 350');
+        [, $reservation] = $this->createPaidReservation($client, $provider, $aircraft, [
+            'origin' => 'MMTO',
+            'destination' => 'MMMX',
+            'departure_datetime' => $schedule['departure_datetime'],
+            'return_datetime' => $schedule['return_datetime'],
+        ]);
+
+        $reservation->update([
+            'status' => 'reserved',
+            'confirmed_at' => null,
+        ]);
+
+        $this
+            ->withToken($token)
+            ->putJson("/api/v1/admin/reservas/{$reservation->id}", [
+                'status' => 'payment_pending',
+                'workflow_status' => 'pago pendiente',
+                'payment_status' => 'pending',
+                'contract_status' => 'signed',
+            ])
+            ->assertOk()
+            ->assertJsonPath('reservation.status', 'pending_payment');
+
+        $this->assertDatabaseHas('reservations', [
+            'id' => $reservation->id,
+            'status' => 'pending_payment',
+        ]);
+    }
+
+    public function test_legacy_admin_reservation_update_normalizes_reserved_alias_to_pending_payment(): void
+    {
+        [$token, $provider, $client] = $this->bootstrapAdminScenario();
+        $schedule = $this->makeSchedule(startDays: 4, startHour: 12, durationHours: 2.5);
+        $aircraft = $this->createAircraft($provider, 'XA-RED9', 'King Air 250');
+        [, $reservation] = $this->createPaidReservation($client, $provider, $aircraft, [
+            'origin' => 'MMTO',
+            'destination' => 'MMMX',
+            'departure_datetime' => $schedule['departure_datetime'],
+            'return_datetime' => $schedule['return_datetime'],
+        ]);
+
+        $reservation->update([
+            'status' => 'pending_payment',
+            'confirmed_at' => null,
+        ]);
+
+        $this
+            ->withToken($token)
+            ->putJson("/api/v1/admin/reservations/{$reservation->id}", [
+                'status' => 'reserved',
+                'workflow_status' => 'contrato pendiente',
+                'payment_status' => 'pending',
+                'contract_status' => 'signed',
+            ])
+            ->assertOk()
+            ->assertJsonPath('reservation.status', 'pending_payment');
+
+        $this->assertDatabaseHas('reservations', [
+            'id' => $reservation->id,
+            'status' => 'pending_payment',
+        ]);
+    }
+
+    public function test_legacy_admin_requests_aliases_update_flight_request(): void
+    {
+        [$token, $provider, $client] = $this->bootstrapAdminScenario();
+        $schedule = $this->makeSchedule(startDays: 5, startHour: 11, durationHours: 3);
+        $aircraft = $this->createAircraft($provider, 'XA-RED7', 'Citation CJ3');
+        [$flightRequest] = $this->createPaidReservation($client, $provider, $aircraft, [
+            'origin' => 'MMTO',
+            'destination' => 'MMMY',
+            'departure_datetime' => $schedule['departure_datetime'],
+            'return_datetime' => $schedule['return_datetime'],
+        ]);
+
+        $this
+            ->withToken($token)
+            ->putJson("/api/v1/admin/requests/{$flightRequest->id}", [
+                'workflow_status' => 'pago pendiente',
+                'status' => 'payment_pending',
+                'payment_status' => 'pending',
+                'notes' => 'Alias route check',
+            ])
+            ->assertOk()
+            ->assertJsonPath('flight_request.status', 'reserved')
+            ->assertJsonPath('flight_request.workflow_status', 'pago pendiente');
+
+        $this->assertDatabaseHas('flight_requests', [
+            'id' => $flightRequest->id,
+            'status' => 'reserved',
+            'workflow_status' => 'pago pendiente',
+        ]);
+    }
+
     private function bootstrapAdminScenario(): array
     {
         $this->seed();

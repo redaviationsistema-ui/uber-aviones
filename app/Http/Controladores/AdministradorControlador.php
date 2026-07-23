@@ -52,6 +52,31 @@ class AdministradorControlador extends ControladorBase
         'operational_permit',
     ];
 
+    private const RESERVATION_STATUS_ALIASES = [
+        'payment_pending' => 'pending_payment',
+        'pending_payment' => 'pending_payment',
+        'pago pendiente' => 'pending_payment',
+        'contract_pending' => 'pending_payment',
+        'contrato pendiente' => 'pending_payment',
+        'contract_signed' => 'pending_payment',
+        'contrato firmado' => 'pending_payment',
+        'provider_accepted' => 'pending_payment',
+        'proveedor aceptado' => 'pending_payment',
+        'provider_pending' => 'pending_payment',
+        'reserved' => 'pending_payment',
+        'paid' => 'confirmed',
+        'payment_confirmed' => 'confirmed',
+        'pago confirmado' => 'confirmed',
+        'flight_confirmed' => 'confirmed',
+        'vuelo confirmado' => 'confirmed',
+        'tracking_live' => 'in_progress',
+        'tracking en vivo' => 'in_progress',
+        'cancelled' => 'cancelled',
+        'cancelada' => 'cancelled',
+        'completed' => 'completed',
+        'finalizada' => 'completed',
+    ];
+
     public function __construct(
         private readonly AdminProviderApprovalService $adminProviderApprovalService,
         private readonly AircraftStateService $aircraftStateService,
@@ -883,6 +908,13 @@ class AdministradorControlador extends ControladorBase
         $previousState = $flightRequest->only(['status', 'workflow_status', 'payment_status', 'admin_flow_state', 'flow_control_state']);
 
         $updateData = collect($data)->filter()->all();
+        if (array_key_exists('status', $updateData)) {
+            $updateData['status'] = $this->normalizeAdminFlightRequestStatus(
+                $updateData['status'],
+                $updateData['workflow_status'] ?? null,
+                $flightRequest->status
+            );
+        }
         $flightRequest->update($updateData);
 
         $this->writeAudit($request, 'admin_flight_request_updated', 'flight_requests', 'Admin actualizó solicitud de vuelo.', [
@@ -927,6 +959,13 @@ class AdministradorControlador extends ControladorBase
         $previousState = $reservation->only(['status', 'workflow_status', 'payment_status', 'contract_status', 'admin_flow_state', 'flow_control_state']);
 
         $updateData = collect($data)->filter()->all();
+        if (array_key_exists('status', $updateData)) {
+            $updateData['status'] = $this->normalizeAdminReservationStatus(
+                $updateData['status'],
+                $updateData['workflow_status'] ?? null,
+                $reservation->status
+            );
+        }
         $reservation->update($updateData);
 
         $this->writeAudit($request, 'admin_reservation_updated', 'reservations', 'Admin actualizó reserva.', [
@@ -937,6 +976,46 @@ class AdministradorControlador extends ControladorBase
         ]);
 
         return $this->ok(['reservation' => $reservation->fresh(['client', 'provider', 'aircraft', 'quote', 'flightRequest'])]);
+    }
+
+    private function normalizeAdminFlightRequestStatus(?string $requestedStatus, ?string $workflowStatus, ?string $currentStatus): ?string
+    {
+        $normalizedRequestedStatus = Str::lower(trim((string) $requestedStatus));
+        if (in_array($normalizedRequestedStatus, ['pending', 'matched', 'quoted', 'reserved', 'cancelled', 'expired'], true)) {
+            return $normalizedRequestedStatus;
+        }
+
+        $normalizedWorkflowStatus = Str::lower(trim((string) $workflowStatus));
+
+        return match ($normalizedWorkflowStatus) {
+            'cotizada', 'quoted' => 'quoted',
+            'cancelada', 'cancelled' => 'cancelled',
+            'expirada', 'expired' => 'expired',
+            'proveedor aceptado', 'provider accepted', 'provider_accepted', 'aceptada', 'accepted', 'operador asignado', 'operador_asignado' => 'matched',
+            'contrato pendiente', 'contract pending', 'contract_pending',
+            'contrato firmado', 'contract signed', 'contract_signed',
+            'pago pendiente', 'payment pending', 'payment_pending',
+            'pago confirmado', 'payment confirmed', 'payment_confirmed',
+            'vuelo confirmado', 'flight confirmed', 'flight_confirmed',
+            'tracking en vivo', 'tracking live', 'tracking_live',
+            'finalizada', 'completed' => 'reserved',
+            default => $currentStatus,
+        };
+    }
+
+    private function normalizeAdminReservationStatus(?string $requestedStatus, ?string $workflowStatus, ?string $currentStatus): ?string
+    {
+        $normalizedRequestedStatus = Str::lower(trim((string) $requestedStatus));
+        if ($normalizedRequestedStatus !== '' && array_key_exists($normalizedRequestedStatus, self::RESERVATION_STATUS_ALIASES)) {
+            return self::RESERVATION_STATUS_ALIASES[$normalizedRequestedStatus];
+        }
+
+        $normalizedWorkflowStatus = Str::lower(trim((string) $workflowStatus));
+        if ($normalizedWorkflowStatus !== '' && array_key_exists($normalizedWorkflowStatus, self::RESERVATION_STATUS_ALIASES)) {
+            return self::RESERVATION_STATUS_ALIASES[$normalizedWorkflowStatus];
+        }
+
+        return $currentStatus;
     }
 
     public function payments()
