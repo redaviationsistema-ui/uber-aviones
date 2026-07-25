@@ -852,6 +852,7 @@ class AdminControlador extends ControladorBase
             'name' => $data['name'],
             'email' => $data['email'],
             'password' => Hash::make($plainPassword),
+            'temporary_password_visible' => $plainPassword,
             'phone' => $data['phone'] ?? null,
             'provider_id' => $data['provider_id'] ?? null,
             'status' => $data['status'] ?? 'active',
@@ -1208,6 +1209,7 @@ class AdminControlador extends ControladorBase
         $plainPassword = Str::password(12);
         $user->forceFill([
             'password' => Hash::make($plainPassword),
+            'temporary_password_visible' => $plainPassword,
         ])->save();
 
         $this->writeAudit($request, 'admin_user_password_reset', 'admin_users', sprintf(
@@ -3588,6 +3590,7 @@ class AdminControlador extends ControladorBase
             'name' => $user->name,
             'email' => $user->email,
             'phone' => $user->phone,
+            'temporary_password_visible' => $user->temporary_password_visible,
             'created_at' => $user->created_at,
             'role' => $user->role,
             'operational_role' => $user->operational_role,

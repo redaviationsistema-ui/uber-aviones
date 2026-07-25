@@ -31,6 +31,23 @@ use Illuminate\Support\Str;
 
 class ClienteControlador extends ControladorBase
 {
+    private const DUPLICATE_FLIGHT_REQUEST_TERMINAL_STATUSES = [
+        'cancelled',
+        'cancelada',
+        'canceled',
+        'completed',
+        'finalizada',
+        'expired',
+    ];
+
+    private const DUPLICATE_FLIGHT_REQUEST_TERMINAL_WORKFLOWS = [
+        'cancelled',
+        'cancelada',
+        'completed',
+        'finalizada',
+        'servicio completado',
+    ];
+
     private const DEFAULT_CLIENT_AIRCRAFT_PAGE_SIZE = 18;
     private const MAX_CLIENT_AIRCRAFT_PAGE_SIZE = 36;
     private const DEFAULT_CLIENT_QUOTES_LIMIT = 12;
@@ -616,9 +633,35 @@ class ClienteControlador extends ControladorBase
             }
         }
 
+        $duplicateRequest = $this->findExistingComparableFlightRequest($user->id, $data);
+
+        if ($duplicateRequest) {
+            return $this->buildStoredFlightRequestResponse(
+                $duplicateRequest,
+                $user,
+                alreadyExists: true,
+                message: 'La solicitud ya habia sido registrada para esta aeronave.',
+                status: 200,
+            );
+        }
+
         try {
-            [$user, $solicitud, $chat, $acceptedQuote] = DB::transaction(function () use ($request, $user, $commercialGate, $data, $ignoredClientPricing, $idempotencyKey) {
+            [$user, $solicitud, $chatId, $acceptedQuote, $reusedExistingRequest] = DB::transaction(function () use ($request, $user, $commercialGate, $data, $ignoredClientPricing, $idempotencyKey) {
                 $freshUser = $user->fresh(['activeSuscripcion', 'demo']);
+
+                $existingComparableRequest = $this->findExistingComparableFlightRequest($freshUser->id, $data, true);
+
+                if ($existingComparableRequest) {
+                    $existingComparableRequest->loadMissing(['quotes:id,flight_request_id,aircraft_id,provider_id,status,total,currency,expires_at', 'chatsProtegidos:id,flight_request_id,status']);
+
+                    return [
+                        $freshUser,
+                        $existingComparableRequest,
+                        $existingComparableRequest->chatsProtegidos->sortByDesc('id')->first()?->id,
+                        $existingComparableRequest->quotes->where('status', 'accepted')->sortByDesc('id')->first(),
+                        true,
+                    ];
+                }
 
                 $solicitud = SolicitudVuelo::create([
                     ...$data,
@@ -665,7 +708,7 @@ class ClienteControlador extends ControladorBase
                     'status' => 'activo',
                 ]);
 
-                return [$freshUser, $solicitud, $chat, $acceptedQuote];
+                return [$freshUser, $solicitud, $chat->id, $acceptedQuote, false];
             });
         } catch (QueryException $exception) {
             if ($idempotencyKey && $this->flightRequestSupportsIdempotency() && $this->isFlightRequestIdempotencyUniqueViolation($exception)) {
@@ -685,6 +728,18 @@ class ClienteControlador extends ControladorBase
             throw $exception;
         }
 
+        if ($reusedExistingRequest) {
+            return $this->buildStoredFlightRequestResponse(
+                $solicitud,
+                $user,
+                alreadyExists: true,
+                message: 'La solicitud ya habia sido registrada para esta aeronave.',
+                status: 200,
+                acceptedQuote: $acceptedQuote,
+                chatId: $chatId ? (int) $chatId : null,
+            );
+        }
+
         $this->writeAudit($request, 'create', 'red_aviation.flight_requests', 'Solicitud Red Aviation creada.');
         $this->dispatchProviderFlightRequestNotifications((int) $solicitud->id);
 
@@ -695,7 +750,7 @@ class ClienteControlador extends ControladorBase
             message: null,
             status: 201,
             acceptedQuote: $acceptedQuote,
-            chatId: $chat->id,
+            chatId: $chatId ? (int) $chatId : null,
         );
     }
 
@@ -726,6 +781,123 @@ class ClienteControlador extends ControladorBase
             ->where('client_id', $clientId)
             ->where('idempotency_key', $idempotencyKey)
             ->first();
+    }
+
+    private function findExistingComparableFlightRequest(int $clientId, array $validatedData, bool $lockForUpdate = false): ?SolicitudVuelo
+    {
+        if ($clientId <= 0) {
+            return null;
+        }
+
+        $aircraftId = (int) ($validatedData['aircraft_id'] ?? 0);
+        $providerId = (int) ($validatedData['provider_id'] ?? 0);
+        $passengers = (int) ($validatedData['passengers'] ?? 0);
+        $tripType = trim((string) ($validatedData['trip_type'] ?? ''));
+        $origin = strtoupper(trim((string) ($validatedData['origin'] ?? '')));
+        $destination = strtoupper(trim((string) ($validatedData['destination'] ?? '')));
+        $departure = $this->normalizeComparableFlightRequestDateTime($validatedData['departure_datetime'] ?? null);
+
+        if ($aircraftId <= 0 || $origin === '' || $destination === '' || ! $departure) {
+            return null;
+        }
+
+        $requestedLegsSignature = $this->buildComparableLegsSignatureFromPayload($validatedData);
+        $query = SolicitudVuelo::query()
+            ->with(['legs:id,flight_request_id,leg_order,origin,destination,departure_datetime'])
+            ->where('client_id', $clientId)
+            ->where('assigned_aircraft_id', $aircraftId)
+            ->where('origin', $origin)
+            ->where('destination', $destination)
+            ->where('departure_datetime', $departure)
+            ->where('passengers', $passengers)
+            ->where('trip_type', $tripType)
+            ->whereNotIn(DB::raw('lower(coalesce(status, \'\'))'), self::DUPLICATE_FLIGHT_REQUEST_TERMINAL_STATUSES)
+            ->whereNotIn(DB::raw('lower(coalesce(workflow_status, \'\'))'), self::DUPLICATE_FLIGHT_REQUEST_TERMINAL_WORKFLOWS)
+            ->when($providerId > 0, fn ($builder) => $builder->where('assigned_provider_id', $providerId))
+            ->latest('id');
+
+        if ($lockForUpdate) {
+            $query->lockForUpdate();
+        }
+
+        return $query->get()->first(function (SolicitudVuelo $request) use ($requestedLegsSignature): bool {
+            return $this->buildComparableLegsSignatureFromModel($request) === $requestedLegsSignature;
+        });
+    }
+
+    private function buildComparableLegsSignatureFromPayload(array $validatedData): string
+    {
+        $legs = collect($validatedData['legs'] ?? [])
+            ->map(function ($leg, int $index): array {
+                return [
+                    'order' => (int) ($leg['leg_order'] ?? $index + 1),
+                    'origin' => strtoupper(trim((string) ($leg['origin'] ?? ''))),
+                    'destination' => strtoupper(trim((string) ($leg['destination'] ?? ''))),
+                    'departure' => $this->normalizeComparableFlightRequestDateTime($leg['departure_datetime'] ?? null),
+                ];
+            })
+            ->filter(fn (array $leg): bool => $leg['origin'] !== '' && $leg['destination'] !== '')
+            ->sortBy('order')
+            ->values()
+            ->all();
+
+        if ($legs === []) {
+            $legs = [[
+                'order' => 1,
+                'origin' => strtoupper(trim((string) ($validatedData['origin'] ?? ''))),
+                'destination' => strtoupper(trim((string) ($validatedData['destination'] ?? ''))),
+                'departure' => $this->normalizeComparableFlightRequestDateTime($validatedData['departure_datetime'] ?? null),
+            ]];
+        }
+
+        return sha1(json_encode($legs));
+    }
+
+    private function buildComparableLegsSignatureFromModel(SolicitudVuelo $request): string
+    {
+        $request->loadMissing('legs:id,flight_request_id,leg_order,origin,destination,departure_datetime');
+
+        $legs = $request->legs
+            ->map(fn ($leg) => [
+                'order' => (int) ($leg->leg_order ?? 0),
+                'origin' => strtoupper(trim((string) ($leg->origin ?? ''))),
+                'destination' => strtoupper(trim((string) ($leg->destination ?? ''))),
+                'departure' => $this->normalizeComparableFlightRequestDateTime($leg->departure_datetime),
+            ])
+            ->filter(fn (array $leg): bool => $leg['origin'] !== '' && $leg['destination'] !== '')
+            ->sortBy('order')
+            ->values()
+            ->all();
+
+        if ($legs === []) {
+            $legs = [[
+                'order' => 1,
+                'origin' => strtoupper(trim((string) ($request->origin ?? ''))),
+                'destination' => strtoupper(trim((string) ($request->destination ?? ''))),
+                'departure' => $this->normalizeComparableFlightRequestDateTime($request->departure_datetime),
+            ]];
+        }
+
+        return sha1(json_encode($legs));
+    }
+
+    private function normalizeComparableFlightRequestDateTime(mixed $value): ?string
+    {
+        if ($value instanceof Carbon) {
+            return $value->copy()->format('Y-m-d H:i:s');
+        }
+
+        $candidate = trim((string) ($value ?? ''));
+
+        if ($candidate === '') {
+            return null;
+        }
+
+        try {
+            return Carbon::parse($candidate)->format('Y-m-d H:i:s');
+        } catch (\Throwable) {
+            return null;
+        }
     }
 
     private function isFlightRequestIdempotencyUniqueViolation(QueryException $exception): bool

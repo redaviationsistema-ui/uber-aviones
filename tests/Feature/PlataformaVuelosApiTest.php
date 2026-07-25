@@ -134,6 +134,65 @@ class PlataformaVuelosApiTest extends TestCase
         Storage::disk('public')->assertExists($verification->image_path);
     }
 
+    public function test_registration_identification_upload_can_be_saved_before_register_and_attached_on_signup(): void
+    {
+        Storage::fake('s3');
+
+        $uploadResponse = $this->post('/api/v1/auth/registration/identification', [
+            'file' => UploadedFile::fake()->create('identificacion.pdf', 150, 'application/pdf'),
+            'document_name' => 'Identificación oficial',
+            'document_type' => 'ine',
+            'document_category' => 'user_identification',
+            'document_slot' => 'official_identification',
+            'full_name' => 'Cliente PDF',
+            'phone' => '+52 555 000 0000',
+            'birth_date' => '1990-01-10',
+            'document_number' => 'ABC123456',
+            'nationality' => 'Mexicana',
+            'curp' => 'PEPJ900110HDFRRN09',
+            'requires_identity_validation' => '1',
+            'expires_at' => '2030-10-10',
+        ])->assertCreated();
+
+        $documentId = $uploadResponse->json('document.id');
+        $storagePath = $uploadResponse->json('document.storage_path');
+
+        $registerResponse = $this->postJson('/api/v1/auth/register', [
+            'name' => 'Cliente PDF',
+            'email' => 'cliente.pdf@test.com',
+            'phone' => '+52 555 000 0000',
+            'password' => 'password123',
+            'password_confirmation' => 'password123',
+            'role' => 'client',
+            'birth_date' => '1990-01-10',
+            'nationality' => 'Mexicana',
+            'document_type' => 'INE',
+            'document_number' => 'ABC123456',
+            'document_expiration' => '2030-10-10',
+            'identity_validation_required' => '1',
+            'ine_curp' => 'PEPJ900110HDFRRN09',
+            'identification_document_id' => $documentId,
+            'identity_verification_status' => 'approved',
+            'identity_verified' => '1',
+            'selfie_biometric' => UploadedFile::fake()->image('selfie.jpg'),
+        ])->assertCreated();
+
+        $registerResponse->assertJsonPath('user.email', 'cliente.pdf@test.com');
+
+        $user = Usuario::query()
+            ->where('email', 'cliente.pdf@test.com')
+            ->with('profile')
+            ->firstOrFail();
+
+        $officialIdentification = $user->profile?->tax_data['official_identification'] ?? null;
+
+        $this->assertIsArray($officialIdentification);
+        $this->assertSame($documentId, $officialIdentification['id'] ?? null);
+        $this->assertSame('s3', $officialIdentification['storage_disk'] ?? null);
+        $this->assertSame($storagePath, $officialIdentification['storage_path'] ?? null);
+        Storage::disk('s3')->assertExists($storagePath);
+    }
+
     public function test_red_aviation_client_flow_creates_blind_request_and_chat(): void
     {
         $this->seed();
@@ -355,6 +414,81 @@ class PlataformaVuelosApiTest extends TestCase
         $this->assertSame($firstChatId, (int) $secondResponse->json('chat_id'));
         $this->assertSame(1, SolicitudVuelo::query()->where('client_id', $register->json('user.id'))->count());
         $this->assertSame(1, \App\Modelos\ChatProtegido::query()->where('flight_request_id', $firstFlightRequestId)->count());
+
+        Queue::assertPushed(DispatchProviderFlightRequestNotificationsJob::class, 1);
+    }
+
+    public function test_red_aviation_client_request_reuses_active_request_for_same_aircraft_and_itinerary(): void
+    {
+        $this->seed();
+        Queue::fake();
+
+        $provider = Proveedor::factory()->create([
+            'approval_status' => 'approved',
+        ]);
+
+        $aircraft = Aeronave::factory()->create([
+            'provider_id' => $provider->id,
+            'status' => 'active',
+            'category' => 'Light Jet',
+            'capacity' => 6,
+            'base_airport' => 'MMMX',
+        ]);
+
+        $register = $this->postJson('/api/v1/auth/register', [
+            'name' => 'Cliente Duplicado Protegido',
+            'email' => 'cliente.duplicado.protegido@test.com',
+            'password' => 'password123',
+            'password_confirmation' => 'password123',
+            'role' => 'client',
+        ])->assertCreated();
+
+        $sessionToken = $register->json('token');
+
+        $this->withToken($sessionToken)
+            ->postJson('/api/v1/subscriptions/start-trial')
+            ->assertCreated();
+
+        $departure = now()->addDays(6)->setTime(17, 0, 0);
+        $payload = [
+            'origin' => 'MMMX',
+            'destination' => 'MMUN',
+            'departure_datetime' => $departure->toISOString(),
+            'passengers' => 1,
+            'trip_type' => 'one_way',
+            'provider_id' => $provider->id,
+            'aircraft_id' => $aircraft->id,
+            'legs' => [[
+                'leg_order' => 1,
+                'origin' => 'MMMX',
+                'destination' => 'MMUN',
+                'departure_datetime' => $departure->toISOString(),
+            ]],
+        ];
+
+        $firstResponse = $this->withToken($sessionToken)
+            ->withHeader('Idempotency-Key', '22222222-1111-4111-8111-111111111111')
+            ->postJson('/api/v1/client/flight-requests', $payload)
+            ->assertCreated()
+            ->assertJsonPath('already_exists', false);
+
+        $secondResponse = $this->withToken($sessionToken)
+            ->withHeader('Idempotency-Key', '33333333-1111-4111-8111-111111111111')
+            ->postJson('/api/v1/client/flight-requests', $payload)
+            ->assertOk()
+            ->assertJsonPath('already_exists', true)
+            ->assertJsonPath('message', 'La solicitud ya habia sido registrada para esta aeronave.');
+
+        $flightRequestId = (int) $firstResponse->json('flight_request.id');
+
+        $this->assertSame($flightRequestId, (int) $secondResponse->json('flight_request.id'));
+        $this->assertSame(
+            1,
+            SolicitudVuelo::query()
+                ->where('client_id', $register->json('user.id'))
+                ->where('assigned_aircraft_id', $aircraft->id)
+                ->count()
+        );
 
         Queue::assertPushed(DispatchProviderFlightRequestNotificationsJob::class, 1);
     }

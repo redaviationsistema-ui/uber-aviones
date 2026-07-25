@@ -58,6 +58,7 @@ class Usuario extends Authenticatable implements MustVerifyEmail
         'name',
         'email',
         'password',
+        'temporary_password_visible',
         'phone',
         'role',
         'operational_role',

@@ -11,8 +11,10 @@ use Illuminate\Auth\Events\PasswordReset;
 use Illuminate\Auth\Events\Verified;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Password;
+use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Password;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
@@ -38,6 +40,7 @@ class AutenticacionControlador extends ControladorBase
             'document_type' => ['nullable', 'string', 'max:50'],
             'document_number' => ['nullable', 'string', 'max:120'],
             'document_expiration' => ['nullable', 'date'],
+            'identification_document_id' => ['nullable', 'string', 'max:100'],
             'identity_validation_required' => ['nullable', 'boolean'],
             'ine_curp' => ['nullable', 'string', 'max:32'],
             'ine_cic' => ['nullable', 'string', 'max:64'],
@@ -85,6 +88,9 @@ class AutenticacionControlador extends ControladorBase
         $operationalRole = $data['operational_role']
             ?? ($role === Usuario::ROLE_SOBRECARGO ? Usuario::ROLE_SOBRECARGO : null);
         $persistedRole = $role === Usuario::ROLE_SOBRECARGO ? Usuario::ROLE_CLIENT : $role;
+        $registrationIdentification = $this->resolveRegistrationIdentificationRecord(
+            $data['identification_document_id'] ?? null
+        );
 
         if ($role === Usuario::ROLE_SOBRECARGO && ! $this->hasValidAfacLicenseEvidence($data)) {
             return response()->json([
@@ -92,6 +98,23 @@ class AutenticacionControlador extends ControladorBase
                 'message' => 'La licencia no fue validada como documento AFAC. Escanea una licencia AFAC valida antes de registrarte.',
                 'errors' => [
                     'document_type' => ['La licencia debe mostrar evidencia AFAC valida.'],
+                ],
+            ], 422);
+        }
+
+        $hasLegacyIdentityFiles = $request->hasFile('ine_front') && $request->hasFile('ine_back');
+
+        if (
+            $role !== Usuario::ROLE_SOBRECARGO
+            && $request->boolean('identity_validation_required')
+            && ! $registrationIdentification
+            && ! $hasLegacyIdentityFiles
+        ) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Primero guarda la identificación oficial en PDF antes de completar el registro.',
+                'errors' => [
+                    'identification_document_id' => ['La identificación oficial aún no fue guardada.'],
                 ],
             ], 422);
         }
@@ -131,6 +154,12 @@ class AutenticacionControlador extends ControladorBase
             $operationalRole ?: $role
         );
 
+        $profileTaxData = [];
+
+        if ($registrationIdentification) {
+            $profileTaxData['official_identification'] = $registrationIdentification;
+        }
+
         $user->profile()->updateOrCreate(
             ['user_id' => $user->id],
             [
@@ -147,6 +176,7 @@ class AutenticacionControlador extends ControladorBase
                 'ine_scan_status' => $data['ine_scan_status'] ?? null,
                 'ine_front_path' => $ineFrontPath,
                 'ine_back_path' => $ineBackPath,
+                'tax_data' => $profileTaxData ?: null,
                 'city' => $baseCity,
                 'base_airport' => $baseAirport,
                 'base_airport_id' => $resolvedBaseAirport?->id,
@@ -211,7 +241,82 @@ class AutenticacionControlador extends ControladorBase
             ];
         }
 
+        if ($registrationIdentification) {
+            $this->forgetRegistrationIdentificationRecord($registrationIdentification['id'] ?? null);
+        }
+
         return $this->authenticatedResponse($request, $user->fresh(), 201, $responseExtras);
+    }
+
+    public function storeRegistrationIdentification(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'file' => ['required', 'file', 'mimes:pdf', 'mimetypes:application/pdf', 'max:20480'],
+            'document_name' => ['required', 'string', 'max:150'],
+            'document_type' => ['required', 'string', 'max:50'],
+            'document_category' => ['required', 'string', 'max:50'],
+            'document_slot' => ['required', 'string', 'max:50'],
+            'full_name' => ['required', 'string', 'max:200'],
+            'phone' => ['required', 'string', 'max:50'],
+            'birth_date' => ['required', 'date'],
+            'document_number' => ['required', 'string', 'max:120'],
+            'nationality' => ['required', 'string', 'max:120'],
+            'curp' => ['required', 'string', 'max:32'],
+            'requires_identity_validation' => ['required', 'boolean'],
+            'expires_at' => ['nullable', 'date'],
+            'replace_document_id' => ['nullable', 'string', 'max:100'],
+        ]);
+
+        $previousDocument = $this->resolveRegistrationIdentificationRecord($data['replace_document_id'] ?? null);
+        if ($previousDocument) {
+            $this->deleteStoredRegistrationIdentification($previousDocument);
+            $this->forgetRegistrationIdentificationRecord($previousDocument['id'] ?? null);
+        }
+
+        /** @var UploadedFile $file */
+        $file = $request->file('file');
+        $safeBaseName = Str::slug(pathinfo($file->getClientOriginalName(), PATHINFO_FILENAME), '_') ?: 'identificacion';
+        $documentId = (string) Str::uuid();
+        $path = $file->storeAs(
+            'registration/identification',
+            $safeBaseName.'_'.Str::lower(Str::random(8)).'.pdf',
+            's3'
+        );
+
+        abort_if(! $path, 500, 'No se pudo guardar la identificación oficial.');
+
+        $documentUrl = Storage::disk('s3')->url($path);
+        $documentRecord = [
+            'id' => $documentId,
+            'document_name' => $data['document_name'],
+            'document_type' => $data['document_type'],
+            'document_category' => $data['document_category'],
+            'document_slot' => $data['document_slot'],
+            'full_name' => $data['full_name'],
+            'phone' => $data['phone'],
+            'birth_date' => $data['birth_date'],
+            'document_number' => $data['document_number'],
+            'nationality' => $data['nationality'],
+            'curp' => $data['curp'],
+            'requires_identity_validation' => (bool) $data['requires_identity_validation'],
+            'expires_at' => $data['expires_at'] ?? null,
+            'storage_disk' => 's3',
+            'storage_path' => $path,
+            'file_url' => $documentUrl,
+            'document_url' => $documentUrl,
+            'mime_type' => $file->getClientMimeType() ?: 'application/pdf',
+            'file_size_bytes' => $file->getSize(),
+            'file_name' => basename($path),
+            'original_name' => $file->getClientOriginalName(),
+            'uploaded_at' => now()->toIso8601String(),
+        ];
+
+        $this->storeRegistrationIdentificationRecord($documentRecord);
+
+        return $this->ok([
+            'document' => $documentRecord,
+            'message' => 'Identificación oficial guardada correctamente.',
+        ], 201);
     }
 
     public function login(Request $request)
@@ -263,6 +368,60 @@ class AutenticacionControlador extends ControladorBase
             ->where('icao', $normalizedCode)
             ->orWhere('iata', $normalizedCode)
             ->first();
+    }
+
+    private function registrationIdentificationCacheKey(?string $documentId): string
+    {
+        return 'registration_identification:'.trim((string) $documentId);
+    }
+
+    private function storeRegistrationIdentificationRecord(array $documentRecord): void
+    {
+        Cache::put(
+            $this->registrationIdentificationCacheKey($documentRecord['id'] ?? ''),
+            $documentRecord,
+            now()->addHours(6)
+        );
+    }
+
+    private function resolveRegistrationIdentificationRecord(?string $documentId): ?array
+    {
+        $normalizedId = trim((string) $documentId);
+        if ($normalizedId === '') {
+            return null;
+        }
+
+        $record = Cache::get($this->registrationIdentificationCacheKey($normalizedId));
+
+        return is_array($record) ? $record : null;
+    }
+
+    private function forgetRegistrationIdentificationRecord(?string $documentId): void
+    {
+        $normalizedId = trim((string) $documentId);
+        if ($normalizedId === '') {
+            return;
+        }
+
+        Cache::forget($this->registrationIdentificationCacheKey($normalizedId));
+    }
+
+    private function deleteStoredRegistrationIdentification(?array $documentRecord): void
+    {
+        if (! is_array($documentRecord)) {
+            return;
+        }
+
+        $disk = trim((string) ($documentRecord['storage_disk'] ?? ''));
+        $path = trim((string) ($documentRecord['storage_path'] ?? ''));
+        if ($disk === '' || $path === '' || config("filesystems.disks.{$disk}") === null) {
+            return;
+        }
+
+        $storage = Storage::disk($disk);
+        if ($storage->exists($path)) {
+            $storage->delete($path);
+        }
     }
 
     private function hasValidAfacLicenseEvidence(array $data): bool

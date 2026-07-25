@@ -75,9 +75,29 @@ class ClientAccessBillingControlador extends ControladorBase
         if ($this->hasBlockingActiveAccess($user)) {
             return $this->ok([
                 'already_active' => true,
+                'success' => true,
                 'message' => 'El cliente ya cuenta con una suscripcion comercial activa.',
                 'access' => $this->buildAccessPayload($user),
                 'latest_payment' => $this->serializeAccessPayment($this->latestPaymentForUser($user)),
+            ]);
+        }
+
+        $latestPayment = $this->latestPaymentForUser($user);
+        $existingCheckoutUrl = trim((string) data_get($latestPayment?->gateway_response, 'checkout_url', ''));
+        if (
+            $latestPayment &&
+            in_array((string) $latestPayment->status, ['pending', 'processing', 'payment_pending'], true) &&
+            trim((string) $latestPayment->provider_checkout_id) !== '' &&
+            $this->isStripeHostedUrl($existingCheckoutUrl)
+        ) {
+            return $this->ok([
+                'success' => true,
+                'reused_checkout' => true,
+                'payment' => $this->serializeAccessPayment($latestPayment),
+                'checkout_url' => $existingCheckoutUrl,
+                'checkoutUrl' => $existingCheckoutUrl,
+                'checkout_session_id' => $latestPayment->provider_checkout_id,
+                'checkoutSessionId' => $latestPayment->provider_checkout_id,
             ]);
         }
 
@@ -104,9 +124,9 @@ class ClientAccessBillingControlador extends ControladorBase
         );
 
         $successUrl = $data['success_url']
-            ?? rtrim((string) config('services.stripe.frontend_url'), '/').'/cliente/pago?accessPayment=1&checkout=success&session_id={CHECKOUT_SESSION_ID}';
+            ?? rtrim((string) config('services.stripe.frontend_url'), '/').'/cliente/pago?checkout=success&session_id={CHECKOUT_SESSION_ID}';
         $cancelUrl = $data['cancel_url']
-            ?? rtrim((string) config('services.stripe.frontend_url'), '/').'/cliente/pago?accessPayment=1&checkout=cancelled&session_id={CHECKOUT_SESSION_ID}';
+            ?? rtrim((string) config('services.stripe.frontend_url'), '/').'/cliente/pago?checkout=cancelled';
 
         $metadata = [
             'billing_context' => 'client_access_subscription',
@@ -114,6 +134,9 @@ class ClientAccessBillingControlador extends ControladorBase
             'access_payment_id' => (string) $payment->id,
             'billing_plan_id' => (string) $plan->id,
             'plan_code' => (string) $plan->code,
+            'payment_type' => 'commercial_access',
+            'purpose' => 'account_activation',
+            'access_payment' => 'true',
         ];
 
         $sessionPayload = [
@@ -153,9 +176,12 @@ class ClientAccessBillingControlador extends ControladorBase
         ]);
 
         return $this->ok([
+            'success' => true,
             'payment' => $this->serializeAccessPayment($payment->fresh('billingPlan')),
             'checkout_url' => $session->url,
+            'checkoutUrl' => $session->url,
             'checkout_session_id' => $session->id,
+            'checkoutSessionId' => $session->id,
         ], 201);
     }
 
@@ -321,10 +347,25 @@ class ClientAccessBillingControlador extends ControladorBase
         ]);
 
         return [
+            'success' => true,
             'management_url' => $session->url,
+            'managementUrl' => $session->url,
             'portal_session_id' => $session->id,
+            'portalSessionId' => $session->id,
             'message' => 'El cliente ya tiene una suscripcion creada. Se genero una sesion del portal de facturacion para administrar su metodo de pago.',
         ];
+    }
+
+    private function isStripeHostedUrl(string $url): bool
+    {
+        if ($url === '' || ! filter_var($url, FILTER_VALIDATE_URL)) {
+            return false;
+        }
+
+        $scheme = strtolower((string) parse_url($url, PHP_URL_SCHEME));
+        $host = strtolower((string) parse_url($url, PHP_URL_HOST));
+
+        return $scheme === 'https' && str_ends_with($host, 'stripe.com');
     }
 
     private function buildCheckoutLineItem($plan, float $amount): array

@@ -7,6 +7,7 @@ use Illuminate\Support\Facades\Route;
 
 Route::prefix('auth')->group(function () {
     Route::post('/register', [AutenticacionControlador::class, 'register']);
+    Route::post('/registration/identification', [AutenticacionControlador::class, 'storeRegistrationIdentification']);
     Route::post('/login', [AutenticacionControlador::class, 'login'])->middleware('throttle:auth.login');
     Route::post('/ocr/scan-document', [OcrDocumentoControlador::class, 'scanDocument']);
     Route::post('/forgot-password', [AutenticacionControlador::class, 'forgotPassword'])->middleware('throttle:auth.password-reset');
