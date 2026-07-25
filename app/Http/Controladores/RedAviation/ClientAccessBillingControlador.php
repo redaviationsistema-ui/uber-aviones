@@ -12,6 +12,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Validator;
 use Stripe\BillingPortal\Session as BillingPortalSession;
 use Stripe\Checkout\Session;
 use Stripe\Invoice;
@@ -62,8 +63,19 @@ class ClientAccessBillingControlador extends ControladorBase
             'success_url' => ['nullable', 'string', 'max:2048'],
             'cancel_url' => ['nullable', 'string', 'max:2048'],
             'return_url' => ['nullable', 'string', 'max:2048'],
-            'contact_email' => ['nullable', 'email:rfc,dns'],
+            'contact_email' => ['nullable', 'string', 'max:255'],
         ]);
+        $contactEmail = $request->input('contact_email')
+            ?: $request->user()?->email;
+
+        Validator::make(
+            ['contact_email' => $contactEmail],
+            [
+                'contact_email' => ['required', 'email:rfc'],
+            ]
+        )->validate();
+
+        $data['contact_email'] = (string) $contactEmail;
         $this->assertAllowedReturnUrl($data['success_url'] ?? null);
         $this->assertAllowedReturnUrl($data['cancel_url'] ?? null);
         $this->assertAllowedReturnUrl($data['return_url'] ?? null);

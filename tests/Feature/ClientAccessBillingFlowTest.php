@@ -5,15 +5,24 @@ namespace Tests\Feature;
 use App\Http\Controladores\StripeWebhookControlador;
 use App\Modelos\AccessPayment;
 use App\Modelos\Plan;
+use App\Modelos\TokenApi;
 use App\Modelos\Usuario;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Hash;
 use ReflectionMethod;
+use Mockery;
 use Tests\TestCase;
 
 class ClientAccessBillingFlowTest extends TestCase
 {
     use RefreshDatabase;
+
+    protected function tearDown(): void
+    {
+        Mockery::close();
+
+        parent::tearDown();
+    }
 
     public function test_paid_checkout_session_activates_client_commercial_access(): void
     {
@@ -103,5 +112,70 @@ class ClientAccessBillingFlowTest extends TestCase
             'provider_customer_id' => 'cus_test_123',
             'access_payment_id' => $payment->id,
         ]);
+    }
+
+    public function test_create_access_checkout_uses_authenticated_user_email_when_contact_email_is_missing(): void
+    {
+        $this->seed();
+        config()->set('services.stripe.secret', 'sk_test_client_access');
+        config()->set('services.stripe.publishable', 'pk_test_client_access');
+        config()->set('services.stripe.frontend_url', 'https://frontend.test');
+
+        $user = Usuario::query()->create([
+            'name' => 'Cliente Acceso',
+            'email' => 'cliente.acceso@gmail.com',
+            'password' => Hash::make('password123'),
+            'role' => Usuario::ROLE_CLIENT,
+            'status' => 'active',
+            'access_status' => 'trial_used',
+            'has_paid_access' => false,
+            'free_quote_limit' => 1,
+            'free_quotes_used' => 1,
+        ]);
+
+        Plan::query()->updateOrCreate(
+            ['code' => 'client_access_monthly'],
+            [
+                'name' => 'Acceso comercial cliente',
+                'slug' => 'client-access-monthly',
+                'description' => 'Acceso comercial mensual.',
+                'amount' => 115,
+                'price' => 115,
+                'price_monthly' => 115,
+                'currency' => 'USD',
+                'billing_type' => 'client_access',
+                'interval_type' => 'monthly',
+                'billing_cycle' => 'monthly',
+                'role_target' => 'client',
+                'user_type' => 'client',
+                'status' => 'active',
+                'is_active' => true,
+            ],
+        );
+
+        $token = TokenApi::issue($user, 'client-access-checkout-token');
+
+        $sessionAlias = Mockery::mock('alias:Stripe\Checkout\Session');
+        $sessionAlias
+            ->shouldReceive('create')
+            ->once()
+            ->with(Mockery::on(function (array $payload) use ($user): bool {
+                return ($payload['customer_email'] ?? null) === $user->email;
+            }))
+            ->andReturn((object) [
+                'id' => 'cs_test_access_create',
+                'url' => 'https://checkout.stripe.com/pay/cs_test_access_create',
+            ]);
+
+        $this
+            ->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson('/api/v1/client/access-payment/create', [
+                'success_url' => 'https://frontend.test/success',
+                'cancel_url' => 'https://frontend.test/cancel',
+                'return_url' => 'https://frontend.test/renta/cliente/pago',
+            ])
+            ->assertCreated()
+            ->assertJsonPath('checkout_session_id', 'cs_test_access_create')
+            ->assertJsonPath('checkout_url', 'https://checkout.stripe.com/pay/cs_test_access_create');
     }
 }
