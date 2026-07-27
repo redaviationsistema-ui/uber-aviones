@@ -1,41 +1,42 @@
 <?php
 
-use App\Http\Intermediarios\AsegurarAccesoPremium;
-use App\Http\Intermediarios\FiltroAntiBrokerIntermediario;
-use App\Http\Intermediarios\VerificarLimitePlanIntermediario;
-use App\Http\Intermediarios\TokenApiIntermediario;
-use App\Http\Intermediarios\AuditoriaIntermediario;
-use App\Consola\Comandos\ExpirarCotizacionesComando;
-use App\Consola\Comandos\ExpirarDemosComando;
-use App\Consola\Comandos\ExpirarAircraftHoldsComando;
-use App\Consola\Comandos\ExpirarSuscripcionesAeronavesComando;
-use App\Consola\Comandos\ExpirarSuscripcionesComando;
-use App\Consola\Comandos\LiberarPagosProveedorComando;
-use App\Consola\Comandos\PerfilarFlotaAeronavesAdminComando;
-use App\Consola\Comandos\NormalizarDatosLegacySobrecargoComando;
 use App\Consola\Comandos\CrearOperacionSmokeSobrecargoComando;
 use App\Consola\Comandos\EliminarOperacionSmokeSobrecargoComando;
 use App\Consola\Comandos\EnviarRecordatoriosOperativosSobrecargoComando;
+use App\Consola\Comandos\ExpirarAircraftHoldsComando;
+use App\Consola\Comandos\ExpirarCotizacionesComando;
+use App\Consola\Comandos\ExpirarDemosComando;
+use App\Consola\Comandos\ExpirarSuscripcionesAeronavesComando;
+use App\Consola\Comandos\ExpirarSuscripcionesComando;
+use App\Consola\Comandos\LiberarPagosProveedorComando;
+use App\Consola\Comandos\NormalizarDatosLegacySobrecargoComando;
+use App\Consola\Comandos\PerfilarFlotaAeronavesAdminComando;
+use App\Http\Intermediarios\AsegurarAccesoPremium;
+use App\Http\Intermediarios\AuditoriaIntermediario;
+use App\Http\Intermediarios\CorsIntermediario;
+use App\Http\Intermediarios\FiltroAntiBrokerIntermediario;
+use App\Http\Intermediarios\ForzarRespuestaJson;
+use App\Http\Intermediarios\RolIntermediario;
+use App\Http\Intermediarios\TokenApiIntermediario;
 use App\Http\Intermediarios\VerificarAccesoActivo;
 use App\Http\Intermediarios\VerificarDemo;
+use App\Http\Intermediarios\VerificarLimitePlanIntermediario;
 use App\Http\Intermediarios\VerificarProveedorAprobado;
 use App\Http\Intermediarios\VerificarSuscripcion;
-use App\Http\Intermediarios\ForzarRespuestaJson;
-use App\Http\Intermediarios\CorsIntermediario;
-use App\Http\Intermediarios\RolIntermediario;
+use Illuminate\Auth\AuthenticationException;
+use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Middleware\HandleCors;
-use Illuminate\Auth\AuthenticationException;
 use Illuminate\Http\Request;
-use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Validation\ValidationException;
 use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 
 if (! function_exists('agregarCabecerasCorsApi')) {
-    function agregarCabecerasCorsApi(Request $request, \Illuminate\Http\JsonResponse $response): \Illuminate\Http\JsonResponse
+    function agregarCabecerasCorsApi(Request $request, JsonResponse $response): JsonResponse
     {
         if (! $request->is('api/*')) {
             return $response;
@@ -68,9 +69,10 @@ if (! function_exists('agregarCabecerasCorsApi')) {
         return $response;
     }
 }
+
 return Application::configure(basePath: dirname(__DIR__))
     ->withRouting(
-         web: __DIR__.'/../routes/web.php',
+        web: __DIR__.'/../routes/web.php',
         api: __DIR__.'/../routes/api.php',
         commands: __DIR__.'/../routes/console.php',
         health: '/up',
@@ -146,7 +148,7 @@ return Application::configure(basePath: dirname(__DIR__))
             return null;
         });
 
-        $exceptions->render(function (\Throwable $exception, Request $request) {
+        $exceptions->render(function (Throwable $exception, Request $request) {
             if (! $request->is('api/*')) {
                 return null;
             }
@@ -172,6 +174,14 @@ return Application::configure(basePath: dirname(__DIR__))
 
             return agregarCabecerasCorsApi($request, response()->json([
                 'success' => false,
+                'code' => match ($status) {
+                    401 => 'UNAUTHENTICATED',
+                    403 => 'FORBIDDEN',
+                    404 => 'RESOURCE_NOT_FOUND',
+                    409 => 'CONFLICT',
+                    422 => 'VALIDATION_ERROR',
+                    default => $status >= 500 ? 'INTERNAL_ERROR' : 'REQUEST_ERROR',
+                },
                 'message' => $message,
             ], $status));
         });

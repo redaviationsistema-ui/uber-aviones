@@ -21,6 +21,8 @@ class Reserva extends Model
         'status',
         'total_amount',
         'currency',
+        'commercial_snapshot',
+        'commercial_snapshot_hash',
         'confirmed_at',
         'cancelled_at',
         'cancellation_reason',
@@ -30,6 +32,7 @@ class Reserva extends Model
     {
         return [
             'total_amount' => 'decimal:2',
+            'commercial_snapshot' => 'array',
             'confirmed_at' => 'datetime',
             'cancelled_at' => 'datetime',
         ];

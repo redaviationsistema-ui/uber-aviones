@@ -3,12 +3,14 @@
 namespace App\Http\Controladores;
 
 use App\Http\Requests\CreateAircraftHoldRequest;
-use App\Modelos\SolicitudVuelo;
 use App\Modelos\Cotizacion;
+use App\Modelos\SolicitudVuelo;
 use App\Servicios\Aeronaves\AircraftAvailabilityService;
+use App\Servicios\Aeronaves\AircraftEligibilityService;
 use App\Servicios\Billing\FlightMembershipService;
-use Illuminate\Http\Request;
+use App\Servicios\Vuelos\FlightRouteService;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use RuntimeException;
 
@@ -17,9 +19,9 @@ class CotizacionControlador extends ControladorBase
     public function __construct(
         private readonly FlightMembershipService $flightMembershipService,
         private readonly AircraftAvailabilityService $aircraftAvailabilityService,
-    )
-    {
-    }
+        private readonly AircraftEligibilityService $aircraftEligibilityService,
+        private readonly FlightRouteService $flightRouteService,
+    ) {}
 
     public function index(Request $request)
     {
@@ -159,6 +161,55 @@ class CotizacionControlador extends ControladorBase
         ]);
 
         $reservation = $quote->flightRequest?->reservation;
+        $quote->loadMissing(['flightRequest.legs', 'aircraft.provider', 'aircraft.documents']);
+        $flightRequest = $quote->flightRequest;
+        $route = $this->flightRouteService->buildCanonicalRoute([
+            'origin' => $flightRequest?->origin,
+            'destination' => $flightRequest?->destination,
+            'departure_datetime' => optional($flightRequest?->departure_datetime)->toDateTimeString()
+                ?? ($data['departure_datetime'] ?? null),
+            'return_datetime' => optional($flightRequest?->return_datetime)->toDateTimeString()
+                ?? ($data['return_datetime'] ?? null),
+            'trip_type' => $flightRequest?->trip_type,
+            'requirements' => is_array($flightRequest?->requirements) ? $flightRequest->requirements : [],
+        ]);
+        try {
+            [$requestedStart, $requestedEnd] = $this->aircraftAvailabilityService->resolveWindowFromPayload([
+                ...$data,
+                'departure_datetime' => optional($flightRequest?->departure_datetime)->toDateTimeString()
+                    ?? ($data['departure_datetime'] ?? null),
+                'return_datetime' => optional($flightRequest?->return_datetime)->toDateTimeString()
+                    ?? ($data['return_datetime'] ?? null),
+                'departure_date' => $flightRequest?->departure_date ?? ($data['departure_date'] ?? null),
+                'departure_time' => $flightRequest?->departure_time ?? ($data['departure_time'] ?? null),
+                'return_date' => $flightRequest?->return_date ?? ($data['return_date'] ?? null),
+                'return_time' => $flightRequest?->return_time ?? ($data['return_time'] ?? null),
+                'legs' => $route['legs'],
+            ]);
+        } catch (RuntimeException) {
+            [$requestedStart, $requestedEnd] = $this->aircraftAvailabilityService->resolveFlightRequestWindow($flightRequest);
+        }
+        $eligibility = $this->aircraftEligibilityService->evaluate($quote->aircraft, [
+            'route' => $route,
+            'passengers' => (int) ($flightRequest?->passengers ?? 0),
+            'trip_type' => $route['trip_type'],
+            'preference' => $flightRequest?->aircraft_type,
+            'requested_start' => $requestedStart,
+            'requested_end' => $requestedEnd,
+            'flight_request_id' => $flightRequest?->id,
+            'reservation_id' => $reservation?->id,
+            'quote_id' => $quote->id,
+        ]);
+
+        if (! $eligibility['eligible']) {
+            return response()->json([
+                'success' => false,
+                'message' => $eligibility['reasons'][0] ?? 'La aeronave ya no es elegible para esta cotización.',
+                'reason_code' => $eligibility['reason_code'],
+                'reason_codes' => $eligibility['reason_codes'],
+                'eligibility_rule_version' => $eligibility['rule_version'],
+            ], 409);
+        }
 
         try {
             $hold = $this->aircraftAvailabilityService->holdAircraftForQuote(

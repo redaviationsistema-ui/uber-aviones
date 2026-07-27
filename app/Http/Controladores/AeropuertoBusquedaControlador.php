@@ -33,6 +33,7 @@ class AeropuertoBusquedaControlador extends ControladorBase
     {
         $query = Aeropuerto::query()
             ->select([
+                'id',
                 'icao',
                 'iata',
                 'name',
@@ -155,6 +156,7 @@ class AeropuertoBusquedaControlador extends ControladorBase
     private function mapAirport(array $airport): array
     {
         return [
+            'id' => $airport['id'] ?? null,
             'code' => $airport['icao'],
             'icao' => $airport['icao'],
             'iata' => $airport['iata'],

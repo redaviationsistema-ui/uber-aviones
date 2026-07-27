@@ -1,16 +1,16 @@
 <?php
 
-use App\Http\Controladores\AutenticacionControlador;
 use App\Http\Controladores\AeronaveControlador;
+use App\Http\Controladores\AutenticacionControlador;
 use App\Http\Controladores\BiometricControlador;
+use App\Http\Controladores\CotizacionControlador;
 use App\Http\Controladores\DemoControlador;
-use App\Http\Controladores\SolicitudVueloControlador;
+use App\Http\Controladores\MetodoPagoControlador;
 use App\Http\Controladores\NotificacionControlador;
 use App\Http\Controladores\PagoControlador;
-use App\Http\Controladores\MetodoPagoControlador;
-use App\Http\Controladores\CotizacionControlador;
 use App\Http\Controladores\RedAviation\FlightMembershipControlador;
 use App\Http\Controladores\ReservaControlador;
+use App\Http\Controladores\SolicitudVueloControlador;
 use App\Http\Controladores\StripePagoControlador;
 use App\Http\Controladores\SuscripcionControlador;
 use Illuminate\Support\Facades\Route;
@@ -44,6 +44,9 @@ Route::prefix('cliente')->middleware(['auth.token', 'role:client,admin'])->group
     Route::get('/reservas', [ReservaControlador::class, 'index']);
     Route::get('/reservas/{reservation}', [ReservaControlador::class, 'show']);
     Route::get('/reservas/{reservation}/payment-availability', [ReservaControlador::class, 'paymentAvailability']);
+    Route::get('/reservas/{reservation}/payment-authorization', [ReservaControlador::class, 'paymentAuthorization']);
+    Route::get('/reservas/{reservation}/autorizacion-pago', [ReservaControlador::class, 'paymentAuthorization']);
+    Route::get('/reservas/{reservation}/operacion', [ReservaControlador::class, 'operation']);
     Route::post('/reservas', [ReservaControlador::class, 'store'])->middleware('premium');
     Route::get('/reservas/{reservation}/contrato', [ReservaControlador::class, 'showContract']);
     Route::get('/reservas/{reservation}/contrato/pdf', [ReservaControlador::class, 'downloadContractPdf']);

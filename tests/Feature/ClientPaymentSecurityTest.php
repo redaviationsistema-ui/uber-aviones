@@ -6,7 +6,6 @@ use App\Modelos\Aeronave;
 use App\Modelos\ContratoReserva;
 use App\Modelos\Pago;
 use App\Modelos\Proveedor;
-use App\Modelos\RegistroAuditoria;
 use App\Modelos\Reserva;
 use App\Modelos\SolicitudVuelo;
 use App\Modelos\TokenApi;
@@ -88,6 +87,116 @@ class ClientPaymentSecurityTest extends TestCase
         ]);
     }
 
+    public function test_client_cannot_confirm_reservation_payment(): void
+    {
+        $this->seed();
+        $context = $this->createReservationPaymentContext();
+
+        $this->withHeader('Authorization', 'Bearer '.$context['token'])
+            ->postJson('/api/v1/cliente/reservas/'.$context['reservation']->id.'/pago/confirmar', [
+                'payment_status' => 'paid',
+            ])
+            ->assertStatus(422)
+            ->assertJsonPath('code', 'CLIENT_PAYMENT_CONFIRMATION_FORBIDDEN');
+
+        $this->assertDatabaseMissing('payments', [
+            'reservation_id' => $context['reservation']->id,
+            'status' => 'paid',
+        ]);
+    }
+
+    public function test_client_cannot_declare_contract_signed(): void
+    {
+        $this->seed();
+        $context = $this->createReservationPaymentContext();
+        $context['reservation']->contract()->update([
+            'status' => 'sent',
+            'docusign_status' => 'sent',
+            'completed_at' => null,
+        ]);
+
+        $this->withHeader('Authorization', 'Bearer '.$context['token'])
+            ->postJson('/api/v1/cliente/reservas/'.$context['reservation']->id.'/contrato/firmar', [
+                'contract_status' => 'signed',
+            ])
+            ->assertStatus(422)
+            ->assertJsonPath('code', 'CLIENT_CONTRACT_CONFIRMATION_FORBIDDEN');
+
+        $this->assertDatabaseHas('reservation_contracts', [
+            'reservation_id' => $context['reservation']->id,
+            'status' => 'sent',
+            'docusign_status' => 'sent',
+        ]);
+    }
+
+    public function test_other_client_cannot_read_payment_authorization(): void
+    {
+        $this->seed();
+        $context = $this->createReservationPaymentContext();
+        $other = Usuario::factory()->create(['role' => Usuario::ROLE_CLIENT, 'status' => 'active']);
+        $otherToken = TokenApi::issue($other, 'other-client');
+
+        $this->withHeader('Authorization', 'Bearer '.$otherToken)
+            ->getJson('/api/v1/cliente/reservas/'.$context['reservation']->id.'/payment-authorization')
+            ->assertForbidden();
+    }
+
+    public function test_pending_contract_blocks_payment_authorization(): void
+    {
+        $this->seed();
+        $context = $this->createReservationPaymentContext();
+        $context['reservation']->contract()->update([
+            'status' => 'sent',
+            'docusign_status' => 'sent',
+            'completed_at' => null,
+        ]);
+
+        $this->withHeader('Authorization', 'Bearer '.$context['token'])
+            ->getJson('/api/v1/cliente/reservas/'.$context['reservation']->id.'/payment-authorization')
+            ->assertConflict()
+            ->assertJsonPath('authorized', false)
+            ->assertJsonFragment(['CONTRACT_NOT_COMPLETED']);
+    }
+
+    public function test_contract_regeneration_is_idempotent_with_same_key(): void
+    {
+        $this->seed();
+        $context = $this->createReservationPaymentContext();
+        $context['reservation']->contract()->update([
+            'status' => 'sent',
+            'docusign_status' => 'sent',
+            'completed_at' => null,
+        ]);
+        $headers = [
+            'Authorization' => 'Bearer '.$context['token'],
+            'Idempotency-Key' => 'contract:'.$context['reservation']->id,
+        ];
+
+        $first = $this->withHeaders($headers)
+            ->postJson('/api/v1/cliente/reservas/'.$context['reservation']->id.'/contrato/generar');
+        $second = $this->withHeaders($headers)
+            ->postJson('/api/v1/cliente/reservas/'.$context['reservation']->id.'/contrato/generar');
+
+        $first->assertOk();
+        $second->assertOk()
+            ->assertJsonPath('contract.id', $first->json('contract.id'));
+        $this->assertSame(1, ContratoReserva::query()
+            ->where('reservation_id', $context['reservation']->id)
+            ->count());
+        $this->assertDatabaseCount('idempotency_keys', 1);
+    }
+
+    public function test_docusign_webhook_without_hmac_is_rejected(): void
+    {
+        config()->set('services.docusign.webhook_secret', 'test-secret');
+
+        $this->postJson('/api/v1/public/docusign/webhook', [
+            'data' => ['envelopeId' => 'env-forged', 'status' => 'completed'],
+        ])
+            ->assertUnauthorized()
+            ->assertJsonPath('code', 'INVALID_WEBHOOK_SIGNATURE');
+    }
+
     /**
      * @return array{user: Usuario, token: string, provider: Proveedor, aircraft: Aeronave, flightRequest: SolicitudVuelo, reservation: Reserva}
      */
@@ -155,9 +264,11 @@ class ClientPaymentSecurityTest extends TestCase
         ContratoReserva::query()->create([
             'reservation_id' => $reservation->id,
             'contract_code' => 'CTR-SECURE-001',
-            'status' => 'signed',
+            'status' => 'completed',
+            'docusign_status' => 'completed',
             'signed_pdf_path' => 'contracts/reservations/test.pdf',
             'signed_at' => now(),
+            'completed_at' => now(),
         ]);
 
         $token = TokenApi::issue($user, 'test-client-payment');

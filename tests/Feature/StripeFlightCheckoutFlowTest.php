@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Modelos\Aeronave;
 use App\Modelos\AircraftAvailabilityBlock;
+use App\Modelos\ContratoReserva;
 use App\Modelos\Cotizacion;
 use App\Modelos\Pago;
 use App\Modelos\Proveedor;
@@ -195,14 +196,7 @@ class StripeFlightCheckoutFlowTest extends TestCase
         ]);
 
         $sessionAlias = Mockery::mock('alias:Stripe\Checkout\Session');
-        $sessionAlias
-            ->shouldReceive('retrieve')
-            ->atLeast()
-            ->once()
-            ->andReturn($this->makeOpenCheckoutSession(
-                'cs_test_reservation_pending',
-                (string) $context['flightRequest']->id,
-            ));
+        $sessionAlias->shouldReceive('retrieve')->never();
 
         $response = $this
             ->withHeader('Authorization', 'Bearer '.$context['token'])
@@ -328,6 +322,15 @@ class StripeFlightCheckoutFlowTest extends TestCase
             'status' => 'pending_payment',
             'total_amount' => 15990,
             'currency' => 'USD',
+        ]);
+
+        ContratoReserva::query()->create([
+            'reservation_id' => $reservation->id,
+            'contract_code' => 'CTR-TEST-STRIPE',
+            'status' => 'completed',
+            'docusign_status' => 'completed',
+            'signed_at' => now(),
+            'completed_at' => now(),
         ]);
 
         $token = TokenApi::issue($user, 'test-token');

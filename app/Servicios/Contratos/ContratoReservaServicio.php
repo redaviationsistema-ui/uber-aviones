@@ -7,6 +7,7 @@ use App\Modelos\Pago;
 use App\Modelos\Reserva;
 use App\Modelos\Usuario;
 use Illuminate\Support\Str;
+use RuntimeException;
 
 class ContratoReservaServicio
 {
@@ -19,9 +20,12 @@ class ContratoReservaServicio
         ?string $docusignStatus = null,
     ): Pago {
         $normalizedDocusignStatus = strtolower(trim((string) ($docusignStatus ?? '')));
-        $contractStatus = $normalizedDocusignStatus === 'completed' ? 'completed' : 'signed';
+        if ($normalizedDocusignStatus !== 'completed') {
+            throw new RuntimeException('DocuSign debe confirmar el envelope en estado completed.');
+        }
+        $contractStatus = 'completed';
         $signedAt = now();
-        $completedAt = $normalizedDocusignStatus === 'completed' ? now() : $contract->completed_at;
+        $completedAt = now();
 
         $contract->update([
             'status' => $contractStatus,

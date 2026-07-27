@@ -3,8 +3,8 @@
 namespace Tests\Feature;
 
 use App\Http\Controladores\StripeWebhookControlador;
-use App\Modelos\AircraftAvailabilityBlock;
 use App\Modelos\Aeronave;
+use App\Modelos\AircraftAvailabilityBlock;
 use App\Modelos\Cotizacion;
 use App\Modelos\Pago;
 use App\Modelos\Proveedor;
@@ -12,7 +12,7 @@ use App\Modelos\Reserva;
 use App\Modelos\SolicitudVuelo;
 use App\Modelos\TokenApi;
 use App\Modelos\Usuario;
-use Carbon\Carbon;
+use App\Servicios\Aeronaves\AircraftAvailabilityService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use ReflectionMethod;
 use Tests\TestCase;
@@ -324,7 +324,7 @@ class AircraftHoldFlowTest extends TestCase
             'paid_at' => now(),
         ]);
 
-        app(\App\Servicios\Aeronaves\AircraftAvailabilityService::class)
+        app(AircraftAvailabilityService::class)
             ->blockAircraftForPaidReservation($reservation->fresh(['flightRequest.legs', 'legs']));
 
         $bookedBlock = AircraftAvailabilityBlock::query()
@@ -339,6 +339,7 @@ class AircraftHoldFlowTest extends TestCase
     public function test_booked_block_excludes_aircraft_but_non_overlapping_slots_allow_it(): void
     {
         $this->seed();
+        $window = $this->makeWindow();
 
         [$client, , $quote, $aircraft, $flightRequest] = $this->createAcceptedQuoteContext('XA-HOLD5');
         $reservation = Reserva::query()->create([
@@ -361,8 +362,8 @@ class AircraftHoldFlowTest extends TestCase
             'user_id' => $client->id,
             'reservation_id' => $reservation->id,
             'block_type' => 'confirmed_flight',
-            'start_datetime' => Carbon::parse('2026-08-20 10:00:00'),
-            'end_datetime' => Carbon::parse('2026-08-20 14:00:00'),
+            'start_datetime' => $window['departure'],
+            'end_datetime' => $window['return'],
             'status' => 'booked',
             'payment_status' => 'paid',
             'source' => 'test',
@@ -372,8 +373,14 @@ class AircraftHoldFlowTest extends TestCase
         $overlapResponse = $this->postJson('/api/v1/client/quotes/preview', $this->previewPayload());
         $this->assertNotContains($aircraft->id, collect($overlapResponse->json('matches'))->pluck('aircraft_id')->all());
 
-        $beforeResponse = $this->postJson('/api/v1/client/quotes/preview', $this->previewPayload('2026-08-20 06:00:00', '2026-08-20 08:30:00'));
-        $afterResponse = $this->postJson('/api/v1/client/quotes/preview', $this->previewPayload('2026-08-20 15:00:00', '2026-08-20 18:00:00'));
+        $beforeResponse = $this->postJson('/api/v1/client/quotes/preview', $this->previewPayload(
+            $window['departure']->copy()->subHours(4)->format('Y-m-d H:i:s'),
+            $window['departure']->copy()->subMinutes(30)->format('Y-m-d H:i:s'),
+        ));
+        $afterResponse = $this->postJson('/api/v1/client/quotes/preview', $this->previewPayload(
+            $window['return']->copy()->addHour()->format('Y-m-d H:i:s'),
+            $window['return']->copy()->addHours(4)->format('Y-m-d H:i:s'),
+        ));
 
         $this->assertContains($aircraft->id, collect($beforeResponse->json('matches'))->pluck('aircraft_id')->all());
         $this->assertContains($aircraft->id, collect($afterResponse->json('matches'))->pluck('aircraft_id')->all());
@@ -382,6 +389,7 @@ class AircraftHoldFlowTest extends TestCase
     public function test_partial_overlap_excludes_only_the_conflicting_aircraft_and_other_aircraft_remains_available(): void
     {
         $this->seed();
+        $window = $this->makeWindow();
 
         [$client, , $quote, $aircraftA, $flightRequest] = $this->createAcceptedQuoteContext('XA-HOLD6A');
         $provider = Proveedor::query()->findOrFail($quote->provider_id);
@@ -393,8 +401,8 @@ class AircraftHoldFlowTest extends TestCase
             'flight_request_id' => $flightRequest->id,
             'user_id' => $client->id,
             'block_type' => 'confirmed_flight',
-            'start_datetime' => Carbon::parse('2026-08-20 11:30:00'),
-            'end_datetime' => Carbon::parse('2026-08-20 16:00:00'),
+            'start_datetime' => $window['departure']->copy()->addMinutes(90),
+            'end_datetime' => $window['return']->copy()->addHours(2),
             'status' => 'booked',
             'payment_status' => 'paid',
             'source' => 'test',
@@ -471,6 +479,7 @@ class AircraftHoldFlowTest extends TestCase
     public function test_inactive_aircraft_never_appears_and_round_trip_window_is_filtered(): void
     {
         $this->seed();
+        $window = $this->makeWindow();
 
         $provider = $this->createProvider();
         $inactiveAircraft = $this->createAircraft($provider, 'XA-HOLD9A', ['status' => 'inactive']);
@@ -479,8 +488,8 @@ class AircraftHoldFlowTest extends TestCase
         AircraftAvailabilityBlock::query()->create([
             'aircraft_id' => $activeAircraft->id,
             'block_type' => 'confirmed_flight',
-            'start_datetime' => Carbon::parse('2026-08-20 09:00:00'),
-            'end_datetime' => Carbon::parse('2026-08-20 19:00:00'),
+            'start_datetime' => $window['departure']->copy()->subHour(),
+            'end_datetime' => $window['return']->copy()->addHours(5),
             'status' => 'booked',
             'payment_status' => 'paid',
             'source' => 'test',
@@ -490,7 +499,7 @@ class AircraftHoldFlowTest extends TestCase
         $response = $this->postJson('/api/v1/client/quotes/preview', [
             ...$this->previewPayload(),
             'trip_type' => 'round_trip',
-            'return_datetime' => '2026-08-20 18:00:00',
+            'return_datetime' => $window['return']->copy()->addHours(4)->format('Y-m-d H:i:s'),
             'round_trip' => true,
         ]);
 
@@ -900,6 +909,6 @@ class AircraftHoldFlowTest extends TestCase
         $method = new ReflectionMethod(StripeWebhookControlador::class, $methodName);
         $method->setAccessible(true);
 
-        return $method->invoke(new StripeWebhookControlador(), $payload);
+        return $method->invoke(new StripeWebhookControlador, $payload);
     }
 }

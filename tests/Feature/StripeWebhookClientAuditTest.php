@@ -182,6 +182,60 @@ class StripeWebhookClientAuditTest extends TestCase
         ]);
     }
 
+    public function test_payment_intent_mismatches_never_confirm_reservation(): void
+    {
+        [$flightRequest, $reservation, $payment] = $this->createPendingReservationContext(
+            paymentIntentId: 'pi_mismatch_001',
+            checkoutSessionId: 'cs_mismatch_001',
+        );
+        config()->set('services.stripe.webhook_secret', 'whsec_test');
+
+        $objects = [
+            (object) [
+                'id' => 'pi_mismatch_amount',
+                'amount' => 1,
+                'currency' => 'usd',
+                'metadata' => (object) ['flight_request_id' => (string) $flightRequest->id],
+            ],
+            (object) [
+                'id' => 'pi_mismatch_currency',
+                'amount' => 1599000,
+                'currency' => 'mxn',
+                'metadata' => (object) ['flight_request_id' => (string) $flightRequest->id],
+            ],
+            (object) [
+                'id' => 'pi_mismatch_client',
+                'amount' => 1599000,
+                'currency' => 'usd',
+                'metadata' => (object) [
+                    'flight_request_id' => (string) $flightRequest->id,
+                    'client_id' => (string) ($flightRequest->client_id + 999),
+                ],
+            ],
+        ];
+        $events = collect($objects)->values()->map(fn ($object, $index) => (object) [
+            'id' => 'evt_mismatch_'.$index,
+            'type' => 'payment_intent.succeeded',
+            'created' => now()->timestamp,
+            'data' => (object) ['object' => $object],
+        ])->all();
+
+        $webhookAlias = Mockery::mock('alias:Stripe\Webhook');
+        $webhookAlias->shouldReceive('constructEvent')->times(3)->andReturn(...$events);
+
+        foreach ($events as $event) {
+            $this->postJson('/api/v1/stripe/webhook', [], ['Stripe-Signature' => 't=1,v1=fake'])
+                ->assertOk();
+        }
+
+        $this->assertSame('pending', $payment->fresh()->status);
+        $this->assertSame('pending', $flightRequest->fresh()->payment_status);
+        $this->assertSame('pending_payment', $reservation->fresh()->status);
+        $this->assertSame(3, RegistroAuditoria::query()
+            ->where('action', 'stripe_webhook_commercial_mismatch')
+            ->count());
+    }
+
     /**
      * @return array{0: SolicitudVuelo, 1: Reserva, 2: Pago}
      */

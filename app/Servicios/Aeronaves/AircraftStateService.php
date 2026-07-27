@@ -75,8 +75,7 @@ class AircraftStateService
 
     public function __construct(
         private readonly ProviderAircraftSubscriptionService $providerAircraftSubscriptionService,
-    ) {
-    }
+    ) {}
 
     public function evaluate(Aeronave|int $aircraft, ?array $billingSnapshot = null): array
     {
@@ -152,6 +151,18 @@ class AircraftStateService
         return $this->evaluationCache[$cacheKey] = $result;
     }
 
+    public function evaluateDocuments(Aeronave|int $aircraft): array
+    {
+        $resolvedAircraft = $aircraft instanceof Aeronave
+            ? $aircraft->loadMissing('documents')
+            : Aeronave::query()->with('documents')->findOrFail($aircraft);
+
+        return $this->buildDocumentsState(
+            $resolvedAircraft,
+            $this->deduplicateAircraftDocuments($resolvedAircraft->documents ?? collect()),
+        );
+    }
+
     public function evaluateAndSyncAircraftState(Aeronave|int $aircraft, ?array $billingSnapshot = null): array
     {
         $aircraftId = $aircraft instanceof Aeronave ? (int) $aircraft->id : (int) $aircraft;
@@ -171,6 +182,7 @@ class AircraftStateService
             $aircraft->load(['provider', 'documents', 'baseAirport']);
 
             $this->forgetEvaluationCacheForAircraft($aircraftId);
+
             return $this->evaluate($aircraft, $billingSnapshot);
         });
     }

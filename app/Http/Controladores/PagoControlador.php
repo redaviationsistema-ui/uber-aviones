@@ -9,14 +9,12 @@ use App\Modelos\Operacion;
 use App\Modelos\Pago;
 use App\Modelos\Reserva;
 use App\Servicios\Aeronaves\AircraftAvailabilityService;
-use JsonException;
 use Illuminate\Http\Request;
+use JsonException;
 
 class PagoControlador extends ControladorBase
 {
-    public function __construct(private readonly AircraftAvailabilityService $aircraftAvailabilityService)
-    {
-    }
+    public function __construct(private readonly AircraftAvailabilityService $aircraftAvailabilityService) {}
 
     public function index(Request $request)
     {
@@ -158,18 +156,9 @@ class PagoControlador extends ControladorBase
             return false;
         }
 
-        $contractStatus = strtolower(trim((string) ($contract->status ?? '')));
         $docusignStatus = strtolower(trim((string) ($contract->docusign_status ?? '')));
 
-        if (in_array($contractStatus, ['signed', 'completed', 'approved'], true)) {
-            return true;
-        }
-
-        if (in_array($docusignStatus, ['completed', 'signed', 'approved'], true)) {
-            return true;
-        }
-
-        return filled($contract->signed_pdf_path) || filled($contract->document_url);
+        return $docusignStatus === 'completed' && $contract->completed_at !== null;
     }
 
     private function notifyAssignedCrew(Reserva $reservation): void

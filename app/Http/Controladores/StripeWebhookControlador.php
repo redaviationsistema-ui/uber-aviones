@@ -27,20 +27,24 @@ use Throwable;
 class StripeWebhookControlador extends ControladorBase
 {
     private readonly AircraftAvailabilityService $aircraftAvailabilityService;
+
     private readonly FlightMembershipService $flightMembershipService;
+
     private readonly ProviderAircraftSubscriptionService $providerAircraftSubscriptionService;
 
     private ?string $currentWebhookEventId = null;
+
     private ?string $currentWebhookEventType = null;
+
     private ?string $currentWebhookIpAddress = null;
+
     private ?string $currentWebhookUserAgent = null;
 
     public function __construct(
         ?AircraftAvailabilityService $aircraftAvailabilityService = null,
         ?FlightMembershipService $flightMembershipService = null,
         ?ProviderAircraftSubscriptionService $providerAircraftSubscriptionService = null,
-    )
-    {
+    ) {
         $this->aircraftAvailabilityService = $aircraftAvailabilityService ?? app(AircraftAvailabilityService::class);
         $this->flightMembershipService = $flightMembershipService ?? app(FlightMembershipService::class);
         $this->providerAircraftSubscriptionService = $providerAircraftSubscriptionService ?? app(ProviderAircraftSubscriptionService::class);
@@ -80,6 +84,7 @@ class StripeWebhookControlador extends ControladorBase
                 $request->ip(),
                 $request->userAgent(),
             );
+
             return response()->json([
                 'success' => false,
                 'message' => 'Webhook invalido',
@@ -189,26 +194,31 @@ class StripeWebhookControlador extends ControladorBase
 
         if ($this->flightMembershipService->isFlightMembershipContext($metadata, (string) ($session->subscription ?? ''), (string) ($session->id ?? ''))) {
             $this->handleFlightMembershipCheckoutCompleted($session, $metadata);
+
             return;
         }
 
         if ($context === 'client_access_subscription') {
             $this->handleClientAccessSubscriptionCheckoutCompleted($session, $metadata);
+
             return;
         }
 
         if ($context === 'client_access') {
             $this->handleClientAccessCheckoutCompleted($session, $metadata);
+
             return;
         }
 
         if ($context === 'provider_aircraft_subscription') {
             $this->handleAircraftBillingCheckoutCompleted($session, $metadata);
+
             return;
         }
 
         if ($context === 'client_subscription') {
             $this->handleClientSubscriptionCheckoutCompleted($session, $metadata);
+
             return;
         }
 
@@ -233,6 +243,7 @@ class StripeWebhookControlador extends ControladorBase
                     'result' => 'ignored',
                 ],
             );
+
             return;
         }
 
@@ -254,11 +265,49 @@ class StripeWebhookControlador extends ControladorBase
                     'result' => 'ignored',
                 ],
             );
+
             return;
         }
 
-        DB::transaction(function () use ($flightRequest, $session) {
-            $reservation = $flightRequest->reservation()->latest('id')->first();
+        $reservation = $flightRequest->reservation()->latest('id')->first();
+        $expectedAmount = (int) round(((float) data_get(
+            $reservation?->commercial_snapshot,
+            'total_amount',
+            $reservation?->total_amount ?? 0,
+        )) * 100);
+        $expectedCurrency = strtolower((string) (
+            data_get($reservation?->commercial_snapshot, 'currency')
+            ?? $reservation?->currency
+            ?? $flightRequest->currency
+            ?? 'USD'
+        ));
+        $receivedClientId = (int) ($session->metadata->client_id ?? 0);
+        $mismatch = ! $reservation
+            || $expectedAmount <= 0
+            || (int) ($session->amount_total ?? 0) !== $expectedAmount
+            || strtolower((string) ($session->currency ?? '')) !== $expectedCurrency
+            || ($receivedClientId > 0 && $receivedClientId !== (int) $flightRequest->client_id);
+
+        if ($mismatch) {
+            $this->auditWebhookAction(
+                (int) $flightRequest->client_id,
+                'stripe_webhook_commercial_mismatch',
+                'Stripe envio un pago que no coincide con el snapshot comercial.',
+                [
+                    'flight_request_id' => $flightRequest->id,
+                    'reservation_id' => $reservation?->id,
+                    'expected_amount' => $expectedAmount,
+                    'received_amount' => (int) ($session->amount_total ?? 0),
+                    'expected_currency' => $expectedCurrency,
+                    'received_currency' => strtolower((string) ($session->currency ?? '')),
+                    'result' => 'rejected',
+                ],
+            );
+
+            return;
+        }
+
+        DB::transaction(function () use ($flightRequest, $reservation, $session) {
 
             $flightRequest->update([
                 'payment_method' => 'stripe_checkout',
@@ -367,6 +416,7 @@ class StripeWebhookControlador extends ControladorBase
                 ->where('id', (int) ($metadata['access_payment_id'] ?? 0))
                 ->orWhere('provider_checkout_id', (string) ($session->id ?? ''))
                 ->update(['status' => 'cancelled']);
+
             return;
         }
 
@@ -375,6 +425,7 @@ class StripeWebhookControlador extends ControladorBase
                 ->where('id', (int) ($metadata['aircraft_billing_payment_id'] ?? 0))
                 ->orWhere('provider_checkout_id', (string) ($session->id ?? ''))
                 ->update(['status' => 'cancelled']);
+
             return;
         }
 
@@ -387,6 +438,7 @@ class StripeWebhookControlador extends ControladorBase
                     'payment_status' => 'cancelled',
                     'cancelled_at' => now(),
                 ]);
+
             return;
         }
 
@@ -411,6 +463,7 @@ class StripeWebhookControlador extends ControladorBase
                 providerPaymentId: (string) ($paymentIntent->id ?? ''),
                 gatewayPayload: json_decode(json_encode($paymentIntent), true),
             );
+
             return;
         }
 
@@ -434,6 +487,7 @@ class StripeWebhookControlador extends ControladorBase
                     'result' => 'ignored',
                 ],
             );
+
             return;
         }
 
@@ -453,11 +507,49 @@ class StripeWebhookControlador extends ControladorBase
                     'result' => 'ignored',
                 ],
             );
+
             return;
         }
 
-        DB::transaction(function () use ($flightRequest, $paymentIntent) {
-            $reservation = $flightRequest->reservation()->latest('id')->first();
+        $reservation = $flightRequest->reservation()->latest('id')->first();
+        $expectedAmount = (int) round(((float) data_get(
+            $reservation?->commercial_snapshot,
+            'total_amount',
+            $reservation?->total_amount ?? 0,
+        )) * 100);
+        $expectedCurrency = strtolower((string) (
+            data_get($reservation?->commercial_snapshot, 'currency')
+            ?? $reservation?->currency
+            ?? $flightRequest->currency
+            ?? 'USD'
+        ));
+        $receivedClientId = (int) ($paymentIntent->metadata->client_id ?? 0);
+        if (
+            ! $reservation
+            || $expectedAmount <= 0
+            || (int) ($paymentIntent->amount ?? 0) !== $expectedAmount
+            || strtolower((string) ($paymentIntent->currency ?? '')) !== $expectedCurrency
+            || ($receivedClientId > 0 && $receivedClientId !== (int) $flightRequest->client_id)
+        ) {
+            $this->auditWebhookAction(
+                (int) $flightRequest->client_id,
+                'stripe_webhook_commercial_mismatch',
+                'Stripe envio un payment intent que no coincide con el snapshot comercial.',
+                [
+                    'flight_request_id' => $flightRequest->id,
+                    'reservation_id' => $reservation?->id,
+                    'expected_amount' => $expectedAmount,
+                    'received_amount' => (int) ($paymentIntent->amount ?? 0),
+                    'expected_currency' => $expectedCurrency,
+                    'received_currency' => strtolower((string) ($paymentIntent->currency ?? '')),
+                    'result' => 'rejected',
+                ],
+            );
+
+            return;
+        }
+
+        DB::transaction(function () use ($flightRequest, $reservation, $paymentIntent) {
             $checkoutSessionId = $this->resolveCheckoutSessionIdFromGatewayPayload(
                 $paymentIntent,
                 $flightRequest,
@@ -546,6 +638,7 @@ class StripeWebhookControlador extends ControladorBase
 
         if ($context === 'client_access') {
             $this->markAccessPaymentFailed((int) ($metadata['access_payment_id'] ?? 0), (string) $message);
+
             return;
         }
 
@@ -596,6 +689,7 @@ class StripeWebhookControlador extends ControladorBase
         $metadata = $this->extractMetadata($paymentIntent);
         if (($metadata['billing_context'] ?? null) === 'client_access') {
             $this->markAccessPaymentFailed((int) ($metadata['access_payment_id'] ?? 0), 'PaymentIntent cancelado.');
+
             return;
         }
 
@@ -657,11 +751,13 @@ class StripeWebhookControlador extends ControladorBase
         $metadata = $this->extractMetadata($invoice);
         if ($this->flightMembershipService->isFlightMembershipContext($metadata, (string) ($invoice->subscription ?? ''), '')) {
             $this->handleFlightMembershipInvoicePaid($invoice, $metadata);
+
             return;
         }
 
         if ($this->isClientAccessSubscriptionBillingContext($metadata)) {
             $this->handleClientAccessSubscriptionInvoicePaid($invoice, $metadata);
+
             return;
         }
 
@@ -683,6 +779,7 @@ class StripeWebhookControlador extends ControladorBase
                 periodStart: $periodStart,
                 periodEnd: $periodEnd,
             );
+
             return;
         }
 
@@ -752,11 +849,13 @@ class StripeWebhookControlador extends ControladorBase
         $metadata = $this->extractMetadata($invoice);
         if ($this->flightMembershipService->isFlightMembershipContext($metadata, (string) ($invoice->subscription ?? ''), '')) {
             $this->handleFlightMembershipInvoiceFailed($invoice, $metadata);
+
             return;
         }
 
         if ($this->isClientAccessSubscriptionBillingContext($metadata)) {
             $this->handleClientAccessSubscriptionInvoiceFailed($invoice, $metadata);
+
             return;
         }
 
@@ -769,7 +868,8 @@ class StripeWebhookControlador extends ControladorBase
                 ->first()?->update([
                     'status' => 'past_due',
                     'payment_status' => 'failed',
-            ]);
+                ]);
+
             return;
         }
 
@@ -843,6 +943,7 @@ class StripeWebhookControlador extends ControladorBase
                     'stripe_payload' => json_decode(json_encode($session), true),
                 ],
             );
+
             return;
         }
 
@@ -1100,6 +1201,7 @@ class StripeWebhookControlador extends ControladorBase
 
         if ($this->flightMembershipService->isFlightMembershipContext($metadata, $providerSubscriptionId, '')) {
             $this->flightMembershipService->handleSubscriptionUpdated($subscriptionPayload, $metadata);
+
             return;
         }
 
@@ -1111,6 +1213,7 @@ class StripeWebhookControlador extends ControladorBase
 
         if ($this->isAircraftBillingContext($metadata, $aircraftPayment, $providerSubscriptionId)) {
             $this->handleAircraftBillingSubscriptionUpdated($subscriptionPayload, $metadata, $aircraftPayment);
+
             return;
         }
 
@@ -1243,6 +1346,7 @@ class StripeWebhookControlador extends ControladorBase
 
         if ($this->flightMembershipService->isFlightMembershipContext($metadata, $providerSubscriptionId, '')) {
             $this->flightMembershipService->handleSubscriptionDeleted($subscriptionPayload, $metadata);
+
             return;
         }
 
@@ -1254,6 +1358,7 @@ class StripeWebhookControlador extends ControladorBase
 
         if ($this->isAircraftBillingContext($metadata, $aircraftPayment, $providerSubscriptionId)) {
             $this->handleAircraftBillingSubscriptionDeleted($subscriptionPayload, $metadata, $aircraftPayment);
+
             return;
         }
 
@@ -1874,10 +1979,12 @@ class StripeWebhookControlador extends ControladorBase
             }
         }
 
-        $subscriptionId = trim((string) (
-            Arr::get(json_decode(json_encode($payload), true), 'subscription')
-            ?: Arr::get(json_decode(json_encode($payload), true), 'id')
-        ));
+        $payloadArray = json_decode(json_encode($payload), true);
+        $subscriptionId = trim((string) Arr::get($payloadArray, 'subscription', ''));
+        if ($subscriptionId === '') {
+            $payloadId = trim((string) Arr::get($payloadArray, 'id', ''));
+            $subscriptionId = str_starts_with($payloadId, 'sub_') ? $payloadId : '';
+        }
 
         if ($subscriptionId !== '' && config('services.stripe.secret')) {
             try {
@@ -1962,6 +2069,7 @@ class StripeWebhookControlador extends ControladorBase
                     'result' => 'ignored',
                 ],
             );
+
             return;
         }
 
@@ -1983,6 +2091,7 @@ class StripeWebhookControlador extends ControladorBase
                     'result' => 'ignored',
                 ],
             );
+
             return;
         }
 
@@ -2014,6 +2123,7 @@ class StripeWebhookControlador extends ControladorBase
                 ],
                 $oldValues,
             );
+
             return;
         }
 

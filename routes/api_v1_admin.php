@@ -1,7 +1,7 @@
 <?php
 
-use App\Http\Controladores\AdministradorControlador;
 use App\Http\Controladores\AdminAircraftChecklistController;
+use App\Http\Controladores\AdministradorControlador;
 use App\Http\Controladores\AeronaveControlador;
 use App\Http\Controladores\RedAviation\AdminControlador as RedAviationAdminControlador;
 use App\Http\Controladores\RedAviation\FlightMembershipAdminControlador;
@@ -81,7 +81,7 @@ Route::prefix('admin')->middleware(['auth.token', 'role:admin'])->group(function
     Route::post('/aeronaves/{aircraft}/desactivar', [AdministradorControlador::class, 'deactivateAeronave']);
 
     Route::get('/solicitudes', [AdministradorControlador::class, 'flightRequests']);
-    Route::get('/requests', [AdministradorControlador::class, 'flightRequests']);
+    Route::get('/requests', [RedAviationAdminControlador::class, 'requests']);
     Route::patch('/solicitudes/{flightRequest}', [AdministradorControlador::class, 'updateFlightRequest']);
     Route::put('/solicitudes/{flightRequest}', [AdministradorControlador::class, 'updateFlightRequest']);
     Route::post('/solicitudes/{flightRequest}', [AdministradorControlador::class, 'updateFlightRequest']);

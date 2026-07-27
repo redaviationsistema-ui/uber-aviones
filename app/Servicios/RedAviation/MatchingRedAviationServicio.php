@@ -4,26 +4,43 @@ namespace App\Servicios\RedAviation;
 
 use App\Modelos\Aeronave;
 use App\Modelos\SolicitudVuelo;
-use App\Servicios\Aeronaves\AircraftAvailabilityService;
+use App\Servicios\Aeronaves\AircraftEligibilityService;
+use App\Servicios\Vuelos\FlightRouteService;
 
 class MatchingRedAviationServicio
 {
-    public function __construct(private readonly AircraftAvailabilityService $aircraftAvailabilityService)
-    {
-    }
+    public function __construct(
+        private readonly AircraftEligibilityService $aircraftEligibilityService,
+        private readonly FlightRouteService $flightRouteService,
+    ) {}
 
     public function ejecutar(SolicitudVuelo $solicitud): void
     {
         $inicio = $solicitud->departure_datetime ?? now();
         $fin = ($solicitud->return_datetime ?? $inicio)->copy()->addHours(4);
+        $route = $this->flightRouteService->buildCanonicalRoute([
+            'origin' => $solicitud->origin,
+            'destination' => $solicitud->destination,
+            'departure_datetime' => optional($solicitud->departure_datetime)->toDateTimeString(),
+            'return_datetime' => optional($solicitud->return_datetime)->toDateTimeString(),
+            'trip_type' => $solicitud->trip_type,
+            'requirements' => is_array($solicitud->requirements) ? $solicitud->requirements : [],
+        ]);
 
-        $aeronaves = Aeronave::with('provider')
-            ->whereIn('status', ['active', 'trial_active'])
-            ->where('capacity', '>=', $solicitud->passengers)
-            ->whereHas('provider', fn ($query) => $query->approvedForOperations())
-            ->tap(fn ($query) => $this->aircraftAvailabilityService->applyAvailabilityConstraints($query, $inicio, $fin))
-            ->limit(10)
-            ->get();
+        $aeronaves = Aeronave::with(['provider', 'documents', 'availability', 'availabilityBlocks', 'baseAirport'])
+            ->where('hourly_rate', '>', 0)
+            ->get()
+            ->filter(fn (Aeronave $aircraft) => $this->aircraftEligibilityService->evaluate($aircraft, [
+                'route' => $route,
+                'passengers' => (int) $solicitud->passengers,
+                'trip_type' => $route['trip_type'],
+                'preference' => $solicitud->aircraft_type,
+                'requested_start' => $inicio,
+                'requested_end' => $fin,
+                'flight_request_id' => $solicitud->id,
+            ])['eligible'])
+            ->sortBy(fn (Aeronave $aircraft) => abs((int) $aircraft->capacity - (int) $solicitud->passengers))
+            ->take(10);
 
         foreach ($aeronaves as $aeronave) {
             $solicitud->matches()->updateOrCreate(

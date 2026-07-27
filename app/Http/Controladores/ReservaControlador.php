@@ -3,9 +3,10 @@
 namespace App\Http\Controladores;
 
 use App\Modelos\CalificacionServicio;
-use App\Modelos\ContratoReserva;
 use App\Modelos\Comision;
+use App\Modelos\ContratoReserva;
 use App\Modelos\Cotizacion;
+use App\Modelos\Operacion;
 use App\Modelos\Reserva;
 use App\Modelos\SolicitudVuelo;
 use App\Servicios\Aeronaves\AircraftAvailabilityService;
@@ -14,14 +15,17 @@ use App\Servicios\Contratos\ContratoPdfServicio;
 use App\Servicios\Contratos\ContratoReservaServicio;
 use App\Servicios\Contratos\DocuSignServicio;
 use App\Servicios\Operaciones\ReservationLifecycleService;
+use App\Servicios\Pagos\ReservationPaymentAuthorizationService;
+use App\Servicios\Reservas\CommercialSnapshotService;
+use App\Servicios\Reservas\IdempotencyService;
 use Barryvdh\DomPDF\Facade\Pdf;
-use JsonException;
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use JsonException;
 use RuntimeException;
 use Throwable;
 
@@ -31,9 +35,10 @@ class ReservaControlador extends ControladorBase
         private readonly AircraftAvailabilityService $aircraftAvailabilityService,
         private readonly FlightMembershipService $flightMembershipService,
         private readonly ReservationLifecycleService $reservationLifecycleService,
-    )
-    {
-    }
+        private readonly ReservationPaymentAuthorizationService $paymentAuthorizationService,
+        private readonly CommercialSnapshotService $commercialSnapshotService,
+        private readonly IdempotencyService $idempotencyService,
+    ) {}
 
     public function index(Request $request)
     {
@@ -116,7 +121,56 @@ class ReservaControlador extends ControladorBase
         ]);
     }
 
+    public function paymentAuthorization(Request $request, mixed $reservation)
+    {
+        $reservation = $this->resolveReservation($reservation);
+        $this->authorizeReservationClient($request, $reservation);
+
+        $authorization = $this->paymentAuthorizationService->evaluate($reservation, true);
+
+        return $this->ok([
+            ...$authorization,
+            'reservation_id' => $reservation->id,
+            'request_id' => $reservation->flight_request_id,
+            'aircraft_id' => $reservation->aircraft_id,
+        ], $authorization['authorized'] ? 200 : 409);
+    }
+
+    public function operation(Request $request, mixed $reservation)
+    {
+        $reservation = $this->resolveReservation($reservation);
+        $this->authorizeReservationClient($request, $reservation);
+        $operation = Operacion::query()
+            ->with(['aeronave', 'sobrecargo', 'timeline'])
+            ->where('flight_request_id', $reservation->flight_request_id)
+            ->latest('id')
+            ->first();
+
+        return $this->ok([
+            'reservation_id' => $reservation->id,
+            'operation' => $operation,
+            'data_available' => $operation !== null,
+            'message' => $operation
+                ? 'Información operativa actualizada.'
+                : 'La información operativa aún no está disponible.',
+        ]);
+    }
+
     public function store(Request $request)
+    {
+        $payload = $request->only(['quote_id', 'flight_request_id']);
+        $fallback = 'reservation:'.($payload['flight_request_id'] ?? $payload['quote_id'] ?? 'missing');
+
+        return $this->idempotencyService->replayOrRun(
+            $request,
+            'reservation.create',
+            $fallback,
+            $payload,
+            fn () => $this->performStore($request),
+        );
+    }
+
+    private function performStore(Request $request)
     {
         $data = $request->validate([
             'quote_id' => ['nullable', 'exists:quotes,id'],
@@ -130,7 +184,8 @@ class ReservaControlador extends ControladorBase
         );
 
         if ($data['quote_id'] ?? null) {
-            $quote = Cotizacion::with('flightRequest')->findOrFail($data['quote_id']);
+            $quote = Cotizacion::with('flightRequest')->lockForUpdate()->findOrFail($data['quote_id']);
+            $flightRequest = $quote->flightRequest;
 
             abort_if($quote->flightRequest->client_id !== $request->user()->id, 403, 'No puedes reservar esta cotizacion.');
             abort_if($quote->status !== 'accepted', 409, 'Primero debes aceptar la cotizacion.');
@@ -152,6 +207,7 @@ class ReservaControlador extends ControladorBase
             $quote->flightRequest->update(['status' => 'reserved']);
         } else {
             $flightRequest = SolicitudVuelo::with(['matches', 'quotes'])
+                ->lockForUpdate()
                 ->findOrFail($data['flight_request_id']);
 
             abort_if($flightRequest->client_id !== $request->user()->id, 403, 'No puedes reservar esta solicitud.');
@@ -209,6 +265,7 @@ class ReservaControlador extends ControladorBase
             ]);
         }
 
+        $reservation = $this->commercialSnapshotService->persistIfMissing($reservation);
         $commissionBaseAmount = (float) (data_get($flightRequest->pricing_context, 'flight_cost') ?? $reservation->total_amount);
 
         Comision::firstOrCreate(
@@ -358,13 +415,21 @@ class ReservaControlador extends ControladorBase
         $reservation = $this->resolveReservation($reservation);
         $this->authorizeReservationClient($request, $reservation);
 
-        $contract = $this->buildReservationContract($reservation, true);
-        $this->writeAudit($request, 'generate', 'reservation_contracts', 'Contrato de reserva generado.');
+        return $this->idempotencyService->replayOrRun(
+            $request,
+            'contract.regenerate',
+            'contract:'.$reservation->id,
+            ['reservation_id' => $reservation->id, 'regenerate' => true],
+            function () use ($request, $reservation) {
+                $contract = $this->buildReservationContract($reservation, true);
+                $this->writeAudit($request, 'generate', 'reservation_contracts', 'Contrato de reserva regenerado desde snapshot comercial.');
 
-        return $this->ok([
-            'contract' => $contract->fresh(),
-            'reservation' => $reservation->fresh(),
-        ]);
+                return $this->ok([
+                    'contract' => $contract->fresh(),
+                    'reservation' => $reservation->fresh(),
+                ]);
+            },
+        );
     }
 
     public function showContractStatusById(
@@ -373,8 +438,7 @@ class ReservaControlador extends ControladorBase
         DocuSignServicio $docuSignServicio,
         ContratoPdfServicio $contratoPdfServicio,
         ContratoReservaServicio $contratoReservaServicio,
-    )
-    {
+    ) {
         $contract->loadMissing(['reservation.client', 'reservation.aircraft', 'reservation.provider', 'reservation.payments']);
         abort_if(! $contract->reservation, 404, 'Contrato sin reserva asociada.');
         $this->authorizeReservationClient($request, $contract->reservation);
@@ -564,14 +628,14 @@ class ReservaControlador extends ControladorBase
         }
 
         $data = $request->validate([
-            'contract_snapshot' => ['nullable', 'array'],
-            'contract_html' => ['nullable', 'string'],
-            'contract_markup' => ['nullable', 'string'],
-            'document_html' => ['nullable', 'string'],
-            'full_contract_html' => ['nullable', 'string'],
-            'contract_plain_text' => ['nullable', 'string'],
-            'full_contract_text' => ['nullable', 'string'],
-            'source_contract_path' => ['nullable', 'string', 'max:500'],
+            'contract_snapshot' => ['prohibited'],
+            'contract_html' => ['prohibited'],
+            'contract_markup' => ['prohibited'],
+            'document_html' => ['prohibited'],
+            'full_contract_html' => ['prohibited'],
+            'contract_plain_text' => ['prohibited'],
+            'full_contract_text' => ['prohibited'],
+            'source_contract_path' => ['prohibited'],
             'document_source' => ['nullable', 'string', 'max:120'],
             'return_url' => ['nullable', 'string', 'max:1000'],
             'callback_url' => ['nullable', 'string', 'max:1000'],
@@ -583,11 +647,7 @@ class ReservaControlador extends ControladorBase
         $contract = $this->buildReservationContract($reservation, $shouldRegenerate);
         $termsSnapshot = is_array($contract->terms_snapshot) ? $contract->terms_snapshot : [];
 
-        if (is_array($data['contract_snapshot'] ?? null) && ! empty($data['contract_snapshot'])) {
-            $termsSnapshot['client_contract_snapshot'] = $data['contract_snapshot'];
-        }
-
-        $fullContractHtml = $this->resolvePreferredContractHtml($data, $termsSnapshot);
+        $fullContractHtml = '';
         $htmlContainsSignatureAnchor = $fullContractHtml !== ''
             ? Str::contains($fullContractHtml, '/sig_cliente/')
             : null;
@@ -832,61 +892,15 @@ class ReservaControlador extends ControladorBase
         mixed $reservation,
         ContratoReservaServicio $contratoReservaServicio,
         ContratoPdfServicio $contratoPdfServicio,
-    )
-    {
+    ) {
         $reservation = $this->resolveReservation($reservation);
         $this->authorizeReservationClient($request, $reservation);
 
-        $contract = $this->buildReservationContract($reservation);
-        $signaturePayload = $request->input('signature');
-        $contractSnapshotPayload = $request->input('contract_snapshot');
-        $termsSnapshot = is_array($contract->terms_snapshot) ? $contract->terms_snapshot : [];
-
-        if (is_array($contractSnapshotPayload) && ! empty($contractSnapshotPayload)) {
-            $termsSnapshot['client_contract_snapshot'] = $contractSnapshotPayload;
-        }
-
-        if (is_array($signaturePayload) && filled($signaturePayload['data_url'] ?? null)) {
-            $termsSnapshot['client_signature'] = [
-                'name' => $signaturePayload['name'] ?? 'firma.png',
-                'mime_type' => $signaturePayload['mime_type'] ?? 'image/png',
-                'size' => (int) ($signaturePayload['size'] ?? 0),
-                'data_url' => $signaturePayload['data_url'],
-            ];
-        }
-
-        $contract->terms_snapshot = $termsSnapshot;
-        $contract->signer_name ??= $request->user()->name;
-        $contract->signer_email ??= $request->user()->email;
-
-        $signedPdfPath = $contratoPdfServicio->guardarContratoFirmadoManual(
-            (string) $contract->contract_code,
-            (int) $reservation->id,
-            $this->buildContractPdfPayload($reservation, $contract)
-        );
-
-        $contract->update([
-            'signer_name' => $contract->signer_name,
-            'signer_email' => $contract->signer_email,
-            'contract_pdf_path' => $contract->contract_pdf_path ?: $signedPdfPath,
-            'document_url' => $signedPdfPath,
-        ]);
-
-        $paymentOrder = $contratoReservaServicio->registrarFirma(
-            $reservation,
-            $contract,
-            $request->user(),
-            $termsSnapshot,
-            $signedPdfPath
-        );
-
-        $this->writeAudit($request, 'sign', 'reservation_contracts', 'Contrato firmado por cliente.');
-
-        return $this->ok([
-            'contract' => $contract->fresh(),
-            'payment_order' => $paymentOrder->fresh(),
-            'reservation' => $reservation->fresh(['contract', 'payments']),
-        ]);
+        return response()->json([
+            'success' => false,
+            'code' => 'CLIENT_CONTRACT_CONFIRMATION_FORBIDDEN',
+            'message' => 'El estado firmado solo puede confirmarse con un envelope completed de DocuSign.',
+        ], 422);
     }
 
     public function cancel(Request $request, mixed $reservation)
@@ -1029,7 +1043,16 @@ class ReservaControlador extends ControladorBase
 
     private function buildReservationContract(Reserva $reservation, bool $regenerate = false): ContratoReserva
     {
+        $reservation = $this->commercialSnapshotService->persistIfMissing($reservation);
         $existing = $reservation->contract;
+
+        if (
+            $existing
+            && strtolower((string) $existing->docusign_status) === 'completed'
+            && $existing->completed_at
+        ) {
+            return $existing;
+        }
 
         if ($existing && ! $regenerate) {
             return $existing;
@@ -1042,11 +1065,8 @@ class ReservaControlador extends ControladorBase
             'signed_by_user_id' => null,
             'signed_at' => null,
             'terms_snapshot' => [
+                ...($reservation->commercial_snapshot ?? []),
                 'reservation_code' => $reservation->reservation_code,
-                'amount' => $reservation->total_amount,
-                'currency' => $reservation->currency,
-                'aircraft_id' => $reservation->aircraft_id,
-                'provider_id' => $reservation->provider_id,
                 'conditions' => [
                     'Pago requerido antes de confirmacion final.',
                     'Operacion sujeta a condiciones de seguridad y slot.',
@@ -1057,6 +1077,7 @@ class ReservaControlador extends ControladorBase
 
         if ($existing) {
             $existing->update($payload);
+
             return $existing;
         }
 

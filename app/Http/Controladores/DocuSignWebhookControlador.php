@@ -19,6 +19,24 @@ class DocuSignWebhookControlador extends ControladorBase
         ContratoPdfServicio $contratoPdfServicio,
         ContratoReservaServicio $contratoReservaServicio,
     ) {
+        $secret = trim((string) config('services.docusign.webhook_secret'));
+        $signature = trim((string) $request->header('X-DocuSign-Signature-1'));
+        $expectedSignature = $secret !== ''
+            ? base64_encode(hash_hmac('sha256', $request->getContent(), $secret, true))
+            : '';
+        if ($secret === '' || $signature === '' || ! hash_equals($expectedSignature, $signature)) {
+            Log::warning('Webhook DocuSign rechazado por firma HMAC inválida.', [
+                'secret_configured' => $secret !== '',
+                'signature_present' => $signature !== '',
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'code' => 'INVALID_WEBHOOK_SIGNATURE',
+                'message' => 'Webhook de DocuSign inválido.',
+            ], 401);
+        }
+
         $payload = $request->all();
         $contract = ContratoReserva::query()
             ->where('docusign_envelope_id', $this->extractEnvelopeId($payload))
@@ -38,6 +56,15 @@ class DocuSignWebhookControlador extends ControladorBase
 
         if ($docusignStatus !== 'completed') {
             return response()->json(['success' => true, 'received' => true]);
+        }
+
+        if ($contract->completed_at && $contract->docusign_status === 'completed') {
+            return response()->json([
+                'success' => true,
+                'received' => true,
+                'duplicate' => true,
+                'contract_id' => $contract->id,
+            ]);
         }
 
         try {
