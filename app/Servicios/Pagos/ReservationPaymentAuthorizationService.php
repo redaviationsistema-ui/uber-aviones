@@ -50,17 +50,30 @@ class ReservationPaymentAuthorizationService
         }
 
         $blockingReasons = array_values(array_unique($blockingReasons));
+        $authorized = $blockingReasons === [];
+        $canPay = $authorized;
+        $aircraftAvailable = (bool) data_get($availability, 'availability.available', false);
+        $holdValid = (bool) ($availability['hold_valid'] ?? false);
+        $reservationBooked = (bool) ($availability['reservation_booked'] ?? false);
+        $invalidReason = $availability['invalid_reason'] ?? null;
 
         return [
-            'authorized' => $blockingReasons === [],
-            'can_pay' => $blockingReasons === [],
+            'authorized' => $authorized,
+            'can_pay' => $canPay,
             'request_status' => $reservation->flightRequest?->status,
             'reservation_status' => $reservation->status,
             'contract_status' => $reservation->contract?->docusign_status ?? $reservation->contract?->status,
-            'aircraft_available' => (bool) ($availability['available'] ?? false),
+            'aircraft_available' => $aircraftAvailable,
+            'hold_valid' => $holdValid,
+            'reservation_booked' => $reservationBooked,
             'payment_status' => $paymentStatus,
             'blocking_reasons' => $blockingReasons,
-            'availability' => $availability,
+            'invalid_reason' => $invalidReason,
+            'availability' => [
+                ...($availability['availability'] ?? []),
+                'available' => $aircraftAvailable,
+            ],
+            'payment_availability' => $availability,
         ];
     }
 }

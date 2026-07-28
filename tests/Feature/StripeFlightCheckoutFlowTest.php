@@ -14,7 +14,9 @@ use App\Modelos\TokenApi;
 use App\Modelos\Usuario;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Mockery;
+use ReflectionProperty;
 use Stripe\Checkout\Session as StripeCheckoutSession;
+use Stripe\PaymentIntent as StripePaymentIntent;
 use Tests\TestCase;
 
 class StripeFlightCheckoutFlowTest extends TestCase
@@ -106,6 +108,17 @@ class StripeFlightCheckoutFlowTest extends TestCase
         ]);
 
         $sessionAlias = Mockery::mock('alias:Stripe\Checkout\Session');
+        $sessionAlias
+            ->shouldReceive('retrieve')
+            ->once()
+            ->with([
+                'id' => 'cs_test_reservation_reused',
+                'expand' => ['payment_intent'],
+            ])
+            ->andReturn($this->makeOpenCheckoutSession(
+                'cs_test_reservation_reused',
+                (string) $context['flightRequest']->id,
+            ));
         $sessionAlias->shouldReceive('create')->never();
 
         $response = $this
@@ -125,6 +138,70 @@ class StripeFlightCheckoutFlowTest extends TestCase
             );
 
         $this->assertSame(1, Pago::query()->where('flight_request_id', $context['flightRequest']->id)->count());
+    }
+
+    public function test_create_checkout_does_not_reuse_expired_session_and_creates_a_new_one(): void
+    {
+        $this->seed();
+        $this->configureStripe();
+
+        $context = $this->createFlightPaymentContext(
+            checkoutSessionId: 'cs_test_reservation_expired',
+        );
+
+        Pago::query()->create([
+            'user_id' => $context['user']->id,
+            'reservation_id' => $context['reservation']->id,
+            'flight_request_id' => $context['flightRequest']->id,
+            'payment_type' => 'reservation',
+            'amount' => 15990,
+            'currency' => 'USD',
+            'provider' => 'stripe',
+            'transaction_reference' => 'cs_test_reservation_expired',
+            'stripe_checkout_session_id' => 'cs_test_reservation_expired',
+            'status' => 'pending',
+            'gateway_response' => [
+                'checkout_url' => 'https://checkout.stripe.com/c/pay/cs_test_reservation_expired',
+            ],
+        ]);
+
+        $sessionAlias = Mockery::mock('alias:Stripe\Checkout\Session');
+        $sessionAlias
+            ->shouldReceive('retrieve')
+            ->once()
+            ->with([
+                'id' => 'cs_test_reservation_expired',
+                'expand' => ['payment_intent'],
+            ])
+            ->andReturn($this->makeExpiredCheckoutSession(
+                'cs_test_reservation_expired',
+                (string) $context['flightRequest']->id,
+            ));
+        $sessionAlias
+            ->shouldReceive('create')
+            ->once()
+            ->andReturn((object) [
+                'id' => 'cs_test_reservation_regenerated',
+                'url' => 'https://checkout.stripe.com/c/pay/cs_test_reservation_regenerated',
+            ]);
+
+        $response = $this
+            ->withHeader('Authorization', 'Bearer '.$context['token'])
+            ->postJson('/api/v1/cliente/stripe/checkout/create', [
+                'flight_request_id' => $context['flightRequest']->id,
+                'contact_email' => $context['user']->email,
+                'success_url' => 'https://example.com/success',
+                'cancel_url' => 'https://example.com/cancel',
+            ]);
+
+        $response
+            ->assertOk()
+            ->assertJsonPath('checkout_session_id', 'cs_test_reservation_regenerated')
+            ->assertJsonPath(
+                'checkout_url',
+                'https://checkout.stripe.com/c/pay/cs_test_reservation_regenerated',
+            );
+        $this->assertNotTrue((bool) $response->json('reused_checkout'));
     }
 
     public function test_create_checkout_allows_clients_to_pay_when_conflict_is_only_their_own_hold(): void
@@ -196,7 +273,17 @@ class StripeFlightCheckoutFlowTest extends TestCase
         ]);
 
         $sessionAlias = Mockery::mock('alias:Stripe\Checkout\Session');
-        $sessionAlias->shouldReceive('retrieve')->never();
+        $sessionAlias
+            ->shouldReceive('retrieve')
+            ->times(3)
+            ->with([
+                'id' => 'cs_test_reservation_pending',
+                'expand' => ['payment_intent'],
+            ])
+            ->andReturn($this->makeOpenCheckoutSession(
+                'cs_test_reservation_pending',
+                (string) $context['flightRequest']->id,
+            ));
 
         $response = $this
             ->withHeader('Authorization', 'Bearer '.$context['token'])
@@ -211,7 +298,139 @@ class StripeFlightCheckoutFlowTest extends TestCase
                 'checkout_url',
                 'https://checkout.stripe.com/c/pay/cs_test_reservation_pending',
             )
-            ->assertJsonPath('stripe_checkout_session_id', 'cs_test_reservation_pending');
+            ->assertJsonPath('stripe_checkout_session_id', 'cs_test_reservation_pending')
+            ->assertJsonPath('checkout_reusable', true)
+            ->assertJsonPath('requires_new_checkout', false)
+            ->assertJsonPath('stripe_checkout_status', 'open')
+            ->assertJsonPath('stripe_checkout_payment_status', 'unpaid');
+    }
+
+    public function test_success_marks_expired_checkout_as_non_reusable(): void
+    {
+        $this->seed();
+        $this->configureStripe();
+
+        $context = $this->createFlightPaymentContext(
+            checkoutSessionId: 'cs_test_reservation_expired_after_return',
+        );
+
+        Pago::query()->create([
+            'user_id' => $context['user']->id,
+            'reservation_id' => $context['reservation']->id,
+            'flight_request_id' => $context['flightRequest']->id,
+            'payment_type' => 'reservation',
+            'amount' => 15990,
+            'currency' => 'USD',
+            'provider' => 'stripe',
+            'transaction_reference' => 'cs_test_reservation_expired_after_return',
+            'stripe_checkout_session_id' => 'cs_test_reservation_expired_after_return',
+            'status' => 'pending',
+            'gateway_response' => [
+                'checkout_url' => 'https://checkout.stripe.com/c/pay/cs_test_reservation_expired_after_return',
+            ],
+        ]);
+
+        $sessionAlias = Mockery::mock('alias:Stripe\Checkout\Session');
+        $sessionAlias
+            ->shouldReceive('retrieve')
+            ->times(3)
+            ->with([
+                'id' => 'cs_test_reservation_expired_after_return',
+                'expand' => ['payment_intent'],
+            ])
+            ->andReturn($this->makeExpiredCheckoutSession(
+                'cs_test_reservation_expired_after_return',
+                (string) $context['flightRequest']->id,
+            ));
+
+        $response = $this
+            ->withHeader('Authorization', 'Bearer '.$context['token'])
+            ->getJson('/api/v1/cliente/stripe/checkout/success?session_id=cs_test_reservation_expired_after_return&reservation_id='.$context['reservation']->id.'&flight_request_id='.$context['flightRequest']->id);
+
+        $response
+            ->assertOk()
+            ->assertJsonPath('payment_status', 'pending')
+            ->assertJsonPath('checkout_url', null)
+            ->assertJsonPath('checkout_reusable', false)
+            ->assertJsonPath('requires_new_checkout', true)
+            ->assertJsonPath('stripe_checkout_status', 'expired')
+            ->assertJsonPath('stripe_checkout_payment_status', 'unpaid');
+    }
+
+    public function test_success_finalizes_paid_checkout_and_confirms_reservation(): void
+    {
+        $this->seed();
+        $this->configureStripe();
+
+        $context = $this->createFlightPaymentContext(
+            checkoutSessionId: 'cs_test_reservation_paid',
+        );
+
+        Pago::query()->create([
+            'user_id' => $context['user']->id,
+            'reservation_id' => $context['reservation']->id,
+            'flight_request_id' => $context['flightRequest']->id,
+            'payment_type' => 'reservation',
+            'amount' => 15990,
+            'currency' => 'USD',
+            'provider' => 'stripe',
+            'transaction_reference' => 'cs_test_reservation_paid',
+            'stripe_checkout_session_id' => 'cs_test_reservation_paid',
+            'stripe_payment_intent_id' => 'pi_test_reservation_paid',
+            'status' => 'pending',
+            'gateway_response' => [
+                'checkout_url' => 'https://checkout.stripe.com/c/pay/cs_test_reservation_paid',
+            ],
+        ]);
+
+        $succeededPaymentIntent = $this->makeSucceededPaymentIntent(
+            'pi_test_reservation_paid',
+            (string) $context['flightRequest']->id,
+        );
+
+        $sessionAlias = Mockery::mock('alias:Stripe\Checkout\Session');
+        $sessionAlias
+            ->shouldReceive('retrieve')
+            ->atLeast()->once()
+            ->with([
+                'id' => 'cs_test_reservation_paid',
+                'expand' => ['payment_intent'],
+            ])
+            ->andReturn($this->makePaidCheckoutSession(
+                'cs_test_reservation_paid',
+                (string) $context['flightRequest']->id,
+                $succeededPaymentIntent,
+            ));
+
+        $response = $this
+            ->withHeader('Authorization', 'Bearer '.$context['token'])
+            ->getJson('/api/v1/cliente/stripe/checkout/success?session_id=cs_test_reservation_paid&reservation_id='.$context['reservation']->id.'&flight_request_id='.$context['flightRequest']->id);
+
+        $response
+            ->assertOk()
+            ->assertJsonPath('payment_status', 'paid')
+            ->assertJsonPath('booking_status', 'confirmed')
+            ->assertJsonPath('status', 'confirmed')
+            ->assertJsonPath('reservation_id', $context['reservation']->id)
+            ->assertJsonPath('flight_request_id', $context['flightRequest']->id)
+            ->assertJsonPath('payment_order.status', 'paid');
+
+        $this->assertDatabaseHas('payments', [
+            'reservation_id' => $context['reservation']->id,
+            'flight_request_id' => $context['flightRequest']->id,
+            'provider' => 'stripe',
+            'status' => 'paid',
+            'stripe_checkout_session_id' => 'cs_test_reservation_paid',
+            'stripe_payment_intent_id' => 'pi_test_reservation_paid',
+        ]);
+        $this->assertDatabaseHas('reservations', [
+            'id' => $context['reservation']->id,
+            'status' => 'confirmed',
+        ]);
+        $this->assertDatabaseHas('flight_requests', [
+            'id' => $context['flightRequest']->id,
+            'payment_status' => 'paid',
+        ]);
     }
 
     private function configureStripe(): void
@@ -232,6 +451,60 @@ class StripeFlightCheckoutFlowTest extends TestCase
         ];
 
         return $session;
+    }
+
+    private function makePaidCheckoutSession(
+        string $sessionId,
+        string $flightRequestId,
+        StripePaymentIntent $paymentIntent,
+    ): StripeCheckoutSession {
+        $session = new StripeCheckoutSession($sessionId);
+        $session->payment_status = 'paid';
+        $session->status = 'complete';
+        $session->url = 'https://checkout.stripe.com/c/pay/'.$sessionId;
+        $session->payment_intent = $paymentIntent;
+        $session->metadata = (object) [
+            'flight_request_id' => $flightRequestId,
+        ];
+
+        return $session;
+    }
+
+    private function makeExpiredCheckoutSession(string $sessionId, string $flightRequestId): StripeCheckoutSession
+    {
+        $session = new StripeCheckoutSession($sessionId);
+        $session->payment_status = 'unpaid';
+        $session->status = 'expired';
+        $session->url = 'https://checkout.stripe.com/c/pay/'.$sessionId;
+        $session->payment_intent = null;
+        $session->metadata = (object) [
+            'flight_request_id' => $flightRequestId,
+        ];
+
+        return $session;
+    }
+
+    private function makeSucceededPaymentIntent(
+        string $paymentIntentId,
+        string $flightRequestId,
+    ): StripePaymentIntent {
+        $paymentIntent = new StripePaymentIntent($paymentIntentId);
+        $values = new ReflectionProperty(\Stripe\StripeObject::class, '_values');
+        $values->setAccessible(true);
+        $values->setValue($paymentIntent, [
+            'id' => $paymentIntentId,
+            'status' => 'succeeded',
+            'currency' => 'usd',
+            'amount' => 1599000,
+            'metadata' => (object) [
+                'flight_request_id' => $flightRequestId,
+            ],
+            'payment_method_details' => (object) [
+                'card' => (object) ['brand' => 'visa'],
+            ],
+        ]);
+
+        return $paymentIntent;
     }
 
     /**

@@ -297,20 +297,65 @@ class StripePagoControlador extends ControladorBase
             $existingSessionId = trim((string) ($reusablePayment->stripe_checkout_session_id ?: $reusablePayment->transaction_reference));
 
             if ($existingCheckoutUrl !== '' && $existingSessionId !== '') {
-                $this->auditStripeAction($request->user()->id, 'stripe_checkout_reused', 'Se reutilizo una sesion pendiente de Stripe Checkout para evitar duplicados.', [
-                    'flight_request_id' => $flightRequest->id,
-                    'reservation_id' => $reservation->id,
-                    'payment_id' => $reusablePayment->id,
-                    'checkout_session_id' => $existingSessionId,
-                ], $request);
+                $canReuseCheckout = true;
 
-                return $this->ok([
-                    'checkout_url' => $existingCheckoutUrl,
-                    'checkout_session_id' => $existingSessionId,
-                    'reservation_id' => $reservation->id,
-                    'payment_status' => (string) ($flightRequest->payment_status ?: $reusablePayment->status ?: 'pending'),
-                    'reused_checkout' => true,
-                ]);
+                try {
+                    $session = $this->retrieveCheckoutSession($existingSessionId);
+                    $paymentIntent = $this->resolvePaymentIntentFromCheckoutSession($session);
+                    $paymentStatus = strtolower((string) ($session->payment_status ?? ''));
+                    $sessionStatus = strtolower((string) ($session->status ?? ''));
+                    $paymentIntentStatus = strtolower((string) ($paymentIntent->status ?? ''));
+                    $checkoutIsPaid = in_array($paymentStatus, ['paid', 'no_payment_required'], true)
+                        || $sessionStatus === 'complete'
+                        || $paymentIntentStatus === 'succeeded';
+
+                    if ($checkoutIsPaid) {
+                        $this->reconcileStripeCheckoutSuccessBySession(
+                            sessionId: $existingSessionId,
+                            userId: (int) $request->user()->id,
+                            reservation: $reservation,
+                            flightRequest: $flightRequest,
+                            payment: $reusablePayment,
+                        );
+
+                        $reservation->refresh();
+                        $flightRequest->refresh();
+
+                        if ($flightRequest->payment_status === 'paid' || in_array((string) $reservation->status, ['paid', 'confirmed'], true)) {
+                            return $this->confirmedReservationPaymentResponse($flightRequest, $reservation);
+                        }
+
+                        $canReuseCheckout = false;
+                    } elseif (! ($sessionStatus === 'open' && in_array($paymentStatus, ['unpaid', 'no_payment_required'], true))) {
+                        $canReuseCheckout = false;
+                    }
+                } catch (Throwable $exception) {
+                    Log::warning('No fue posible reutilizar la sesion pendiente de Stripe Checkout; se generara una nueva.', [
+                        'flight_request_id' => $flightRequest->id,
+                        'reservation_id' => $reservation->id,
+                        'payment_id' => $reusablePayment->id,
+                        'checkout_session_id' => $existingSessionId,
+                        'message' => $exception->getMessage(),
+                    ]);
+                    $canReuseCheckout = false;
+                }
+
+                if ($canReuseCheckout) {
+                    $this->auditStripeAction($request->user()->id, 'stripe_checkout_reused', 'Se reutilizo una sesion pendiente de Stripe Checkout para evitar duplicados.', [
+                        'flight_request_id' => $flightRequest->id,
+                        'reservation_id' => $reservation->id,
+                        'payment_id' => $reusablePayment->id,
+                        'checkout_session_id' => $existingSessionId,
+                    ], $request);
+
+                    return $this->ok([
+                        'checkout_url' => $existingCheckoutUrl,
+                        'checkout_session_id' => $existingSessionId,
+                        'reservation_id' => $reservation->id,
+                        'payment_status' => (string) ($flightRequest->payment_status ?: $reusablePayment->status ?: 'pending'),
+                        'reused_checkout' => true,
+                    ]);
+                }
             }
         }
 
@@ -455,20 +500,65 @@ class StripePagoControlador extends ControladorBase
             $existingSessionId = trim((string) ($reusablePayment->stripe_checkout_session_id ?: $reusablePayment->transaction_reference));
 
             if ($existingCheckoutUrl !== '' && $existingSessionId !== '') {
-                $this->auditStripeAction($request->user()->id, 'stripe_checkout_reused', 'Se reutilizo una sesion pendiente de Stripe Checkout para evitar duplicados.', [
-                    'flight_request_id' => $flightRequest->id,
-                    'reservation_id' => $reservation->id,
-                    'payment_id' => $reusablePayment->id,
-                    'checkout_session_id' => $existingSessionId,
-                ], $request);
+                $canReuseCheckout = true;
 
-                return $this->ok([
-                    'checkout_url' => $existingCheckoutUrl,
-                    'checkout_session_id' => $existingSessionId,
-                    'reservation_id' => $reservation->id,
-                    'payment_status' => (string) ($flightRequest->payment_status ?: $reusablePayment->status ?: 'pending'),
-                    'reused_checkout' => true,
-                ]);
+                try {
+                    $session = $this->retrieveCheckoutSession($existingSessionId);
+                    $paymentIntent = $this->resolvePaymentIntentFromCheckoutSession($session);
+                    $paymentStatus = strtolower((string) ($session->payment_status ?? ''));
+                    $sessionStatus = strtolower((string) ($session->status ?? ''));
+                    $paymentIntentStatus = strtolower((string) ($paymentIntent->status ?? ''));
+                    $checkoutIsPaid = in_array($paymentStatus, ['paid', 'no_payment_required'], true)
+                        || $sessionStatus === 'complete'
+                        || $paymentIntentStatus === 'succeeded';
+
+                    if ($checkoutIsPaid) {
+                        $this->reconcileStripeCheckoutSuccessBySession(
+                            sessionId: $existingSessionId,
+                            userId: (int) $request->user()->id,
+                            reservation: $reservation,
+                            flightRequest: $flightRequest,
+                            payment: $reusablePayment,
+                        );
+
+                        $reservation->refresh();
+                        $flightRequest->refresh();
+
+                        if ($flightRequest->payment_status === 'paid' || in_array((string) $reservation->status, ['paid', 'confirmed'], true)) {
+                            return $this->confirmedReservationPaymentResponse($flightRequest, $reservation);
+                        }
+
+                        $canReuseCheckout = false;
+                    } elseif (! ($sessionStatus === 'open' && in_array($paymentStatus, ['unpaid', 'no_payment_required'], true))) {
+                        $canReuseCheckout = false;
+                    }
+                } catch (Throwable $exception) {
+                    Log::warning('No fue posible reutilizar la sesion pendiente de Stripe Checkout para PaymentIntent; se generara un intento nuevo.', [
+                        'flight_request_id' => $flightRequest->id,
+                        'reservation_id' => $reservation->id,
+                        'payment_id' => $reusablePayment->id,
+                        'checkout_session_id' => $existingSessionId,
+                        'message' => $exception->getMessage(),
+                    ]);
+                    $canReuseCheckout = false;
+                }
+
+                if ($canReuseCheckout) {
+                    $this->auditStripeAction($request->user()->id, 'stripe_checkout_reused', 'Se reutilizo una sesion pendiente de Stripe Checkout para evitar duplicados.', [
+                        'flight_request_id' => $flightRequest->id,
+                        'reservation_id' => $reservation->id,
+                        'payment_id' => $reusablePayment->id,
+                        'checkout_session_id' => $existingSessionId,
+                    ], $request);
+
+                    return $this->ok([
+                        'checkout_url' => $existingCheckoutUrl,
+                        'checkout_session_id' => $existingSessionId,
+                        'reservation_id' => $reservation->id,
+                        'payment_status' => (string) ($flightRequest->payment_status ?: $reusablePayment->status ?: 'pending'),
+                        'reused_checkout' => true,
+                    ]);
+                }
             }
         }
 
@@ -621,40 +711,6 @@ class StripePagoControlador extends ControladorBase
 
     public function success(Request $request): JsonResponse
     {
-        $sessionId = trim((string) $request->query(
-            'session_id',
-            $request->query('checkout_session_id', $request->query('stripe_checkout_session_id', '')),
-        ));
-        $reservationId = (int) $request->query('reservation_id', $request->query('booking_id', 0));
-        $flightRequestId = (int) $request->query('flight_request_id', 0);
-        $payment = Pago::query()
-            ->with(['reservation.contract', 'reservation.flightRequest', 'flightRequest'])
-            ->where('user_id', $request->user()->id)
-            ->where('payment_type', 'reservation')
-            ->when($sessionId !== '', fn ($query) => $query->where(function ($nested) use ($sessionId) {
-                $nested->where('stripe_checkout_session_id', $sessionId)
-                    ->orWhere('transaction_reference', $sessionId);
-            }))
-            ->when($reservationId > 0, fn ($query) => $query->where('reservation_id', $reservationId))
-            ->when($flightRequestId > 0, fn ($query) => $query->where('flight_request_id', $flightRequestId))
-            ->latest('id')
-            ->first();
-        abort_if(! $payment, 404, 'No encontramos el pago de reserva solicitado.');
-
-        return $this->ok([
-            'payment_order' => $payment,
-            'reservation' => $payment->reservation,
-            'reservation_id' => $payment->reservation_id,
-            'flight_request' => $payment->flightRequest ?? $payment->reservation?->flightRequest,
-            'flight_request_id' => $payment->flight_request_id,
-            'payment_status' => $payment->status,
-            'booking_status' => $payment->reservation?->status,
-            'checkout_url' => data_get($payment->gateway_response, 'checkout_url'),
-            'stripe_checkout_session_id' => $payment->stripe_checkout_session_id,
-            'stripe_payment_intent_id' => $payment->stripe_payment_intent_id,
-            'webhook_confirmation_required' => $payment->status !== 'paid',
-        ]);
-
         if ($response = $this->ensureStripeIsConfigured()) {
             return $response;
         }
@@ -820,10 +876,36 @@ class StripePagoControlador extends ControladorBase
                 ?? data_get($latestPayment?->gateway_response, 'checkout_session.url')
                 ?? ''
             );
+            $checkoutGatewayResponse = is_array($latestPayment?->gateway_response)
+                ? $latestPayment->gateway_response
+                : (array) ($latestPayment?->gateway_response ?? []);
+            $resolvedCheckoutSessionStatus = strtolower((string) (
+                data_get($checkoutGatewayResponse, 'status')
+                ?? data_get($checkoutGatewayResponse, 'checkout_session.status')
+                ?? data_get($checkoutGatewayResponse, 'session.status')
+                ?? ''
+            ));
+            $resolvedCheckoutPaymentStatus = strtolower((string) (
+                data_get($checkoutGatewayResponse, 'payment_status')
+                ?? data_get($checkoutGatewayResponse, 'checkout_session.payment_status')
+                ?? data_get($checkoutGatewayResponse, 'session.payment_status')
+                ?? ''
+            ));
             $resolvedBookingStatus = in_array((string) ($reservation?->status ?? $flightRequest?->status ?? ''), ['confirmed'], true)
                 || $resolvedPaymentStatus === 'paid'
                 ? 'confirmed'
                 : 'pending_payment';
+            $checkoutReusable = $resolvedSessionId !== ''
+                && $resolvedBookingStatus !== 'confirmed'
+                && ! in_array($resolvedCheckoutSessionStatus, ['complete', 'completed', 'expired'], true)
+                && ! in_array($resolvedCheckoutPaymentStatus, ['paid'], true);
+            $requiresNewCheckout = $resolvedSessionId !== ''
+                && $resolvedBookingStatus !== 'confirmed'
+                && ! $checkoutReusable
+                && (
+                    in_array($resolvedCheckoutSessionStatus, ['complete', 'completed', 'expired'], true)
+                    || in_array($resolvedCheckoutPaymentStatus, ['paid'], true)
+                );
 
             return $this->ok([
                 'payment_order' => $latestPayment,
@@ -835,9 +917,13 @@ class StripePagoControlador extends ControladorBase
                 'booking_status' => $resolvedBookingStatus,
                 'status' => $resolvedBookingStatus === 'confirmed' ? 'confirmed' : 'pending_payment',
                 'workflow_status' => $resolvedBookingStatus === 'confirmed' ? 'vuelo confirmado' : 'pago pendiente',
-                'checkout_url' => $resolvedCheckoutUrl !== '' ? $resolvedCheckoutUrl : null,
+                'checkout_url' => $checkoutReusable && $resolvedCheckoutUrl !== '' ? $resolvedCheckoutUrl : null,
                 'stripe_checkout_session_id' => $resolvedSessionId,
                 'stripe_payment_intent_id' => $resolvedPaymentIntentId !== '' ? $resolvedPaymentIntentId : null,
+                'checkout_reusable' => $checkoutReusable,
+                'requires_new_checkout' => $requiresNewCheckout,
+                'stripe_checkout_status' => $resolvedCheckoutSessionStatus !== '' ? $resolvedCheckoutSessionStatus : null,
+                'stripe_checkout_payment_status' => $resolvedCheckoutPaymentStatus !== '' ? $resolvedCheckoutPaymentStatus : null,
             ]);
         } catch (Throwable $exception) {
             Log::error('Fallo en checkout success Stripe.', [
@@ -1201,6 +1287,7 @@ class StripePagoControlador extends ControladorBase
         ?string $paymentIntentId = null,
         ?string $brandOverride = null,
         string $paymentMethod = 'card',
+        ?PaymentIntent $resolvedPaymentIntent = null,
     ): JsonResponse {
         $paymentIntentId = trim((string) (
             $paymentIntentId
@@ -1211,8 +1298,11 @@ class StripePagoControlador extends ControladorBase
 
         abort_if($paymentIntentId === '', 422, 'No encontramos el PaymentIntent para confirmar este pago.');
 
-        Stripe::setApiKey((string) config('services.stripe.secret'));
-        $paymentIntent = PaymentIntent::retrieve($paymentIntentId);
+        $paymentIntent = $resolvedPaymentIntent;
+        if (! $paymentIntent || (string) ($paymentIntent->id ?? '') !== $paymentIntentId) {
+            Stripe::setApiKey((string) config('services.stripe.secret'));
+            $paymentIntent = PaymentIntent::retrieve($paymentIntentId);
+        }
 
         abort_if(! $paymentIntent, 404, 'Stripe no devolvio informacion del PaymentIntent.');
         abort_if(($paymentIntent->status ?? '') !== 'succeeded', 409, 'Stripe aun no confirma este pago como exitoso.');
@@ -1444,6 +1534,7 @@ class StripePagoControlador extends ControladorBase
                     ?? ''
                 ),
                 paymentMethod: 'stripe_checkout',
+                resolvedPaymentIntent: $paymentIntent,
             );
 
             return;
@@ -1722,6 +1813,7 @@ class StripePagoControlador extends ControladorBase
                     ?? ''
                 ),
                 paymentMethod: 'stripe_checkout',
+                resolvedPaymentIntent: $paymentIntent,
             );
         } elseif ($payment) {
             $this->syncCheckoutSessionPayment($payment, $sessionId);

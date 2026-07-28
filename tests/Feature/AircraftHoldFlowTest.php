@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Http\Controladores\StripeWebhookControlador;
 use App\Modelos\Aeronave;
 use App\Modelos\AircraftAvailabilityBlock;
+use App\Modelos\ContratoReserva;
 use App\Modelos\Cotizacion;
 use App\Modelos\Pago;
 use App\Modelos\Proveedor;
@@ -548,6 +549,42 @@ class AircraftHoldFlowTest extends TestCase
             ->assertJsonPath('reservation_booked', false)
             ->assertJsonPath('hold.id', $holdResponse->json('data.hold_id'))
             ->assertJsonPath('invalid_reason', null);
+    }
+
+    public function test_payment_authorization_returns_consistent_aircraft_availability_for_own_active_hold(): void
+    {
+        $this->seed();
+
+        [$client, $token, $quote, $aircraft, $flightRequest] = $this->createAcceptedQuoteContext('XA-HOLD12A');
+        $reservation = $this->createPendingReservation($client, $quote, $aircraft, $flightRequest);
+
+        ContratoReserva::query()->create([
+            'reservation_id' => $reservation->id,
+            'contract_code' => 'CTR-HOLD-'.uniqid(),
+            'status' => 'completed',
+            'docusign_status' => 'completed',
+            'signed_pdf_path' => 'contracts/reservations/test.pdf',
+            'signed_at' => now(),
+            'completed_at' => now(),
+        ]);
+
+        $holdResponse = $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson("/api/v1/cliente/cotizaciones/{$quote->id}/aircraft-hold")
+            ->assertCreated();
+
+        $this->withHeader('Authorization', 'Bearer '.$token)
+            ->getJson("/api/v1/cliente/reservas/{$reservation->id}/payment-authorization")
+            ->assertOk()
+            ->assertJsonPath('authorized', true)
+            ->assertJsonPath('can_pay', true)
+            ->assertJsonPath('aircraft_available', true)
+            ->assertJsonPath('hold_valid', true)
+            ->assertJsonPath('reservation_booked', false)
+            ->assertJsonPath('blocking_reasons', [])
+            ->assertJsonPath('invalid_reason', null)
+            ->assertJsonPath('availability.available', true)
+            ->assertJsonPath('availability.conflicting_block_id', null)
+            ->assertJsonPath('payment_availability.hold.id', $holdResponse->json('data.hold_id'));
     }
 
     public function test_payment_availability_recovers_checkout_when_hold_expired_but_aircraft_is_still_free(): void
