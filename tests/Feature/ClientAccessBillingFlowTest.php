@@ -216,6 +216,72 @@ class ClientAccessBillingFlowTest extends TestCase
             ->assertJsonMissingPath('checkout_url');
     }
 
+    public function test_checkout_intent_creates_new_checkout_for_expired_access_even_if_user_keeps_paid_flags(): void
+    {
+        $this->seed();
+        config()->set('services.stripe.secret', 'sk_test_client_access');
+        config()->set('services.stripe.publishable', 'pk_test_client_access');
+        config()->set('services.stripe.frontend_url', 'https://frontend.test');
+
+        $user = Usuario::query()->create([
+            'name' => 'Cliente Expirado',
+            'email' => 'cliente.expirado@test.dev',
+            'password' => Hash::make('password123'),
+            'role' => Usuario::ROLE_CLIENT,
+            'status' => 'active',
+        ]);
+        $user->forceFill([
+            'access_status' => 'active',
+            'has_paid_access' => true,
+            'provider_customer_id' => 'cus_test_expired',
+            'access_expires_at' => now()->subDay(),
+        ])->save();
+
+        Plan::query()->updateOrCreate(
+            ['code' => 'client_access_monthly'],
+            [
+                'name' => 'Acceso comercial cliente',
+                'slug' => 'client-access-monthly',
+                'description' => 'Acceso comercial mensual.',
+                'amount' => 115,
+                'price' => 115,
+                'price_monthly' => 115,
+                'currency' => 'USD',
+                'billing_type' => 'client_access',
+                'interval_type' => 'monthly',
+                'billing_cycle' => 'monthly',
+                'role_target' => 'client',
+                'user_type' => 'client',
+                'status' => 'active',
+                'is_active' => true,
+            ],
+        );
+
+        $token = TokenApi::issue($user, 'client-access-expired-token');
+
+        $sessionAlias = Mockery::mock('alias:Stripe\Checkout\Session');
+        $sessionAlias
+            ->shouldReceive('create')
+            ->once()
+            ->andReturn((object) [
+                'id' => 'cs_test_access_expired',
+                'url' => 'https://checkout.stripe.com/pay/cs_test_access_expired',
+            ]);
+
+        $this
+            ->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson('/api/v1/client/access-payment/create', [
+                'intent' => 'checkout',
+                'success_url' => 'https://frontend.test/success',
+                'cancel_url' => 'https://frontend.test/cancel',
+                'return_url' => 'https://frontend.test/cliente/pago',
+            ])
+            ->assertCreated()
+            ->assertJsonMissingPath('already_active')
+            ->assertJsonPath('checkout_session_id', 'cs_test_access_expired')
+            ->assertJsonPath('checkout_url', 'https://checkout.stripe.com/pay/cs_test_access_expired');
+    }
+
     public function test_me_and_access_status_prioritize_user_access_expiry_as_source_of_truth(): void
     {
         $this->seed();

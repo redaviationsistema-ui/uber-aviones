@@ -107,16 +107,32 @@ class ClientAccessBillingControlador extends ControladorBase
         }
 
         $latestPayment = $this->latestPaymentForUser($user);
+        if ($latestPayment && $this->paymentCanBeSyncedFromCheckout($latestPayment)) {
+            try {
+                $latestPayment = $this->syncCheckoutSubscriptionStatus(
+                    $latestPayment,
+                    (string) $latestPayment->provider_checkout_id,
+                );
+                $user = $request->user()->fresh();
+            } catch (\Throwable) {
+                // Si Stripe no responde, seguimos con el snapshot local.
+            }
+        }
+
+        $accessPayload = $this->buildAccessPayload($user, $latestPayment);
         $existingCheckoutUrl = trim((string) data_get($latestPayment?->gateway_response, 'checkout_url', ''));
         if (
             $latestPayment &&
             in_array((string) $latestPayment->status, ['pending', 'processing', 'payment_pending'], true) &&
             trim((string) $latestPayment->provider_checkout_id) !== '' &&
-            $this->isStripeHostedUrl($existingCheckoutUrl)
+            $this->isStripeHostedUrl($existingCheckoutUrl) &&
+            $this->checkoutCanBeReused($accessPayload)
         ) {
             return $this->ok([
                 'success' => true,
                 'reused_checkout' => true,
+                'access_status' => $accessPayload['status'] ?? null,
+                'access' => $accessPayload,
                 'payment' => $this->serializeAccessPayment($latestPayment),
                 'checkout_url' => $existingCheckoutUrl,
                 'checkoutUrl' => $existingCheckoutUrl,
@@ -199,9 +215,15 @@ class ClientAccessBillingControlador extends ControladorBase
             'updated_at' => now(),
         ]);
 
+        $freshUser = $request->user()->fresh();
+        $freshPayment = $payment->fresh('billingPlan');
+        $freshAccess = $this->buildAccessPayload($freshUser, $freshPayment);
+
         return $this->ok([
             'success' => true,
-            'payment' => $this->serializeAccessPayment($payment->fresh('billingPlan')),
+            'access_status' => $freshAccess['status'] ?? null,
+            'access' => $freshAccess,
+            'payment' => $this->serializeAccessPayment($freshPayment),
             'checkout_url' => $session->url,
             'checkoutUrl' => $session->url,
             'checkout_session_id' => $session->id,
@@ -596,7 +618,20 @@ class ClientAccessBillingControlador extends ControladorBase
             || $invoiceStatus === 'paid'
             || $invoicePaid
             || $amountPaid > 0;
-        $status = $isPaid ? 'active' : ($subscriptionStatus ?: $sessionStatus ?: 'pending');
+        $accessStatus = $this->resolveCheckoutAccessStatus(
+            sessionStatus: strtolower(trim($sessionStatus)),
+            sessionPaymentStatus: strtolower(trim($sessionPaymentStatus)),
+            subscriptionStatus: strtolower(trim($subscriptionStatus)),
+            invoiceStatus: strtolower(trim($invoiceStatus)),
+            isPaid: $isPaid,
+        );
+        $paymentStatus = $this->resolveCheckoutPaymentStatus(
+            sessionStatus: strtolower(trim($sessionStatus)),
+            sessionPaymentStatus: strtolower(trim($sessionPaymentStatus)),
+            subscriptionStatus: strtolower(trim($subscriptionStatus)),
+            invoiceStatus: strtolower(trim($invoiceStatus)),
+            isPaid: $isPaid,
+        );
         $periodStart = ! empty($subscription?->current_period_start)
             ? Carbon::createFromTimestamp((int) $subscription->current_period_start)->startOfDay()
             : ($payment->billing_period_start ? Carbon::parse($payment->billing_period_start)->startOfDay() : now()->startOfDay());
@@ -611,14 +646,14 @@ class ClientAccessBillingControlador extends ControladorBase
             'invoice' => $invoicePayload ? json_decode(json_encode($invoicePayload), true) : null,
         ];
 
-        DB::transaction(function () use ($payment, $session, $subscription, $invoicePayload, $status, $isPaid, $periodStart, $periodEnd, $payload) {
+        DB::transaction(function () use ($payment, $session, $subscription, $invoicePayload, $isPaid, $paymentStatus, $accessStatus, $periodStart, $periodEnd, $payload) {
             $customerId = (string) ($session->customer ?? $subscription?->customer ?? $payment->provider_customer_id ?? '');
             $subscriptionId = (string) ($subscription?->id ?? $session->subscription ?? $payment->provider_subscription_id ?? '');
             $invoiceId = (string) ($invoicePayload?->id ?? $session->invoice ?? $payment->provider_invoice_id ?? '');
             $paymentIntentId = (string) ($invoicePayload?->payment_intent ?? $session->payment_intent ?? $payment->provider_payment_id ?? '');
 
             $payment->update([
-                'status' => $isPaid ? 'paid' : $payment->status,
+                'status' => $paymentStatus,
                 'provider_checkout_id' => (string) $session->id,
                 'provider_customer_id' => $customerId !== '' ? $customerId : $payment->provider_customer_id,
                 'provider_subscription_id' => $subscriptionId !== '' ? $subscriptionId : $payment->provider_subscription_id,
@@ -649,16 +684,99 @@ class ClientAccessBillingControlador extends ControladorBase
                         'access_payment_id' => $payment->id,
                         'updated_at' => now(),
                     ]);
+            } else {
+                DB::table('users')
+                    ->where('id', $payment->user_id)
+                    ->where(function ($query) use ($payment) {
+                        $query->whereNull('access_payment_id')
+                            ->orWhere('access_payment_id', '<=', $payment->id);
+                    })
+                    ->update([
+                        'access_status' => $accessStatus,
+                        'access_payment_id' => $payment->id,
+                        'updated_at' => now(),
+                    ]);
             }
         });
 
         return $payment->fresh('billingPlan');
     }
 
+    private function checkoutCanBeReused(array $accessPayload): bool
+    {
+        $status = strtolower(trim((string) ($accessPayload['status'] ?? '')));
+
+        return in_array($status, ['checkout_pending', 'payment_processing'], true);
+    }
+
+    private function resolveCheckoutAccessStatus(
+        string $sessionStatus,
+        string $sessionPaymentStatus,
+        string $subscriptionStatus,
+        string $invoiceStatus,
+        bool $isPaid,
+    ): string {
+        if ($isPaid) {
+            return 'active';
+        }
+
+        if ($sessionStatus === 'expired' || $subscriptionStatus === 'incomplete_expired') {
+            return 'expired';
+        }
+
+        if (in_array($subscriptionStatus, ['canceled', 'cancelled'], true)) {
+            return 'cancelled';
+        }
+
+        if (in_array($subscriptionStatus, ['past_due', 'unpaid'], true) || in_array($invoiceStatus, ['uncollectible', 'void'], true)) {
+            return 'payment_failed';
+        }
+
+        if ($sessionStatus === 'open' || in_array($sessionPaymentStatus, ['unpaid', 'no_payment_required'], true)) {
+            return 'checkout_pending';
+        }
+
+        return 'payment_processing';
+    }
+
+    private function resolveCheckoutPaymentStatus(
+        string $sessionStatus,
+        string $sessionPaymentStatus,
+        string $subscriptionStatus,
+        string $invoiceStatus,
+        bool $isPaid,
+    ): string {
+        if ($isPaid) {
+            return 'paid';
+        }
+
+        if ($sessionStatus === 'expired' || $subscriptionStatus === 'incomplete_expired') {
+            return 'expired';
+        }
+
+        if (in_array($subscriptionStatus, ['canceled', 'cancelled'], true)) {
+            return 'cancelled';
+        }
+
+        if (in_array($subscriptionStatus, ['past_due', 'unpaid'], true) || in_array($invoiceStatus, ['uncollectible', 'void'], true)) {
+            return 'failed';
+        }
+
+        if ($sessionStatus === 'open' || in_array($sessionPaymentStatus, ['unpaid', 'no_payment_required'], true)) {
+            return 'pending';
+        }
+
+        return 'processing';
+    }
+
     private function resolveCancelledStatus(Usuario $user): string
     {
         if ($user->has_paid_access && in_array((string) $user->access_status, ['active', 'past_due', 'suspended', 'unpaid'], true)) {
             return (string) $user->access_status;
+        }
+
+        if (in_array((string) $user->access_status, ['payment_pending', 'checkout_pending', 'payment_processing', 'expired', 'payment_failed'], true)) {
+            return 'cancelled';
         }
 
         $trialEndsAt = $user->trial_ends_at ? Carbon::parse($user->trial_ends_at) : null;
@@ -671,11 +789,16 @@ class ClientAccessBillingControlador extends ControladorBase
 
     private function hasBlockingActiveAccess(Usuario $user): bool
     {
-        if (! $user->has_paid_access || $user->access_status !== 'active' || ! $user->access_expires_at) {
+        $commercialAccess = $user->accessStatus()['commercial_access'] ?? [];
+        $isActive = (bool) ($commercialAccess['access_is_active'] ?? false);
+        $status = (string) ($commercialAccess['status'] ?? '');
+        $expiresAtValue = $commercialAccess['access_expires_at'] ?? $user->access_expires_at;
+
+        if (! $isActive || $status !== 'active' || ! $expiresAtValue) {
             return false;
         }
 
-        $expiresAt = Carbon::parse($user->access_expires_at);
+        $expiresAt = Carbon::parse($expiresAtValue);
         $renewalWindowStart = now()->copy()->addDays(7)->startOfDay();
 
         return $expiresAt->greaterThan($renewalWindowStart);
@@ -683,13 +806,19 @@ class ClientAccessBillingControlador extends ControladorBase
 
     private function hasAnyActiveAccess(Usuario $user): bool
     {
-        return (bool) $user->has_paid_access
-            && in_array((string) $user->access_status, ['active', 'past_due'], true);
+        $commercialAccess = $user->accessStatus()['commercial_access'] ?? [];
+        $isActive = (bool) ($commercialAccess['access_is_active'] ?? false);
+        $isInGrace = (bool) ($commercialAccess['access_is_in_grace_period'] ?? false);
+        $canReserve = (bool) data_get($commercialAccess, 'available_actions.can_reserve', false);
+
+        return $isActive || ($isInGrace && $canReserve);
     }
 
     private function requiresBillingPortalManagement(Usuario $user): bool
     {
+        $commercialAccess = $user->accessStatus()['commercial_access'] ?? [];
+
         return (bool) $user->provider_customer_id
-            && in_array((string) $user->access_status, ['active', 'past_due', 'suspended', 'unpaid'], true);
+            && (bool) data_get($commercialAccess, 'available_actions.should_manage_subscription', false);
     }
 }

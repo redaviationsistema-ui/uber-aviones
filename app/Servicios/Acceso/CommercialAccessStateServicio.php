@@ -22,6 +22,20 @@ class CommercialAccessStateServicio
         $freeQuoteLimit = max(1, (int) ($user->free_quote_limit ?? 1));
         $freeQuotesUsed = max(0, (int) ($user->free_quotes_used ?? 0));
         $remainingFreeQuotes = max(0, $freeQuoteLimit - $freeQuotesUsed);
+        $gatewayPayload = is_array($latestAccessPayment?->gateway_response) ? $latestAccessPayment->gateway_response : [];
+        $checkoutSessionId = trim((string) ($latestAccessPayment?->provider_checkout_id ?? ''));
+        $stripeCheckoutStatus = strtolower(trim((string) data_get($gatewayPayload, 'checkout_session.status', '')));
+        $stripePaymentStatus = strtolower(trim((string) (
+            data_get($gatewayPayload, 'checkout_session.payment_status')
+            ?: data_get($gatewayPayload, 'invoice.status')
+            ?: $latestAccessPayment?->status
+            ?: ''
+        )));
+        $stripeSubscriptionStatus = strtolower(trim((string) (
+            data_get($gatewayPayload, 'subscription.status')
+            ?: $user->provider_subscription_id
+            ?: ''
+        )));
 
         $paidActiveStatuses = ['active', 'approved', 'paid', 'succeeded', 'complete', 'completed'];
         $graceStatuses = ['past_due', 'payment_failed', 'retry_required', 'retry_pending', 'in_grace'];
@@ -62,6 +76,18 @@ class CommercialAccessStateServicio
             $status = 'active';
         }
 
+        if (! $paidWindowActive && ! $graceActive) {
+            $status = $this->normalizeLifecycleStatus(
+                currentStatus: $status,
+                hasPaidAccess: $hasPaidAccess,
+                remainingFreeQuotes: $remainingFreeQuotes,
+                checkoutStatus: $stripeCheckoutStatus,
+                paymentStatus: $stripePaymentStatus,
+                subscriptionStatus: $stripeSubscriptionStatus,
+                checkoutSessionId: $checkoutSessionId,
+            );
+        }
+
         $hasCommercialAccess = $paidWindowActive || $graceActive || $trialAvailable;
         $canQuote = $hasCommercialAccess;
         $canReserve = $paidWindowActive || $graceActive;
@@ -99,6 +125,7 @@ class CommercialAccessStateServicio
         $normalized = [
             'status' => $status,
             'access_status' => $status,
+            'raw_access_status' => strtolower(trim((string) ($user->access_status ?: 'trial_active'))),
             'has_paid_access' => $hasPaidAccess,
             'has_access' => $hasCommercialAccess,
             'access_is_active' => $paidWindowActive || $graceActive,
@@ -113,10 +140,16 @@ class CommercialAccessStateServicio
             'remaining_free_quotes' => $remainingFreeQuotes,
             'has_trial_quote_available' => $trialAvailable,
             'paid_access_at' => $user->paid_access_at,
+            'starts_at' => $latestAccessPayment?->billing_period_start,
             'access_expires_at' => $accessExpiresAt,
+            'expires_at' => $accessExpiresAt?->toIso8601String(),
             'access_expires_date' => $accessExpiresAt?->toDateString(),
             'access_expires_formatted' => $this->formatDate($accessExpiresAt),
             'billing_period_end' => $latestAccessPayment?->billing_period_end,
+            'stripe_checkout_status' => $stripeCheckoutStatus !== '' ? $stripeCheckoutStatus : null,
+            'stripe_payment_status' => $stripePaymentStatus !== '' ? $stripePaymentStatus : null,
+            'stripe_subscription_status' => $stripeSubscriptionStatus !== '' ? $stripeSubscriptionStatus : null,
+            'checkout_session_id' => $checkoutSessionId !== '' ? $checkoutSessionId : null,
             'grace_period_ends_at' => $graceActive ? $gracePeriodEndsAt : null,
             'grace_period_ends_date' => $graceActive ? $gracePeriodEndsAt?->toDateString() : null,
             'grace_period_ends_formatted' => $graceActive ? $this->formatDate($gracePeriodEndsAt) : null,
@@ -162,6 +195,59 @@ class CommercialAccessStateServicio
         }
 
         return $normalized;
+    }
+
+    private function normalizeLifecycleStatus(
+        string $currentStatus,
+        bool $hasPaidAccess,
+        int $remainingFreeQuotes,
+        string $checkoutStatus,
+        string $paymentStatus,
+        string $subscriptionStatus,
+        string $checkoutSessionId,
+    ): string {
+        if ($currentStatus === 'expired') {
+            return 'expired';
+        }
+
+        if (in_array($currentStatus, ['cancelled', 'canceled'], true) || in_array($paymentStatus, ['cancelled', 'canceled'], true)) {
+            return 'cancelled';
+        }
+
+        if (in_array($currentStatus, ['payment_failed', 'past_due'], true) || in_array($paymentStatus, ['failed', 'payment_failed', 'past_due', 'unpaid'], true)) {
+            return 'payment_failed';
+        }
+
+        if ($checkoutStatus === 'expired' || $subscriptionStatus === 'incomplete_expired') {
+            return 'expired';
+        }
+
+        if (
+            $checkoutSessionId !== '' &&
+            (
+                $checkoutStatus === 'open' ||
+                in_array($paymentStatus, ['pending', 'unpaid', 'no_payment_required'], true)
+            )
+        ) {
+            return 'checkout_pending';
+        }
+
+        if (
+            $checkoutSessionId !== '' &&
+            (
+                $checkoutStatus === 'complete' ||
+                in_array($paymentStatus, ['processing', 'paid'], true) ||
+                in_array($subscriptionStatus, ['incomplete', 'past_due'], true)
+            )
+        ) {
+            return 'payment_processing';
+        }
+
+        if (! $hasPaidAccess && $remainingFreeQuotes <= 0 && in_array($currentStatus, ['trial_used', 'registered'], true)) {
+            return 'inactive';
+        }
+
+        return $currentStatus;
     }
 
     private function shouldAllowRenewal(
