@@ -144,7 +144,7 @@ class ClientCanonicalPricingSecurityTest extends TestCase
             (float) data_get($stored, 'flight_request.final_price'),
         );
         $this->assertSame(
-            'official_backend_pricing_v3',
+            'official_backend_pricing_v4',
             data_get($stored, 'flight_request.pricing_context.pricing_formula_version'),
         );
         $this->assertSame(

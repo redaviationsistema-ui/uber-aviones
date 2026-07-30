@@ -8,6 +8,7 @@ use App\Modelos\Operacion;
 use App\Modelos\SolicitudVuelo;
 use App\Modelos\TramoSolicitudVuelo;
 use App\Modelos\Usuario;
+use Illuminate\Support\Facades\Log;
 
 class VisibilidadServicio
 {
@@ -65,6 +66,35 @@ class VisibilidadServicio
         $acceptedQuote = $solicitud->relationLoaded('quotes')
             ? $solicitud->quotes->where('status', 'accepted')->sortByDesc('id')->first()
             : $solicitud->quotes()->where('status', 'accepted')->latest('id')->first();
+        $visibleQuoteTotal = $this->resolveVisibleQuoteTotal(
+            $acceptedQuote?->total,
+            data_get($solicitud->pricing_context, 'total_amount'),
+            $solicitud->final_price,
+            $preferredMatch?->estimated_price,
+            $visibilityPayload['selected_card_price'] ?? null,
+        );
+        $this->warnWhenQuoteTotalsDiverge($solicitud, [
+            'accepted_quote.total' => $acceptedQuote?->total,
+            'pricing_context.total_amount' => data_get($solicitud->pricing_context, 'total_amount'),
+            'final_price' => $solicitud->final_price,
+            'preferred_match.estimated_price' => $preferredMatch?->estimated_price,
+            'visibility_payload.selected_card_price' => $visibilityPayload['selected_card_price'] ?? null,
+        ]);
+
+        Log::info('Client flight request payload serialized', [
+            'flight_request_id' => $solicitud->id,
+            'assigned_aircraft_id' => $solicitud->assigned_aircraft_id,
+            'assigned_provider_id' => $solicitud->assigned_provider_id,
+            'preferred_match_id' => $preferredMatch?->id,
+            'preferred_match_estimated_price' => $preferredMatch?->estimated_price,
+            'final_price' => $solicitud->final_price,
+            'pricing_context_total_amount' => data_get($solicitud->pricing_context, 'total_amount'),
+            'pricing_context_total' => data_get($solicitud->pricing_context, 'total'),
+            'visibility_selected_card_price' => $visibilityPayload['selected_card_price'] ?? null,
+            'accepted_quote_id' => $acceptedQuote?->id,
+            'accepted_quote_total' => $acceptedQuote?->total,
+            'currency' => $solicitud->currency,
+        ]);
 
         return [
             'id' => $solicitud->id,
@@ -95,13 +125,7 @@ class VisibilidadServicio
                 : ($preferredMatch?->aircraft
                     ? $this->aeronaveVisibleParaCliente($preferredMatch->aircraft, $solicitud->aircraft_type)['main_image']
                     : null),
-            'quote_total' => $preferredMatch?->estimated_price
-                ?? $solicitud->pricing_context['total_amount']
-                ?? $solicitud->final_price
-                ?? $solicitud->pricing_context['total']
-                ?? $solicitud->pricing_context['final_price']
-                ?? $visibilityPayload['selected_card_price']
-                ?? null,
+            'quote_total' => $visibleQuoteTotal,
             'base_price' => $solicitud->base_price,
             'operational_fee' => $solicitud->operational_fee,
             'priority_price' => $solicitud->priority_price,
@@ -179,6 +203,43 @@ class VisibilidadServicio
             ] : null,
             'matched_options' => $matches,
         ];
+    }
+
+    private function resolveVisibleQuoteTotal(mixed ...$candidates): ?float
+    {
+        foreach ($candidates as $candidate) {
+            if ($candidate === null || $candidate === '') {
+                continue;
+            }
+
+            return round((float) $candidate, 2);
+        }
+
+        return null;
+    }
+
+    private function warnWhenQuoteTotalsDiverge(SolicitudVuelo $solicitud, array $candidates): void
+    {
+        $numericCandidates = collect($candidates)
+            ->filter(fn ($value) => $value !== null && $value !== '')
+            ->map(fn ($value, $key) => ['source' => $key, 'value' => round((float) $value, 2)])
+            ->values();
+
+        if ($numericCandidates->count() < 2) {
+            return;
+        }
+
+        $max = (float) $numericCandidates->max('value');
+        $min = (float) $numericCandidates->min('value');
+
+        if (abs($max - $min) <= 0.01) {
+            return;
+        }
+
+        Log::warning('Client visible quote totals diverged', [
+            'flight_request_id' => $solicitud->id,
+            'candidates' => $numericCandidates->all(),
+        ]);
     }
 
     public function solicitudParaOperador(SolicitudVuelo $solicitud): array

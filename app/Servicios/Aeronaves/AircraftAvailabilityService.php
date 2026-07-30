@@ -40,6 +40,7 @@ class AircraftAvailabilityService
     public const STATUS_RELEASED = 'released';
     public const STATUS_EXPIRED = 'expired';
     public const STATUS_COMPLETED = 'completed';
+    public const STATUS_CONTRACT_PENDING = 'contract_pending';
 
     private static ?array $availabilityBlockColumns = null;
 
@@ -210,6 +211,87 @@ class AircraftAvailabilityService
         $blocks->each->update($releasePayload);
 
         return $blocks->first()?->fresh();
+    }
+
+    public function lockAircraftForContractPending(
+        Reserva $reservation,
+        ?int $minutesToHold = null,
+    ): AircraftAvailabilityBlock {
+        $reservation->loadMissing(['flightRequest.legs', 'legs', 'aircraft', 'quote']);
+
+        $aircraftId = (int) ($reservation->aircraft_id ?: $reservation->flightRequest?->assigned_aircraft_id);
+        if ($aircraftId <= 0) {
+            throw new RuntimeException('La reserva no tiene una aeronave asignada para apartar contrato.');
+        }
+
+        return DB::transaction(function () use ($reservation, $aircraftId, $minutesToHold) {
+            $aircraft = Aeronave::query()->lockForUpdate()->findOrFail($aircraftId);
+            $this->expireStaleHoldsForAircraft($aircraftId);
+
+            if (! $this->aircraftStatusAllowsHold($aircraft->status)) {
+                throw new RuntimeException('La aeronave ya no esta activa para reservarse.');
+            }
+
+            [$start, $end] = $this->resolveContractReservationWindow($reservation, $aircraft);
+
+            $existing = AircraftAvailabilityBlock::query()
+                ->where('aircraft_id', $aircraftId)
+                ->where('reservation_id', $reservation->id)
+                ->whereIn('status', [self::STATUS_HELD, self::STATUS_ACTIVE_LEGACY, self::STATUS_BOOKED])
+                ->latest('id')
+                ->first();
+
+            if ($existing && $existing->status === self::STATUS_BOOKED) {
+                return $existing;
+            }
+
+            $minutesToHold = max(
+                1,
+                (int) ($minutesToHold ?? config('booking.contract_hold_minutes', 720)),
+            );
+
+            $this->ensureAircraftAvailable(
+                aircraftId: $aircraftId,
+                requestedStart: $start,
+                requestedEnd: $end,
+                ignoreReservationId: $reservation->id,
+                ignoreBlockId: null,
+                ignoreQuoteId: $reservation->quote_id ? (int) $reservation->quote_id : null,
+                ignoreHoldId: $existing?->id,
+            );
+
+            $attributes = [
+                'aircraft_id' => $aircraftId,
+                'reservation_id' => $reservation->id,
+                'quote_id' => $reservation->quote_id,
+                'flight_request_id' => $reservation->flight_request_id,
+                'user_id' => $reservation->client_id,
+                'start_datetime' => $start,
+                'end_datetime' => $end,
+                'hold_expires_at' => now()->addMinutes($minutesToHold),
+                'payment_status' => self::STATUS_CONTRACT_PENDING,
+                'source' => 'reservation_contract_pending',
+                'status' => self::STATUS_ACTIVE_LEGACY,
+                'reason' => 'Aeronave apartada para proceso contractual activo.',
+                'notes' => 'Bloqueo operativo creado antes de generar o firmar contrato.',
+            ];
+
+            if ($this->availabilityBlockSupports('block_type')) {
+                $attributes['block_type'] = 'contract_hold';
+            }
+
+            if ($this->availabilityBlockSupports('released_at')) {
+                $attributes['released_at'] = null;
+            }
+
+            if ($existing) {
+                $existing->update($attributes);
+
+                return $existing->fresh();
+            }
+
+            return AircraftAvailabilityBlock::query()->create($attributes)->fresh();
+        });
     }
 
     public function evaluateReservationPaymentAvailability(Reserva $reservation, bool $recoverHold = false): array
@@ -1006,9 +1088,24 @@ class AircraftAvailabilityService
         return $this->resolveWindowFromPayload($payload);
     }
 
+    public function resolveContractReservationWindow(Reserva $reservation, ?Aeronave $aircraft = null): array
+    {
+        $reservation->loadMissing(['flightRequest.legs', 'legs', 'quote', 'aircraft']);
+
+        [$start, $end] = $this->resolveReservationWindow($reservation);
+        $aircraft ??= $reservation->aircraft;
+
+        return $this->applyOperationalWindowPadding(
+            $start,
+            $end,
+            $aircraft,
+            is_array($reservation->flightRequest?->pricing_context) ? $reservation->flightRequest->pricing_context : [],
+        );
+    }
+
     private function resolvePaidReservationWindow(Reserva $reservation, int $aircraftId): array
     {
-        [$start, $end] = $this->resolveReservationWindow($reservation);
+        [$start, $end] = $this->resolveContractReservationWindow($reservation, $reservation->aircraft);
 
         $matchingHold = AircraftAvailabilityBlock::query()
             ->where('aircraft_id', $aircraftId)
@@ -1067,6 +1164,20 @@ class AircraftAvailabilityService
         return $this->resolveWindowFromPayload($payload);
     }
 
+    public function resolveOperationalFlightRequestWindow(SolicitudVuelo $flightRequest, ?Aeronave $aircraft = null): array
+    {
+        $flightRequest->loadMissing(['legs', 'assignedAircraft']);
+        [$start, $end] = $this->resolveFlightRequestWindow($flightRequest);
+        $aircraft ??= $flightRequest->assignedAircraft;
+
+        return $this->applyOperationalWindowPadding(
+            $start,
+            $end,
+            $aircraft,
+            is_array($flightRequest->pricing_context) ? $flightRequest->pricing_context : [],
+        );
+    }
+
     private function normalizeWindow($requestedStart, $requestedEnd): array
     {
         $start = $this->toCarbon($requestedStart);
@@ -1080,6 +1191,38 @@ class AircraftAvailabilityService
         }
 
         return [$start, $end];
+    }
+
+    private function applyOperationalWindowPadding(
+        Carbon $start,
+        Carbon $end,
+        ?Aeronave $aircraft = null,
+        array $pricingContext = [],
+    ): array {
+        $preparationMinutes = max(0, (int) config('booking.aircraft_preparation_minutes', 30));
+        $operationalMarginMinutes = max(0, (int) config('booking.aircraft_operational_margin_minutes', 30));
+        $repositionPaddingMinutes = max(0, (int) config('booking.aircraft_reposition_padding_minutes', 30));
+        $climbDescentMinutes = max(0, (int) ($pricingContext['client_climb_descent_minutes'] ?? $aircraft?->climb_descent_minutes ?? 0));
+        $bufferHours = (float) ($pricingContext['buffer_hours'] ?? 0);
+        $repositionHours = (float) ($pricingContext['repositioning_hours'] ?? 0);
+
+        if ($bufferHours <= 0) {
+            $bufferHours = max(0.5, (float) ($pricingContext['reserve_hours'] ?? 0));
+        }
+
+        $startPaddingMinutes = $preparationMinutes
+            + $operationalMarginMinutes
+            + (int) round($bufferHours * 60)
+            + (int) round($repositionHours * 60)
+            + $repositionPaddingMinutes;
+        $endPaddingMinutes = $operationalMarginMinutes
+            + (int) round($bufferHours * 60)
+            + max(15, (int) round($climbDescentMinutes / 2));
+
+        return [
+            $start->copy()->subMinutes($startPaddingMinutes),
+            $end->copy()->addMinutes($endPaddingMinutes),
+        ];
     }
 
     private function toCarbon($value): ?Carbon

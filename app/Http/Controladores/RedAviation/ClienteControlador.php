@@ -31,6 +31,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 
@@ -378,6 +379,19 @@ class ClienteControlador extends ControladorBase
         $tripType = $this->resolveQuoteTripType($data);
         $quotesLimit = (int) ($data['limit'] ?? self::DEFAULT_CLIENT_QUOTES_LIMIT);
 
+        Log::info('Flight quote preview flow started', [
+            'user_id' => $user?->id,
+            'origin' => $data['origin'],
+            'destination' => $data['destination'],
+            'trip_type' => $tripType,
+            'passengers' => $passengers,
+            'legs_count' => count($legs),
+            'route_signature' => $canonicalRoute['route_signature'] ?? null,
+            'distance_km' => round($distanceKm, 2),
+            'distance_nm' => round($distanceNm, 2),
+            'quotes_limit' => $quotesLimit,
+        ]);
+
         if ($user && (($commercialGate['consume_trial_quote'] ?? false) === true)) {
             $nextUsed = (int) ($user->free_quotes_used ?? 0) + 1;
             $limit = max(1, (int) ($user->free_quote_limit ?? 1));
@@ -552,6 +566,10 @@ class ClienteControlador extends ControladorBase
                     'final_price' => $this->formatMoney($pricing['total_amount'], $currency),
                     'debug_pricing' => $pricing['debug_pricing'],
                     'pricing_breakdown' => $pricing,
+                    'pricing' => [
+                        'total_amount' => round($pricing['total_amount'], 2),
+                        'currency' => $currency,
+                    ],
                     'source_origin' => $baseAirportCode,
                     'base_airport_id' => $aircraft->base_airport_id,
                     'base_airport_code' => $baseAirportCode,
@@ -585,6 +603,20 @@ class ClienteControlador extends ControladorBase
             ])
             ->take($quotesLimit)
             ->values();
+
+        Log::info('Flight quote preview flow completed', [
+            'user_id' => $user?->id,
+            'route_signature' => $canonicalRoute['route_signature'] ?? null,
+            'trip_type' => $tripType,
+            'matches_returned' => $quotes->count(),
+            'match_aircraft_ids' => $quotes->pluck('aircraft_id')->values()->all(),
+            'match_totals' => $quotes->map(fn (array $quote) => [
+                'aircraft_id' => $quote['aircraft_id'] ?? null,
+                'total_amount' => $quote['total_amount'] ?? null,
+                'quoted_total' => $quote['quoted_total'] ?? null,
+                'currency' => $quote['currency'] ?? null,
+            ])->values()->all(),
+        ]);
 
         return $this->ok([
             'preview' => true,
@@ -1018,6 +1050,22 @@ class ClienteControlador extends ControladorBase
             ],
         );
 
+        Log::info('Stored flight request response built', [
+            'flight_request_id' => $loadedRequest->id,
+            'client_id' => $loadedRequest->client_id,
+            'assigned_aircraft_id' => $loadedRequest->assigned_aircraft_id,
+            'assigned_provider_id' => $loadedRequest->assigned_provider_id,
+            'already_exists' => $alreadyExists,
+            'accepted_quote_id' => $acceptedQuote?->id,
+            'accepted_quote_total' => $acceptedQuote?->total,
+            'flight_request_final_price' => $loadedRequest->final_price,
+            'pricing_context_total_amount' => data_get($loadedRequest->pricing_context, 'total_amount'),
+            'frontend_quote_total' => $flightRequestPayload['quote_total'] ?? null,
+            'frontend_total_amount' => $flightRequestPayload['total_amount'] ?? null,
+            'frontend_final_price' => $flightRequestPayload['final_price'] ?? null,
+            'currency' => $flightRequestPayload['currency'] ?? $loadedRequest->currency,
+        ]);
+
         return $this->ok(array_filter([
             'message' => $message,
             'already_exists' => $alreadyExists,
@@ -1193,6 +1241,24 @@ class ClienteControlador extends ControladorBase
 
         $serverPricing = $this->resolveServerPricingForSelectedAircraft($selectedMatch->aircraft, $solicitud, $data);
         $resolvedSelectedPrice = (float) ($serverPricing['total_amount'] ?? 0);
+
+        Log::info('Selected aircraft priced for flight request', [
+            'flight_request_id' => $solicitud->id,
+            'aircraft_id' => $selectedMatch->aircraft_id,
+            'provider_id' => $selectedMatch->provider_id,
+            'trip_type' => $solicitud->trip_type,
+            'hourly_rate' => data_get($serverPricing, 'hourly_rate'),
+            'minimum_hours' => data_get($serverPricing, 'minimum_hours'),
+            'airport_expenses' => data_get($serverPricing, 'airport_expenses'),
+            'client_display_flight_hours' => data_get($serverPricing, 'client_display_flight_hours'),
+            'billable_hours' => data_get($serverPricing, 'billable_hours'),
+            'subtotal' => data_get($serverPricing, 'subtotal'),
+            'tax' => data_get($serverPricing, 'tax'),
+            'total_amount' => data_get($serverPricing, 'total_amount'),
+            'quote_strategy' => data_get($serverPricing, 'quote_strategy'),
+            'route_signature' => data_get($serverPricing, 'route_snapshot.signature'),
+        ]);
+
         $selectedMatch->update([
             'estimated_price' => $resolvedSelectedPrice,
             'status' => 'sent_to_provider',
@@ -1295,6 +1361,12 @@ class ClienteControlador extends ControladorBase
         $totalAmount = (float) data_get($solicitud->pricing_context, 'total_amount', $solicitud->final_price ?? 0);
 
         if ($providerId <= 0 || $aircraftId <= 0 || $totalAmount <= 0) {
+            Log::info('Accepted quote skipped for flight request', [
+                'flight_request_id' => $solicitud->id,
+                'provider_id' => $providerId,
+                'aircraft_id' => $aircraftId,
+                'total_amount' => $totalAmount,
+            ]);
             return null;
         }
 
@@ -1331,15 +1403,41 @@ class ClienteControlador extends ControladorBase
         if ($existingQuote) {
             $existingQuote->update($attributes);
 
+            Log::info('Accepted quote updated for flight request', [
+                'flight_request_id' => $solicitud->id,
+                'quote_id' => $existingQuote->id,
+                'aircraft_id' => $aircraftId,
+                'provider_id' => $providerId,
+                'subtotal' => $attributes['subtotal'],
+                'taxes' => $attributes['taxes'],
+                'fees' => $attributes['fees'],
+                'total' => $attributes['total'],
+                'currency' => $attributes['currency'],
+            ]);
+
             return $existingQuote->fresh();
         }
 
-        return $solicitud->quotes()->create([
+        $quote = $solicitud->quotes()->create([
             ...$attributes,
             'quote_code' => 'QT-'.now()->format('ymdHis').'-'.Str::upper(Str::random(6)),
             'provider_id' => $providerId,
             'aircraft_id' => $aircraftId,
         ]);
+
+        Log::info('Accepted quote created for flight request', [
+            'flight_request_id' => $solicitud->id,
+            'quote_id' => $quote->id,
+            'aircraft_id' => $aircraftId,
+            'provider_id' => $providerId,
+            'subtotal' => $attributes['subtotal'],
+            'taxes' => $attributes['taxes'],
+            'fees' => $attributes['fees'],
+            'total' => $attributes['total'],
+            'currency' => $attributes['currency'],
+        ]);
+
+        return $quote;
     }
 
     public function indexFlightRequests(Request $request)
@@ -2208,6 +2306,41 @@ class ClienteControlador extends ControladorBase
         $debugPricing['stripe_fee'] = $paymentBreakdown['stripe_fee'];
         $debugPricing['administrative_fee'] = $paymentBreakdown['administrative_fee'];
         $debugPricing['charged_total_amount'] = $chargedTotal;
+
+        Log::info('Flight pricing calculated', [
+            'aircraft_id' => $aircraft->id,
+            'aircraft_model' => $aircraft->model,
+            'trip_type' => $tripType,
+            'legs_count' => count($clientLegs),
+            'route_signature' => $this->buildRouteSignature($clientLegs),
+            'distance_total_km' => round($distanceTotal, 2),
+            'hourly_rate' => $hourlyRate,
+            'minimum_hours' => $minimumHours,
+            'minimum_route_price' => $minimumRoutePrice,
+            'airport_expense_source' => $airportExpenseContext['source'] ?? null,
+            'airport_expenses' => $expenseFee,
+            'margin_rate' => $marginRate,
+            'margin_amount' => $marginAmount,
+            'tax_rate' => $taxRate,
+            'tax' => $ivaAmount,
+            'flight_base_hours' => round($flightBaseHours, 4),
+            'client_display_flight_hours' => round($clientDisplayFlightHours, 4),
+            'client_operational_flight_hours' => round($clientOperationalFlightHours, 4),
+            'client_billable_hours' => round($clientBillableHours, 4),
+            'repositioning_hours' => round($repositioningHours, 4),
+            'return_to_base_hours' => round($returnToBaseHours, 4),
+            'overnight_hours' => round($overnightHours, 4),
+            'billable_flight_cost' => round($billableFlightCost, 2),
+            'subtotal_before_margin' => round($subtotalBeforeMargin, 2),
+            'subtotal' => round($subtotal, 2),
+            'flight_cost' => $paymentBreakdown['flight_cost'],
+            'stripe_fee' => $paymentBreakdown['stripe_fee'],
+            'administrative_fee' => $paymentBreakdown['administrative_fee'],
+            'total_amount' => $chargedTotal,
+            'time_display_mode' => $timeDisplayMode,
+            'billing_hours_mode' => $billingHoursMode,
+            'flight_base_source' => $flightBaseSource,
+        ]);
 
         return [
             'trip_type' => $tripType,
@@ -3256,6 +3389,10 @@ class ClienteControlador extends ControladorBase
         $payload['currency'] = $aircraft->currency ?: 'USD';
         $payload['debug_pricing'] = $debugPricing;
         $payload['pricing_breakdown'] = $pricing;
+        $payload['pricing'] = [
+            'total_amount' => round((float) $pricing['total_amount'], 2),
+            'currency' => $aircraft->currency ?: 'USD',
+        ];
 
         return $payload;
     }

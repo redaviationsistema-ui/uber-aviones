@@ -316,6 +316,15 @@ class AeronaveControlador extends ControladorBase
             ->orderBy('hourly_rate')
             ->get();
 
+        Log::info('Client aircraft search executed', [
+            'origin' => $data['origin'],
+            'departure_datetime' => $data['departure_datetime'],
+            'passengers' => (int) $data['passengers'],
+            'resolved_origin_airport_id' => $originAirport?->id,
+            'result_count' => $aircraft->count(),
+            'aircraft_ids' => $aircraft->pluck('id')->values()->all(),
+        ]);
+
         return $this->ok([
             'aircraft' => $aircraft->map(fn (Aeronave $item) => $this->formatPublicAircraftPayload($item))->values(),
         ]);

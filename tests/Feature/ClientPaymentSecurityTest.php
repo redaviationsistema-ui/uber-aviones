@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Modelos\Aeronave;
+use App\Modelos\AircraftAvailabilityBlock;
 use App\Modelos\ContratoReserva;
 use App\Modelos\Pago;
 use App\Modelos\Proveedor;
@@ -186,6 +187,53 @@ class ClientPaymentSecurityTest extends TestCase
         $this->assertDatabaseCount('idempotency_keys', 1);
     }
 
+    public function test_contract_pending_reservation_store_does_not_revalidate_aircraft_availability(): void
+    {
+        $this->seed();
+        $context = $this->createReservationPaymentContext();
+
+        $context['reservation']->contract()->update([
+            'status' => 'generated',
+            'docusign_status' => 'generated',
+            'completed_at' => null,
+        ]);
+        $context['flightRequest']->update([
+            'workflow_status' => 'contrato pendiente',
+        ]);
+
+        $this->createConflictingAvailabilityBlock($context);
+
+        $this->withHeader('Authorization', 'Bearer '.$context['token'])
+            ->postJson('/api/v1/cliente/reservas', [
+                'flight_request_id' => $context['flightRequest']->id,
+            ])
+            ->assertCreated()
+            ->assertJsonPath('reservation.id', $context['reservation']->id);
+    }
+
+    public function test_contract_pending_generation_keeps_current_state_even_if_aircraft_loses_availability(): void
+    {
+        $this->seed();
+        $context = $this->createReservationPaymentContext();
+
+        $context['reservation']->contract()->update([
+            'status' => 'generated',
+            'docusign_status' => 'generated',
+            'completed_at' => null,
+        ]);
+        $context['flightRequest']->update([
+            'workflow_status' => 'contrato pendiente',
+        ]);
+
+        $this->createConflictingAvailabilityBlock($context);
+
+        $this->withHeader('Authorization', 'Bearer '.$context['token'])
+            ->postJson('/api/v1/cliente/reservas/'.$context['reservation']->id.'/contrato/generar')
+            ->assertOk()
+            ->assertJsonPath('contract.id', $context['reservation']->contract->id)
+            ->assertJsonPath('contract.status', 'generated');
+    }
+
     public function test_docusign_webhook_without_hmac_is_rejected(): void
     {
         config()->set('services.docusign.webhook_secret', 'test-secret');
@@ -274,5 +322,53 @@ class ClientPaymentSecurityTest extends TestCase
         $token = TokenApi::issue($user, 'test-client-payment');
 
         return compact('user', 'token', 'provider', 'aircraft', 'flightRequest', 'reservation');
+    }
+
+    /**
+     * @param  array{user: Usuario, provider: Proveedor, aircraft: Aeronave, flightRequest: SolicitudVuelo}  $context
+     */
+    private function createConflictingAvailabilityBlock(array $context): void
+    {
+        $otherClient = Usuario::factory()->create([
+            'role' => Usuario::ROLE_CLIENT,
+            'status' => 'active',
+        ]);
+
+        $otherFlightRequest = SolicitudVuelo::query()->create([
+            'client_id' => $otherClient->id,
+            'origin' => 'MMMX',
+            'destination' => 'MMUN',
+            'departure_datetime' => $context['flightRequest']->departure_datetime->copy(),
+            'departure_date' => $context['flightRequest']->departure_datetime->format('Y-m-d'),
+            'departure_time' => $context['flightRequest']->departure_datetime->format('H:i'),
+            'passengers' => 2,
+            'trip_type' => 'one_way',
+            'assigned_provider_id' => $context['provider']->id,
+            'assigned_aircraft_id' => $context['aircraft']->id,
+            'final_price' => 12000,
+            'currency' => 'USD',
+            'status' => 'reserved',
+        ]);
+
+        $otherReservation = Reserva::query()->create([
+            'client_id' => $otherClient->id,
+            'provider_id' => $context['provider']->id,
+            'aircraft_id' => $context['aircraft']->id,
+            'flight_request_id' => $otherFlightRequest->id,
+            'reservation_code' => 'PV-CONFLICT-001',
+            'status' => 'pending_payment',
+            'total_amount' => 12000,
+            'currency' => 'USD',
+        ]);
+
+        AircraftAvailabilityBlock::query()->create([
+            'aircraft_id' => $context['aircraft']->id,
+            'reservation_id' => $otherReservation->id,
+            'block_type' => 'booked',
+            'status' => 'active',
+            'start_datetime' => $context['flightRequest']->departure_datetime->copy()->subHour(),
+            'end_datetime' => $context['flightRequest']->departure_datetime->copy()->addHours(2),
+            'reason' => 'Conflicto posterior a la generacion del contrato',
+        ]);
     }
 }

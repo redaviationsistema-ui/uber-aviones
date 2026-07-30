@@ -27,7 +27,7 @@ final class FlightDurationService
         $directHours = $distanceNm / $speedKnots;
         $climbMinutes = $this->climbDescentMinutes($aircraft, $origin, $destination);
         $operationalMinutes = max(
-            ($directHours * 60 * $this->operationalFactor($aircraft)) + $this->fixedMinutes($aircraft),
+            ($directHours * 60 * $this->operationalFactor($aircraft)) + $this->fixedMinutes($aircraft) + $climbMinutes,
             $this->minimumMinutes($aircraft),
         );
         $operationalHours = round($operationalMinutes / 60, 4);

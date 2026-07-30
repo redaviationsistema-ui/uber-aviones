@@ -239,7 +239,7 @@ class ReservaControlador extends ControladorBase
 
                 abort_if($amount <= 0, 422, 'La solicitud no tiene un monto valido para crear la reserva.');
 
-                $this->ensureReservationAircraftAvailability(
+                $this->ensureAircraftAvailableForContractEntry(
                     (int) ($acceptedQuote?->aircraft_id ?? $flightRequest->assigned_aircraft_id),
                     $flightRequest
                 );
@@ -257,7 +257,7 @@ class ReservaControlador extends ControladorBase
                 ]);
             }
 
-            $this->ensureReservationAircraftAvailability((int) $reservation->aircraft_id, $flightRequest);
+            $this->ensureReservationAircraftAvailabilityForContractStage($reservation, $flightRequest);
 
             $flightRequest->update([
                 'status' => 'reserved',
@@ -385,6 +385,142 @@ class ReservaControlador extends ControladorBase
         ], 409));
     }
 
+    private function ensureAircraftAvailableForContractEntry(int $aircraftId, ?SolicitudVuelo $flightRequest): void
+    {
+        if ($aircraftId <= 0 || ! $flightRequest) {
+            return;
+        }
+
+        [$requestedStart, $requestedEnd] = $this->aircraftAvailabilityService->resolveOperationalFlightRequestWindow(
+            $flightRequest
+        );
+
+        $conflictingBlock = $this->aircraftAvailabilityService->findConflictingAvailabilityBlock(
+            aircraftId: $aircraftId,
+            requestedStart: $requestedStart,
+            requestedEnd: $requestedEnd,
+        );
+
+        if (! $conflictingBlock) {
+            return;
+        }
+
+        throw new HttpResponseException(response()->json([
+            'success' => false,
+            'code' => 'AIRCRAFT_ALREADY_RESERVED',
+            'message' => 'Esta aeronave acaba de ser reservada para ese horario.',
+            'conflicting_reservation_id' => $conflictingBlock->reservation_id,
+            'conflicting_block_id' => $conflictingBlock->id,
+            'aircraft_id' => $aircraftId,
+        ], 409));
+    }
+
+    private function ensureReservationAircraftAvailabilityForContractStage(
+        Reserva $reservation,
+        ?SolicitudVuelo $flightRequest
+    ): void {
+        if ($this->reservationHasLockedContractFlow($reservation, $flightRequest) && ! $this->reservationHasOwnOperationalBlock($reservation)) {
+            return;
+        }
+
+        $this->lockReservationAircraftForContract($reservation);
+    }
+
+    private function ensureContractFlowAvailability(Reserva $reservation): void
+    {
+        $reservation->loadMissing(['contract', 'flightRequest']);
+
+        if (
+            $this->reservationHasLockedContractFlow($reservation, $reservation->flightRequest)
+            && ! $this->reservationHasOwnOperationalBlock($reservation)
+        ) {
+            return;
+        }
+
+        $this->lockReservationAircraftForContract($reservation);
+    }
+
+    private function reservationHasLockedContractFlow(
+        Reserva $reservation,
+        ?SolicitudVuelo $flightRequest = null
+    ): bool {
+        $contract = $reservation->relationLoaded('contract') ? $reservation->contract : $reservation->contract()->first();
+        $normalizedContractStatus = strtolower(trim((string) ($contract?->status ?? '')));
+        $normalizedDocuSignStatus = strtolower(trim((string) ($contract?->docusign_status ?? '')));
+        $normalizedWorkflowStatus = strtolower(trim((string) ($flightRequest?->workflow_status ?? $reservation->flightRequest?->workflow_status ?? '')));
+
+        if (in_array($normalizedContractStatus, ['generated', 'sent', 'completed', 'signed'], true)) {
+            return true;
+        }
+
+        if (in_array($normalizedDocuSignStatus, ['sent', 'completed'], true)) {
+            return true;
+        }
+
+        return in_array($normalizedWorkflowStatus, [
+            'contract_pending',
+            'contrato pendiente',
+            'in_contract',
+            'en contrato',
+            'firma pendiente',
+            'contract_signed',
+            'contrato firmado',
+            'payment_pending',
+            'payment_confirmed',
+            'flight_confirmed',
+            'tracking_live',
+            'completed',
+        ], true);
+    }
+
+    private function reservationHasOwnOperationalBlock(Reserva $reservation): bool
+    {
+        $reservation->loadMissing('aircraftAvailabilityBlock');
+        $block = $reservation->aircraftAvailabilityBlock;
+        if (! $block) {
+            return false;
+        }
+
+        return in_array(strtolower(trim((string) ($block->status ?? ''))), ['held', 'active', 'booked'], true);
+    }
+
+    private function lockReservationAircraftForContract(Reserva $reservation): void
+    {
+        try {
+            $this->aircraftAvailabilityService->lockAircraftForContractPending($reservation);
+        } catch (RuntimeException $exception) {
+            $this->throwAircraftAlreadyReservedConflict($reservation, $exception);
+        }
+    }
+
+    private function throwAircraftAlreadyReservedConflict(Reserva $reservation, RuntimeException $exception): never
+    {
+        $reservation->loadMissing(['flightRequest', 'aircraft']);
+        [$requestedStart, $requestedEnd] = $this->aircraftAvailabilityService->resolveContractReservationWindow(
+            $reservation,
+            $reservation->aircraft
+        );
+        $conflictingBlock = $this->aircraftAvailabilityService->findConflictingAvailabilityBlock(
+            aircraftId: (int) $reservation->aircraft_id,
+            requestedStart: $requestedStart,
+            requestedEnd: $requestedEnd,
+            ignoreReservationId: $reservation->id,
+            ignoreBlockIds: [],
+            ignoreQuoteId: $reservation->quote_id ? (int) $reservation->quote_id : null,
+        );
+
+        throw new HttpResponseException(response()->json([
+            'success' => false,
+            'code' => 'AIRCRAFT_ALREADY_RESERVED',
+            'message' => 'Esta aeronave acaba de ser reservada para ese horario.',
+            'conflicting_reservation_id' => $conflictingBlock?->reservation_id,
+            'conflicting_block_id' => $conflictingBlock?->id,
+            'aircraft_id' => $reservation->aircraft_id,
+            'registration' => $reservation->aircraft?->registration,
+            'detail' => $exception->getMessage(),
+        ], 409));
+    }
+
     public function showContract(Request $request, mixed $reservation, DocuSignServicio $docuSignServicio)
     {
         $reservation = $this->resolveReservation($reservation);
@@ -414,6 +550,7 @@ class ReservaControlador extends ControladorBase
     {
         $reservation = $this->resolveReservation($reservation);
         $this->authorizeReservationClient($request, $reservation);
+        $this->ensureContractFlowAvailability($reservation);
 
         return $this->idempotencyService->replayOrRun(
             $request,
@@ -644,6 +781,7 @@ class ReservaControlador extends ControladorBase
         ]);
 
         $shouldRegenerate = (bool) ($data['regenerate'] ?? false);
+        $this->ensureContractFlowAvailability($reservation);
         $contract = $this->buildReservationContract($reservation, $shouldRegenerate);
         $termsSnapshot = is_array($contract->terms_snapshot) ? $contract->terms_snapshot : [];
 
