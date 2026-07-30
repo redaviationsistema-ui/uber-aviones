@@ -60,11 +60,13 @@ class ClientAccessBillingControlador extends ControladorBase
 
         $user = $request->user()->fresh();
         $data = $request->validate([
+            'intent' => ['nullable', 'string', 'in:checkout,manage'],
             'success_url' => ['nullable', 'string', 'max:2048'],
             'cancel_url' => ['nullable', 'string', 'max:2048'],
             'return_url' => ['nullable', 'string', 'max:2048'],
             'contact_email' => ['nullable', 'string', 'max:255'],
         ]);
+        $intent = strtolower((string) ($data['intent'] ?? 'checkout'));
         $contactEmail = $request->input('contact_email')
             ?: $request->user()?->email;
 
@@ -80,15 +82,25 @@ class ClientAccessBillingControlador extends ControladorBase
         $this->assertAllowedReturnUrl($data['cancel_url'] ?? null);
         $this->assertAllowedReturnUrl($data['return_url'] ?? null);
 
-        if ($portal = $this->createBillingPortalIfAvailable($user, $data)) {
+        if ($intent === 'manage' && ($portal = $this->createBillingPortalIfAvailable($user, $data))) {
             return $this->ok($portal);
         }
 
-        if ($this->hasBlockingActiveAccess($user)) {
+        if ($this->hasBlockingActiveAccess($user) || $this->hasAnyActiveAccess($user)) {
             return $this->ok([
                 'already_active' => true,
                 'success' => true,
                 'message' => 'El cliente ya cuenta con una suscripcion comercial activa.',
+                'access' => $this->buildAccessPayload($user),
+                'latest_payment' => $this->serializeAccessPayment($this->latestPaymentForUser($user)),
+            ]);
+        }
+
+        if ($intent !== 'manage' && $this->requiresBillingPortalManagement($user)) {
+            return $this->ok([
+                'success' => true,
+                'management_required' => true,
+                'message' => 'La suscripcion existente debe administrarse desde Facturacion o Metodo de pago.',
                 'access' => $this->buildAccessPayload($user),
                 'latest_payment' => $this->serializeAccessPayment($this->latestPaymentForUser($user)),
             ]);
@@ -667,5 +679,17 @@ class ClientAccessBillingControlador extends ControladorBase
         $renewalWindowStart = now()->copy()->addDays(7)->startOfDay();
 
         return $expiresAt->greaterThan($renewalWindowStart);
+    }
+
+    private function hasAnyActiveAccess(Usuario $user): bool
+    {
+        return (bool) $user->has_paid_access
+            && in_array((string) $user->access_status, ['active', 'past_due'], true);
+    }
+
+    private function requiresBillingPortalManagement(Usuario $user): bool
+    {
+        return (bool) $user->provider_customer_id
+            && in_array((string) $user->access_status, ['active', 'past_due', 'suspended', 'unpaid'], true);
     }
 }
