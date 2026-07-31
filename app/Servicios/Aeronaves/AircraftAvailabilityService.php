@@ -10,6 +10,7 @@ use App\Modelos\SolicitudVuelo;
 use Carbon\Carbon;
 use DateTimeInterface;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
@@ -538,26 +539,13 @@ class AircraftAvailabilityService
     ): bool {
         [$start, $end] = $this->normalizeWindow($requestedStart, $requestedEnd);
 
-        return AircraftAvailabilityBlock::query()
+        return $this->conflictQuery(
+            ignoreReservationId: $ignoreReservationId,
+            ignoreBlockId: $ignoreBlockId,
+            ignoreQuoteId: $ignoreQuoteId,
+            ignoreHoldId: $ignoreHoldId,
+        )
             ->where('aircraft_id', $aircraftId)
-            ->where(function ($query) {
-                $query->whereIn('status', [self::STATUS_BOOKED, self::STATUS_ACTIVE_LEGACY])
-                    ->orWhere(function ($inner) {
-                        $inner->where('status', self::STATUS_HELD)
-                            ->whereNotNull('hold_expires_at')
-                            ->where('hold_expires_at', '>', now());
-                    });
-            })
-            ->when($ignoreReservationId, fn ($query) => $query->where(function ($inner) use ($ignoreReservationId) {
-                $inner->whereNull('reservation_id')
-                    ->orWhere('reservation_id', '!=', $ignoreReservationId);
-            }))
-            ->when($ignoreQuoteId, fn ($query) => $query->where(function ($inner) use ($ignoreQuoteId) {
-                $inner->whereNull('quote_id')
-                    ->orWhere('quote_id', '!=', $ignoreQuoteId);
-            }))
-            ->when($ignoreBlockId, fn ($query) => $query->whereKeyNot($ignoreBlockId))
-            ->when($ignoreHoldId, fn ($query) => $query->whereKeyNot($ignoreHoldId))
             ->where('start_datetime', '<', $end)
             ->where('end_datetime', '>', $start)
             ->exists();
@@ -573,29 +561,127 @@ class AircraftAvailabilityService
     ): ?AircraftAvailabilityBlock {
         [$start, $end] = $this->normalizeWindow($requestedStart, $requestedEnd);
 
-        return AircraftAvailabilityBlock::query()
+        return $this->conflictQuery(
+            ignoreReservationId: $ignoreReservationId,
+            ignoreBlockId: null,
+            ignoreQuoteId: $ignoreQuoteId,
+            ignoreHoldId: null,
+            ignoreBlockIds: $ignoreBlockIds,
+        )
             ->where('aircraft_id', $aircraftId)
-            ->where(function ($query) {
-                $query->whereIn('status', [self::STATUS_BOOKED, self::STATUS_ACTIVE_LEGACY])
-                    ->orWhere(function ($inner) {
-                        $inner->where('status', self::STATUS_HELD)
-                            ->whereNotNull('hold_expires_at')
-                            ->where('hold_expires_at', '>', now());
-                    });
-            })
-            ->when($ignoreReservationId, fn ($query) => $query->where(function ($inner) use ($ignoreReservationId) {
-                $inner->whereNull('reservation_id')
-                    ->orWhere('reservation_id', '!=', $ignoreReservationId);
-            }))
-            ->when($ignoreQuoteId, fn ($query) => $query->where(function ($inner) use ($ignoreQuoteId) {
-                $inner->whereNull('quote_id')
-                    ->orWhere('quote_id', '!=', $ignoreQuoteId);
-            }))
-            ->when(! empty($ignoreBlockIds), fn ($query) => $query->whereKeyNot($ignoreBlockIds))
             ->where('start_datetime', '<', $end)
             ->where('end_datetime', '>', $start)
             ->latest('id')
             ->first();
+    }
+
+    public function buildBatchConflictContext(
+        Collection $aircraftWindows,
+        ?int $ignoreReservationId = null,
+        ?int $ignoreBlockId = null,
+        ?int $ignoreQuoteId = null,
+        ?int $ignoreHoldId = null,
+    ): array {
+        $normalizedWindows = $aircraftWindows
+            ->map(function (array $window): ?array {
+                $aircraftId = (int) ($window['aircraft_id'] ?? 0);
+                if ($aircraftId <= 0) {
+                    return null;
+                }
+
+                [$start, $end] = $this->normalizeWindow(
+                    $window['operational_window_start'] ?? null,
+                    $window['operational_window_end'] ?? null,
+                );
+
+                return [
+                    'aircraft_id' => $aircraftId,
+                    'operational_window_start' => $start,
+                    'operational_window_end' => $end,
+                ];
+            })
+            ->filter()
+            ->values();
+
+        if ($normalizedWindows->isEmpty()) {
+            return [
+                'conflicts_by_aircraft' => [],
+                'candidate_windows' => [],
+                'query_count' => 0,
+            ];
+        }
+
+        $aircraftIds = $normalizedWindows->pluck('aircraft_id')->unique()->values();
+        /** @var Carbon $minimumStart */
+        $minimumStart = $normalizedWindows->min('operational_window_start');
+        /** @var Carbon $maximumEnd */
+        $maximumEnd = $normalizedWindows->max('operational_window_end');
+
+        $conflicts = $this->conflictQuery(
+            ignoreReservationId: $ignoreReservationId,
+            ignoreBlockId: $ignoreBlockId,
+            ignoreQuoteId: $ignoreQuoteId,
+            ignoreHoldId: $ignoreHoldId,
+        )
+            ->select([
+                'id',
+                'aircraft_id',
+                'reservation_id',
+                'quote_id',
+                'status',
+                'hold_expires_at',
+                'start_datetime',
+                'end_datetime',
+            ])
+            ->whereIn('aircraft_id', $aircraftIds->all())
+            ->where('start_datetime', '<', $maximumEnd)
+            ->where('end_datetime', '>', $minimumStart)
+            ->orderBy('aircraft_id')
+            ->orderBy('start_datetime')
+            ->get()
+            ->groupBy('aircraft_id')
+            ->map(fn (Collection $blocks) => $blocks->values()->all())
+            ->all();
+
+        return [
+            'conflicts_by_aircraft' => $conflicts,
+            'candidate_windows' => $normalizedWindows
+                ->map(function (array $window): array {
+                    return [
+                        'aircraft_id' => $window['aircraft_id'],
+                        'operational_window_start' => $window['operational_window_start']->toISOString(),
+                        'operational_window_end' => $window['operational_window_end']->toISOString(),
+                    ];
+                })
+                ->values()
+                ->all(),
+            'query_count' => 1,
+        ];
+    }
+
+    public function batchContextHasConflict(
+        array $batchContext,
+        int $aircraftId,
+        $requestedStart,
+        $requestedEnd,
+    ): bool {
+        [$start, $end] = $this->normalizeWindow($requestedStart, $requestedEnd);
+        $blocks = $batchContext['conflicts_by_aircraft'][$aircraftId] ?? [];
+
+        foreach ($blocks as $block) {
+            $blockStart = $this->toCarbon($block['start_datetime'] ?? null);
+            $blockEnd = $this->toCarbon($block['end_datetime'] ?? null);
+
+            if (! $blockStart || ! $blockEnd) {
+                continue;
+            }
+
+            if ($blockStart->lt($end) && $blockEnd->gt($start)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public function ensureAircraftAvailable(
@@ -619,14 +705,8 @@ class AircraftAvailabilityService
         [$start, $end] = $this->normalizeWindow($requestedStart, $requestedEnd);
 
         return $query->whereDoesntHave('availabilityBlocks', function (Builder $builder) use ($start, $end) {
-            $builder->where(function ($query) {
-                $query->whereIn('status', [self::STATUS_BOOKED, self::STATUS_ACTIVE_LEGACY])
-                    ->orWhere(function ($inner) {
-                        $inner->where('status', self::STATUS_HELD)
-                            ->whereNotNull('hold_expires_at')
-                            ->where('hold_expires_at', '>', now());
-                    });
-            })->where('start_datetime', '<', $end)
+            $this->applyBlockingStatusScope($builder)
+                ->where('start_datetime', '<', $end)
                 ->where('end_datetime', '>', $start);
         });
     }
@@ -1105,7 +1185,7 @@ class AircraftAvailabilityService
 
     private function resolvePaidReservationWindow(Reserva $reservation, int $aircraftId): array
     {
-        [$start, $end] = $this->resolveContractReservationWindow($reservation, $reservation->aircraft);
+        [$start, $end] = $this->resolveReservationWindow($reservation);
 
         $matchingHold = AircraftAvailabilityBlock::query()
             ->where('aircraft_id', $aircraftId)
@@ -1191,6 +1271,62 @@ class AircraftAvailabilityService
         }
 
         return [$start, $end];
+    }
+
+    private function conflictQuery(
+        ?int $ignoreReservationId = null,
+        ?int $ignoreBlockId = null,
+        ?int $ignoreQuoteId = null,
+        ?int $ignoreHoldId = null,
+        array $ignoreBlockIds = [],
+    ): Builder {
+        $query = AircraftAvailabilityBlock::query();
+
+        $this->applyBlockingStatusScope($query);
+        $this->applyConflictExclusions(
+            $query,
+            $ignoreReservationId,
+            $ignoreBlockId,
+            $ignoreQuoteId,
+            $ignoreHoldId,
+            $ignoreBlockIds,
+        );
+
+        return $query;
+    }
+
+    private function applyBlockingStatusScope(Builder $query): Builder
+    {
+        return $query->where(function ($builder) {
+            $builder->whereIn('status', [self::STATUS_BOOKED, self::STATUS_ACTIVE_LEGACY])
+                ->orWhere(function ($inner) {
+                    $inner->where('status', self::STATUS_HELD)
+                        ->whereNotNull('hold_expires_at')
+                        ->where('hold_expires_at', '>', now());
+                });
+        });
+    }
+
+    private function applyConflictExclusions(
+        Builder $query,
+        ?int $ignoreReservationId = null,
+        ?int $ignoreBlockId = null,
+        ?int $ignoreQuoteId = null,
+        ?int $ignoreHoldId = null,
+        array $ignoreBlockIds = [],
+    ): Builder {
+        return $query
+            ->when($ignoreReservationId, fn ($builder) => $builder->where(function ($inner) use ($ignoreReservationId) {
+                $inner->whereNull('reservation_id')
+                    ->orWhere('reservation_id', '!=', $ignoreReservationId);
+            }))
+            ->when($ignoreQuoteId, fn ($builder) => $builder->where(function ($inner) use ($ignoreQuoteId) {
+                $inner->whereNull('quote_id')
+                    ->orWhere('quote_id', '!=', $ignoreQuoteId);
+            }))
+            ->when($ignoreBlockId, fn ($builder) => $builder->whereKeyNot($ignoreBlockId))
+            ->when($ignoreHoldId, fn ($builder) => $builder->whereKeyNot($ignoreHoldId))
+            ->when(! empty($ignoreBlockIds), fn ($builder) => $builder->whereKeyNot($ignoreBlockIds));
     }
 
     private function applyOperationalWindowPadding(

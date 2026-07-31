@@ -173,16 +173,27 @@ class CanonicalAirportResolutionTest extends TestCase
         );
     }
 
-    public function test_preview_only_returns_aircraft_with_a_canonical_base_at_origin(): void
+    public function test_preview_prefers_exact_base_matches_and_falls_back_to_repositioning_when_needed(): void
     {
         $this->seed();
         $origin = Aeropuerto::query()->where('icao', 'MMTO')->first()
             ?? $this->airport('MMTO', 'TLC');
         $destination = Aeropuerto::query()->where('icao', 'MMMM')->first()
             ?? $this->airport('MMMM', 'MLM', 19.8499, -101.0250);
+        $origin->forceFill(['latitude' => 19.3, 'longitude' => -99.5, 'status' => 'active'])->save();
+        $destination->forceFill(['latitude' => 19.8499, 'longitude' => -101.0250, 'status' => 'active'])->save();
         $aircraft = Aeronave::query()->where('hourly_rate', '>', 0)->get();
         $local = $aircraft->firstOrFail();
         $repositioned = $aircraft->skip(1)->firstOrFail();
+        $aircraft
+            ->reject(fn (Aeronave $candidate) => in_array($candidate->id, [$local->id, $repositioned->id], true))
+            ->each(function (Aeronave $candidate) use ($destination): void {
+                $candidate->forceFill([
+                    'base_airport' => $destination->icao,
+                    'base_airport_id' => $destination->id,
+                    'status' => 'inactive',
+                ])->save();
+            });
 
         $local->forceFill([
             'base_airport' => 'TOLUCA',
@@ -191,6 +202,16 @@ class CanonicalAirportResolutionTest extends TestCase
         $repositioned->forceFill([
             'base_airport' => $destination->icao,
             'base_airport_id' => $destination->id,
+            'status' => 'active',
+            'capacity' => max((int) ($repositioned->capacity ?? 0), 2),
+            'range_km' => max((int) ($repositioned->range_km ?? 0), 3000),
+            'speed_kmh' => max((int) ($repositioned->speed_kmh ?? 0), 650),
+            'hourly_rate' => max((float) ($repositioned->hourly_rate ?? 0), 6500),
+        ])->save();
+        $repositioned->provider?->forceFill([
+            'approval_status' => 'approved',
+            'admin_validation_status' => 'approved',
+            'status' => 'active',
         ])->save();
 
         $response = $this->postJson('/api/v1/client/quotes/preview', [
@@ -230,10 +251,17 @@ class CanonicalAirportResolutionTest extends TestCase
             'limit' => 24,
         ])->assertOk();
 
-        $this->assertNotContains(
-            $local->id,
-            collect($inactiveResponse->json('matches'))->pluck('aircraft_id')->all(),
-        );
+        $inactiveMatches = collect($inactiveResponse->json('matches'));
+        $repositionedFallback = $inactiveMatches->firstWhere('aircraft_id', $repositioned->id);
+
+        $this->assertNotContains($local->id, $inactiveMatches->pluck('aircraft_id')->all());
+        $this->assertNotNull($repositionedFallback);
+        $this->assertFalse($repositionedFallback['based_at_origin']);
+        $this->assertTrue($repositionedFallback['requires_repositioning']);
+        $this->assertSame($destination->id, data_get($repositionedFallback, 'aircraft_base_airport.id'));
+        $this->assertGreaterThan(0, (float) data_get($repositionedFallback, 'repositioning.distance_nm'));
+        $this->assertSame(0.0, (float) data_get($repositionedFallback, 'return_to_base.distance_nm'));
+        $this->assertGreaterThan(0, (float) data_get($repositionedFallback, 'pricing.repositioning_cost'));
     }
 
     public function test_preview_reconciles_a_stale_duplicate_destination_id(): void

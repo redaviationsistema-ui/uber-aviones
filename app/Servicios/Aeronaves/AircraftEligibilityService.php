@@ -30,9 +30,9 @@ final class AircraftEligibilityService
     public function evaluate(Aeronave|int $aircraft, array $context): array
     {
         $resolved = $aircraft instanceof Aeronave
-            ? $aircraft->loadMissing(['provider', 'documents', 'availability', 'availabilityBlocks', 'baseAirport'])
+            ? $aircraft->loadMissing(['provider', 'documents', 'baseAirport'])
             : Aeronave::query()
-                ->with(['provider', 'documents', 'availability', 'availabilityBlocks', 'baseAirport'])
+                ->with(['provider', 'documents', 'baseAirport'])
                 ->find($aircraft);
         $reasons = [];
         $warnings = [];
@@ -155,7 +155,12 @@ final class AircraftEligibilityService
         $start = $context['requested_start'] ?? null;
         $end = $context['requested_end'] ?? null;
         $temporallyAvailable = true;
-        if (array_key_exists('temporally_available', $context)) {
+        if (array_key_exists('precomputed_availability_conflict', $context)) {
+            $temporallyAvailable = ! (bool) $context['precomputed_availability_conflict'];
+            if (! $temporallyAvailable) {
+                $reasons[] = 'AIRCRAFT_NOT_AVAILABLE';
+            }
+        } elseif (array_key_exists('temporally_available', $context)) {
             $temporallyAvailable = (bool) $context['temporally_available'];
             if (! $temporallyAvailable) {
                 $reasons[] = 'AIRCRAFT_NOT_AVAILABLE';
@@ -166,13 +171,17 @@ final class AircraftEligibilityService
                 $start,
                 $end,
                 $context['reservation_id'] ?? null,
+                $context['block_id'] ?? null,
                 $context['quote_id'] ?? null,
+                $context['hold_id'] ?? null,
             );
             if (! $temporallyAvailable) {
                 $reasons[] = 'AIRCRAFT_NOT_AVAILABLE';
             }
         }
-        $rules['availability_checked'] = array_key_exists('temporally_available', $context) || (bool) ($start && $end);
+        $rules['availability_checked'] = array_key_exists('precomputed_availability_conflict', $context)
+            || array_key_exists('temporally_available', $context)
+            || (bool) ($start && $end);
 
         return $this->result($resolved, $context, $reasons, $warnings, $rules, $temporallyAvailable);
     }

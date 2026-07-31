@@ -16,6 +16,7 @@ use App\Modelos\TokenApi;
 use App\Modelos\Usuario;
 use App\Servicios\Aeronaves\AircraftAvailabilityService;
 use App\Servicios\Aeronaves\AircraftEligibilityService;
+use App\Servicios\Aeronaves\AircraftRepositioningService;
 use App\Servicios\Billing\BillingPlanServicio;
 use App\Servicios\Pagos\PaymentFeeCalculationServicio;
 use App\Servicios\RedAviation\MatchingRedAviationServicio;
@@ -161,6 +162,7 @@ class ClienteControlador extends ControladorBase
     public function __construct(
         private readonly AircraftAvailabilityService $aircraftAvailabilityService,
         private readonly AircraftEligibilityService $aircraftEligibilityService,
+        private readonly AircraftRepositioningService $aircraftRepositioningService,
         private readonly BillingPlanServicio $billingPlanServicio,
         private readonly MatchingRedAviationServicio $matchingServicio,
         private readonly VisibilidadServicio $visibilidadServicio,
@@ -311,6 +313,7 @@ class ClienteControlador extends ControladorBase
 
     public function previewQuotes(Request $request): JsonResponse
     {
+        $previewStartedAt = microtime(true);
         $user = $this->resolveOptionalApiUser($request);
         $commercialGate = null;
 
@@ -425,13 +428,12 @@ class ClienteControlador extends ControladorBase
             ...$data,
             'legs' => $legs,
         ]);
+        $loadCandidatesStartedAt = microtime(true);
         $aircraftQuery = Aeronave::query()
             ->with([
                 'images:id,aircraft_id,kind,title,image_url,is_main,sort_order,visible_to_client',
                 'provider',
                 'documents',
-                'availability',
-                'availabilityBlocks',
                 'baseAirport',
             ])
             ->where('hourly_rate', '>', 0);
@@ -440,7 +442,7 @@ class ClienteControlador extends ControladorBase
             $requestedStart,
             $requestedEnd,
         );
-        $quotes = $aircraftQuery
+        $candidateAircraft = $aircraftQuery
             ->when(! empty($data['origin']), function ($query) use ($data) {
                 $origin = strtoupper(trim((string) $data['origin']));
                 $query->orderByRaw(
@@ -450,159 +452,162 @@ class ClienteControlador extends ControladorBase
             })
             ->orderByRaw('coalesce(hourly_rate, 0) asc')
             ->limit(max($quotesLimit * 8, 100))
-            ->get()
-            ->filter(function (Aeronave $aircraft) use ($canonicalRoute, $data, $passengers, $requestedStart, $requestedEnd, $originAirport) {
-                if (! $this->aircraftIsBasedAtOrigin($aircraft, $originAirport)) {
-                    logger()->info('Aircraft excluded because its canonical base does not match the requested origin', [
-                        'aircraft_id' => $aircraft->id,
-                        'aircraft_base_airport_id' => $aircraft->base_airport_id,
-                        'aircraft_base_airport' => $aircraft->resolvedBaseAirportCode() ?? $aircraft->base_airport,
-                        'origin_airport_id' => $originAirport->id,
-                        'origin_icao' => $originAirport->icao,
-                        'reason_code' => 'BASE_AIRPORT_MISMATCH',
-                    ]);
+            ->get();
+        $loadCandidatesMs = round((microtime(true) - $loadCandidatesStartedAt) * 1000, 2);
 
-                    return false;
-                }
-
-                $eligibility = $this->aircraftEligibilityService->evaluate($aircraft, [
-                    'route' => $canonicalRoute,
-                    'passengers' => $passengers,
-                    'trip_type' => $canonicalRoute['trip_type'],
-                    'preference' => $data['aircraft_type'] ?? null,
-                    'requested_start' => $requestedStart,
-                    'requested_end' => $requestedEnd,
-                    'temporally_available' => true,
-                ]);
-
-                if (! $eligibility['eligible']) {
-                    logger()->info('Aircraft excluded by canonical eligibility', [
-                        'aircraft_id' => $aircraft->id,
-                        'reason_codes' => $eligibility['reason_codes'],
-                        'rule_version' => $eligibility['rule_version'],
-                    ]);
-                }
-
-                return $eligibility['eligible'];
-            })
-            ->map(function (Aeronave $aircraft) use ($canonicalRoute, $data, $distanceKm, $distanceNm, $legs, $tripType, $originAirport) {
-                $pricing = $this->previewPricingForAircraft($aircraft, $tripType, $legs, $data, $canonicalRoute);
-                $currency = $aircraft->currency ?: 'USD';
-                $baseAirportCode = $aircraft->resolvedBaseAirportCode() ?? $aircraft->base_airport;
-                $basedAtOrigin = $this->aircraftIsBasedAtOrigin($aircraft, $originAirport);
-                $requiresRepositioning = ! $basedAtOrigin && (float) $pricing['repositioning_hours'] > 0;
-
-                $clientDisplayHours = round($pricing['client_display_flight_hours'], 2);
-                $clientOperationalHours = round($pricing['client_operational_flight_hours'], 2);
-                $clientDirectHours = round($pricing['client_direct_flight_hours'], 2);
-                $cardTime = $this->formatHours($pricing['client_display_flight_hours']);
-
-                return [
-                    'id' => 'preview-'.$aircraft->id,
-                    'aircraft_id' => $aircraft->id,
-                    'aircraft_name' => $aircraft->model,
-                    'model' => $aircraft->model,
-                    'cabin' => $this->normalizeAircraftCategory($aircraft->category) ?? 'Jet privado',
-                    'capacity' => $aircraft->capacity,
-                    'time' => $cardTime,
-                    'card_time' => $cardTime,
-                    'display_time' => $cardTime,
-                    'ui_time' => $cardTime,
-                    'trip_time' => $cardTime,
-                    'operative_time' => $this->formatHours($pricing['client_operational_flight_hours']),
-                    'billed_time' => $this->formatHours($pricing['total_billed_hours']),
-                    'repositioning_time' => $this->formatHours($pricing['repositioning_hours']),
-                    'return_to_base_time' => $this->formatHours($pricing['return_to_base_hours']),
-                    'flight_time' => $cardTime,
-                    'display_flight_hours' => $clientDisplayHours,
-                    'client_display_flight_hours' => $clientDisplayHours,
-                    'card_flight_hours' => $clientDisplayHours,
-                    'ui_flight_hours' => $clientDisplayHours,
-                    'trip_flight_hours' => $clientDisplayHours,
-                    'operational_flight_hours' => $clientOperationalHours,
-                    'client_operational_flight_hours' => $clientOperationalHours,
-                    'distance_km' => round($distanceKm),
-                    'distance_nm' => round($distanceNm),
-                    'estimated_hours' => $clientDirectHours,
-                    'real_flight_hours' => $clientDisplayHours,
-                    'climb_descent_minutes' => (int) round($pricing['client_climb_descent_minutes']),
-                    'climb_descent_hours' => round($pricing['client_climb_descent_hours'], 2),
-                    'billable_hours' => round($pricing['total_billed_hours'], 2),
-                    'billable_minutes' => round($pricing['billable_minutes'], 2),
-                    'final_hours' => round($pricing['total_billed_hours'], 2),
-                    'hourly_rate' => round($pricing['hourly_rate'], 2),
-                    'price_per_minute' => round($pricing['price_per_minute'], 2),
-                    'minimum_hours' => round($pricing['minimum_hours'], 2),
-                    'minimum_route_price' => round($pricing['minimum_route_price'], 2),
-                    'minimum_adjustment' => round($pricing['minimum_adjustment'], 2),
-                    'base_cost' => round($pricing['base_price'], 2),
-                    'client_flight_cost' => round($pricing['client_flight_cost'], 2),
-                    'repositioning_hours' => round($pricing['repositioning_hours'], 2),
-                    'return_to_base_hours' => round($pricing['return_to_base_hours'], 2),
-                    'overnight_hours' => round($pricing['overnight_hours'], 2),
-                    'repositioning_cost' => round($pricing['initial_repositioning_cost'], 2),
-                    'return_to_base_cost' => round($pricing['return_to_base_cost'], 2),
-                    'overnight_cost' => round($pricing['overnight_cost'], 2),
-                    'airport_expenses' => round($pricing['airport_expenses'], 2),
-                    'base_price_formula' => $pricing['base_price_formula'],
-                    'priority_factor' => 1,
-                    'subtotal_before_margin' => round($pricing['subtotal_before_margin'], 2),
-                    'margin_percentage' => round($pricing['margin_percentage'], 2),
-                    'margin_amount' => round($pricing['margin_amount'], 2),
-                    'flight_cost' => round($pricing['flight_cost'], 2),
-                    'stripe_fee' => round($pricing['stripe_fee'], 2),
-                    'administrative_fee' => round($pricing['administrative_fee'], 2),
-                    'total_amount' => round($pricing['total_amount'], 2),
-                    'quoted_total' => round($pricing['total_amount'], 2),
-                    'overnight_fee' => round($pricing['overnight_fee'], 2),
-                    'jet_a_price' => round($pricing['jet_a_price'], 2),
-                    'segment_count' => max(count($pricing['client_legs']), 1),
-                    'subtotal' => round($pricing['subtotal'], 2),
-                    'utility' => 0,
-                    'margin' => 0,
-                    'taxes' => round($pricing['tax'], 2),
-                    'total' => round($pricing['total_amount'], 2),
-                    'currency' => $currency,
-                    'final_price' => $this->formatMoney($pricing['total_amount'], $currency),
-                    'debug_pricing' => $pricing['debug_pricing'],
-                    'pricing_breakdown' => $pricing,
-                    'pricing' => [
-                        'total_amount' => round($pricing['total_amount'], 2),
-                        'currency' => $currency,
-                    ],
-                    'source_origin' => $baseAirportCode,
-                    'base_airport_id' => $aircraft->base_airport_id,
-                    'base_airport_code' => $baseAirportCode,
-                    'base_airport_name' => $aircraft->baseAirport?->name,
-                    'base_airport_city' => $aircraft->baseAirport?->city,
-                    'based_at_origin' => $basedAtOrigin,
-                    'base_airport_match' => $basedAtOrigin,
-                    'requires_repositioning' => $requiresRepositioning,
-                    'match_reason' => $this->matchReason($basedAtOrigin, $baseAirportCode),
-                    'response_time' => $this->responseTime($basedAtOrigin),
-                    'provider' => [
-                        'id' => $aircraft->provider?->id,
-                        'company_name' => $aircraft->provider?->company_name,
-                        'commercial_name' => $aircraft->provider?->commercial_name,
-                        'jet_a_price' => round($pricing['jet_a_price'], 2),
-                    ],
-                    'ui_hints' => [
-                        'time_field' => 'card_time',
-                        'time_hours_field' => 'card_flight_hours',
-                        'time_source' => 'client_display_flight_hours',
-                        'time_display_mode' => $pricing['time_display_mode'],
-                        'billing_hours_mode' => $pricing['billing_hours_mode'],
-                        'time_excludes_repositioning' => true,
-                        'billed_time_includes_repositioning' => true,
-                    ],
-                    'aircraft' => $this->aircraftPreviewPayload($aircraft),
-                ];
-            })
-            ->sortBy([
-                fn (array $quote) => $quote['total'],
-            ])
-            ->take($quotesLimit)
+        $exactCandidates = $candidateAircraft
+            ->filter(fn (Aeronave $aircraft) => $this->aircraftIsBasedAtOrigin($aircraft, $originAirport))
             ->values();
+        Log::info('quote_preview_candidate_count', [
+            'route_signature' => $canonicalRoute['route_signature'] ?? null,
+            'preview_candidate_count' => $candidateAircraft->count(),
+            'preview_exact_candidate_count' => $exactCandidates->count(),
+            'load_candidates_ms' => $loadCandidatesMs,
+        ]);
+
+        Log::info('quote_preview_exact_candidates', [
+            'route_signature' => $canonicalRoute['route_signature'] ?? null,
+            'origin_airport_id' => $originAirport->id,
+            'count' => $exactCandidates->count(),
+            'aircraft_ids' => $exactCandidates->pluck('id')->values()->all(),
+        ]);
+
+        $exactQuoteBuild = $this->buildPreviewQuotesForCandidates(
+            $exactCandidates,
+            $canonicalRoute,
+            $data,
+            $passengers,
+            $requestedStart,
+            $requestedEnd,
+            $distanceKm,
+            $distanceNm,
+            $legs,
+            $tripType,
+            $originAirport,
+            false,
+        );
+        $availabilityQueryCount = (int) ($exactQuoteBuild['metrics']['availability_query_count'] ?? 0);
+        $quotes = $exactQuoteBuild['quotes']->sortBy([
+            fn (array $quote) => $quote['total'],
+            fn (array $quote) => $quote['aircraft_id'],
+        ])->take($quotesLimit)->values();
+
+        $selectedRadiusNm = null;
+        $repositioningMs = 0.0;
+        $nearbyPreparedCandidates = collect();
+        if ($quotes->isEmpty()) {
+            $repositioningStartedAt = microtime(true);
+            $nearbyCandidates = $this->aircraftRepositioningService->nearbyCandidateContexts(
+                $candidateAircraft->reject(fn (Aeronave $aircraft) => $this->aircraftIsBasedAtOrigin($aircraft, $originAirport))->values(),
+                $originAirport,
+                $canonicalRoute,
+            );
+            $repositioningMs = round((microtime(true) - $repositioningStartedAt) * 1000, 2);
+            $nearbyPreparedCandidates = $this->preparePreviewCandidatesForEvaluation(
+                $nearbyCandidates,
+                $requestedStart,
+                $requestedEnd,
+                $originAirport,
+                true,
+                null,
+                $data,
+            );
+            $availabilityQueryCount += (int) ($nearbyPreparedCandidates->first()['availability_query_count'] ?? 0);
+
+            $configuredRadii = $this->aircraftRepositioningService->configuredSearchRadiiNm();
+
+            Log::info('quote_preview_nearby_candidates', [
+                'route_signature' => $canonicalRoute['route_signature'] ?? null,
+                'origin_airport_id' => $originAirport->id,
+                'count' => $nearbyCandidates->count(),
+                'radii_nm' => $configuredRadii,
+                'preview_nearby_candidate_count' => $nearbyPreparedCandidates->count(),
+                'repositioning_ms' => $repositioningMs,
+            ]);
+
+            foreach ($configuredRadii as $radiusNm) {
+                $candidatesWithinRadius = $this->aircraftRepositioningService->withinRadius($nearbyPreparedCandidates, $radiusNm)
+                    ->map(function (array $candidate) use ($radiusNm): array {
+                        $candidate['operational_context']['selected_radius_nm'] = $radiusNm;
+
+                        return $candidate;
+                    })
+                    ->values();
+                if ($candidatesWithinRadius->isEmpty()) {
+                    continue;
+                }
+
+                $radiusQuoteBuild = $this->buildPreviewQuotesForCandidates(
+                    $candidatesWithinRadius,
+                    $canonicalRoute,
+                    $data,
+                    $passengers,
+                    $requestedStart,
+                    $requestedEnd,
+                    $distanceKm,
+                    $distanceNm,
+                    $legs,
+                    $tripType,
+                    $originAirport,
+                    true,
+                    $radiusNm,
+                );
+                $radiusQuotes = $radiusQuoteBuild['quotes']->sortBy([
+                    fn (array $quote) => (float) data_get($quote, 'repositioning.distance_nm', INF),
+                    fn (array $quote) => $quote['total'],
+                    fn (array $quote) => $quote['aircraft_id'],
+                ])->take($quotesLimit)->values();
+
+                if ($radiusQuotes->isNotEmpty()) {
+                    $quotes = $radiusQuotes;
+                    $selectedRadiusNm = $radiusNm;
+                    break;
+                }
+            }
+        }
+
+        if ($selectedRadiusNm !== null) {
+            Log::info('quote_preview_selected_radius_nm', [
+                'route_signature' => $canonicalRoute['route_signature'] ?? null,
+                'selected_radius_nm' => $selectedRadiusNm,
+            ]);
+        }
+
+        Log::info('quote_preview_repositioned_results', [
+            'route_signature' => $canonicalRoute['route_signature'] ?? null,
+            'selected_radius_nm' => $selectedRadiusNm,
+            'matches_returned' => $quotes->count(),
+            'repositioned_aircraft_ids' => $quotes
+                ->filter(fn (array $quote) => (bool) ($quote['requires_repositioning'] ?? false))
+                ->pluck('aircraft_id')
+                ->values()
+                ->all(),
+        ]);
+        Log::info('quote_preview_performance', [
+            'route_signature' => $canonicalRoute['route_signature'] ?? null,
+            'preview_candidate_count' => $candidateAircraft->count(),
+            'preview_exact_candidate_count' => $exactCandidates->count(),
+            'preview_nearby_candidate_count' => $nearbyPreparedCandidates->count(),
+            'preview_selected_radius_nm' => $selectedRadiusNm,
+            'preview_availability_query_count' => $availabilityQueryCount,
+            'preview_eligible_count' => (int) ($exactQuoteBuild['metrics']['eligible_count'] ?? 0)
+                + (int) collect($nearbyPreparedCandidates)->filter(fn (array $candidate) => ! ($candidate['precomputed_availability_conflict'] ?? false))->count(),
+            'preview_priced_count' => $quotes->count(),
+            'load_candidates_ms' => $loadCandidatesMs,
+            'repositioning_ms' => $repositioningMs,
+            'availability_batch_ms' => round(
+                (float) ($exactQuoteBuild['metrics']['availability_batch_ms'] ?? 0)
+                    + (float) ($nearbyPreparedCandidates->first()['availability_batch_ms'] ?? 0),
+                2
+            ),
+            'eligibility_ms' => round((float) ($exactQuoteBuild['metrics']['eligibility_ms'] ?? 0), 2),
+            'pricing_ms' => round((float) ($exactQuoteBuild['metrics']['pricing_ms'] ?? 0), 2),
+        ]);
+
+        Log::info('quote_preview_execution_ms', [
+            'route_signature' => $canonicalRoute['route_signature'] ?? null,
+            'elapsed_ms' => round((microtime(true) - $previewStartedAt) * 1000, 2),
+        ]);
 
         Log::info('Flight quote preview flow completed', [
             'user_id' => $user?->id,
@@ -2082,6 +2087,331 @@ class ClienteControlador extends ControladorBase
             $requestData,
             fn (Aeronave $trustedAircraft, string $trustedTripType, array $trustedLegs, array $trustedInput) => $this->calculateLegacyPricing($trustedAircraft, $trustedTripType, $trustedLegs, $trustedInput),
         );
+    }
+
+    private function buildPreviewQuotesForCandidates(
+        Collection $candidates,
+        array $canonicalRoute,
+        array $requestData,
+        int $passengers,
+        mixed $requestedStart,
+        mixed $requestedEnd,
+        float $distanceKm,
+        float $distanceNm,
+        array $legs,
+        string $tripType,
+        Aeropuerto $originAirport,
+        bool $allowRepositioning,
+        ?int $selectedRadiusNm = null,
+    ): array {
+        $preparedCandidates = $this->preparePreviewCandidatesForEvaluation(
+            $candidates,
+            $requestedStart,
+            $requestedEnd,
+            $originAirport,
+            $allowRepositioning,
+            $selectedRadiusNm,
+            $requestData,
+        );
+
+        $eligibilityMs = 0.0;
+        $pricingMs = 0.0;
+        $eligibleCount = 0;
+        $quotes = $preparedCandidates
+            ->map(function (array $candidate) use (
+                $canonicalRoute,
+                $requestData,
+                $passengers,
+                $distanceKm,
+                $distanceNm,
+                $legs,
+                $tripType,
+                $originAirport,
+                &$eligibilityMs,
+                &$pricingMs,
+                &$eligibleCount,
+            ): ?array {
+                $aircraft = $candidate['aircraft'] ?? null;
+                if (! $aircraft instanceof Aeronave) {
+                    return null;
+                }
+
+                $operationalContext = (array) ($candidate['operational_context'] ?? []);
+                $eligibilityStartedAt = microtime(true);
+                $eligibility = $this->aircraftEligibilityService->evaluate($aircraft, [
+                    'route' => $canonicalRoute,
+                    'passengers' => $passengers,
+                    'trip_type' => $canonicalRoute['trip_type'],
+                    'preference' => $requestData['aircraft_type'] ?? null,
+                    'requested_start' => $candidate['requested_start'] ?? null,
+                    'requested_end' => $candidate['requested_end'] ?? null,
+                    'precomputed_availability_conflict' => (bool) ($candidate['precomputed_availability_conflict'] ?? false),
+                ]);
+                $eligibilityMs += (microtime(true) - $eligibilityStartedAt) * 1000;
+
+                if (! $eligibility['eligible']) {
+                    logger()->info('Aircraft excluded by canonical eligibility', [
+                        'aircraft_id' => $aircraft->id,
+                        'reason_codes' => $eligibility['reason_codes'],
+                        'rule_version' => $eligibility['rule_version'],
+                        'selected_radius_nm' => $operationalContext['selected_radius_nm'] ?? null,
+                    ]);
+
+                    return null;
+                }
+
+                $eligibleCount++;
+                $pricingStartedAt = microtime(true);
+                $quote = $this->buildPreviewQuotePayload(
+                    $aircraft,
+                    $canonicalRoute,
+                    $requestData,
+                    $distanceKm,
+                    $distanceNm,
+                    $legs,
+                    $tripType,
+                    $originAirport,
+                    $operationalContext,
+                );
+                $pricingMs += (microtime(true) - $pricingStartedAt) * 1000;
+
+                return $quote;
+            })
+            ->filter()
+            ->values();
+
+        return [
+            'quotes' => $quotes,
+            'metrics' => [
+                'availability_query_count' => (int) ($preparedCandidates->first()['availability_query_count'] ?? 0),
+                'availability_batch_ms' => round((float) ($preparedCandidates->first()['availability_batch_ms'] ?? 0), 2),
+                'eligible_count' => $eligibleCount,
+                'pricing_count' => $quotes->count(),
+                'eligibility_ms' => round($eligibilityMs, 2),
+                'pricing_ms' => round($pricingMs, 2),
+            ],
+        ];
+    }
+
+    private function preparePreviewCandidatesForEvaluation(
+        Collection $candidates,
+        mixed $requestedStart,
+        mixed $requestedEnd,
+        Aeropuerto $originAirport,
+        bool $allowRepositioning,
+        ?int $selectedRadiusNm,
+        array $requestData,
+    ): Collection {
+        $prepared = $candidates
+            ->map(function (Aeronave|array $candidate) use (
+                $requestedStart,
+                $requestedEnd,
+                $originAirport,
+                $allowRepositioning,
+                $selectedRadiusNm,
+            ): ?array {
+                $aircraft = $candidate instanceof Aeronave ? $candidate : ($candidate['aircraft'] ?? null);
+                if (! $aircraft instanceof Aeronave) {
+                    return null;
+                }
+
+                $operationalContext = $allowRepositioning
+                    ? (array) ($candidate['operational_context'] ?? [])
+                    : $this->aircraftRepositioningService->exactMatchContext($aircraft, $originAirport);
+
+                if ($selectedRadiusNm !== null) {
+                    $operationalContext['selected_radius_nm'] = $selectedRadiusNm;
+                }
+
+                [$candidateStart, $candidateEnd] = $allowRepositioning
+                    ? $this->aircraftRepositioningService->adjustedWindow($requestedStart, $requestedEnd, $operationalContext)
+                    : [$requestedStart, $requestedEnd];
+
+                return [
+                    'aircraft' => $aircraft,
+                    'operational_context' => $operationalContext,
+                    'requested_start' => $candidateStart,
+                    'requested_end' => $candidateEnd,
+                    'repositioning_distance_nm' => (float) ($candidate['repositioning_distance_nm'] ?? data_get($operationalContext, 'repositioning_distance_nm', 0.0)),
+                ];
+            })
+            ->filter()
+            ->values();
+
+        $availabilityStartedAt = microtime(true);
+        $availabilityContext = $this->aircraftAvailabilityService->buildBatchConflictContext(
+            $prepared->map(fn (array $candidate) => [
+                'aircraft_id' => $candidate['aircraft']->id,
+                'operational_window_start' => $candidate['requested_start'],
+                'operational_window_end' => $candidate['requested_end'],
+            ]),
+            $requestData['reservation_id'] ?? null,
+            $requestData['block_id'] ?? null,
+            $requestData['quote_id'] ?? null,
+            $requestData['hold_id'] ?? null,
+        );
+        $availabilityBatchMs = round((microtime(true) - $availabilityStartedAt) * 1000, 2);
+
+        return $prepared
+            ->map(function (array $candidate) use ($availabilityContext, $availabilityBatchMs): array {
+                $candidate['precomputed_availability_conflict'] = $this->aircraftAvailabilityService->batchContextHasConflict(
+                    $availabilityContext,
+                    (int) $candidate['aircraft']->id,
+                    $candidate['requested_start'],
+                    $candidate['requested_end'],
+                );
+                $candidate['availability_query_count'] = (int) ($availabilityContext['query_count'] ?? 0);
+                $candidate['availability_batch_ms'] = $availabilityBatchMs;
+
+                return $candidate;
+            })
+            ->values();
+    }
+
+    private function buildPreviewQuotePayload(
+        Aeronave $aircraft,
+        array $canonicalRoute,
+        array $requestData,
+        float $distanceKm,
+        float $distanceNm,
+        array $legs,
+        string $tripType,
+        Aeropuerto $originAirport,
+        array $operationalContext,
+    ): array {
+        $pricing = $this->previewPricingForAircraft(
+            $aircraft,
+            $tripType,
+            $legs,
+            [...$requestData, 'operational_context' => $operationalContext],
+            $canonicalRoute,
+        );
+        $currency = $aircraft->currency ?: 'USD';
+        $baseAirportCode = $aircraft->resolvedBaseAirportCode() ?? $aircraft->base_airport;
+        $basedAtOrigin = (bool) ($operationalContext['based_at_origin'] ?? $this->aircraftIsBasedAtOrigin($aircraft, $originAirport));
+        $requiresRepositioning = (bool) ($pricing['requires_repositioning'] ?? ! $basedAtOrigin);
+
+        $clientDisplayHours = round($pricing['client_display_flight_hours'], 2);
+        $clientOperationalHours = round($pricing['client_operational_flight_hours'], 2);
+        $clientDirectHours = round($pricing['client_direct_flight_hours'], 2);
+        $cardTime = $this->formatHours($pricing['client_display_flight_hours']);
+
+        return [
+            'id' => 'preview-'.$aircraft->id,
+            'aircraft_id' => $aircraft->id,
+            'aircraft_name' => $aircraft->model,
+            'model' => $aircraft->model,
+            'cabin' => $this->normalizeAircraftCategory($aircraft->category) ?? 'Jet privado',
+            'capacity' => $aircraft->capacity,
+            'time' => $cardTime,
+            'card_time' => $cardTime,
+            'display_time' => $cardTime,
+            'ui_time' => $cardTime,
+            'trip_time' => $cardTime,
+            'operative_time' => $this->formatHours($pricing['client_operational_flight_hours']),
+            'billed_time' => $this->formatHours($pricing['total_billed_hours']),
+            'repositioning_time' => $this->formatHours($pricing['repositioning_hours']),
+            'return_to_base_time' => $this->formatHours($pricing['return_to_base_hours']),
+            'flight_time' => $cardTime,
+            'display_flight_hours' => $clientDisplayHours,
+            'client_display_flight_hours' => $clientDisplayHours,
+            'card_flight_hours' => $clientDisplayHours,
+            'ui_flight_hours' => $clientDisplayHours,
+            'trip_flight_hours' => $clientDisplayHours,
+            'operational_flight_hours' => $clientOperationalHours,
+            'client_operational_flight_hours' => $clientOperationalHours,
+            'distance_km' => round($distanceKm),
+            'distance_nm' => round($distanceNm),
+            'estimated_hours' => $clientDirectHours,
+            'real_flight_hours' => $clientDisplayHours,
+            'climb_descent_minutes' => (int) round($pricing['client_climb_descent_minutes']),
+            'climb_descent_hours' => round($pricing['client_climb_descent_hours'], 2),
+            'billable_hours' => round($pricing['total_billed_hours'], 2),
+            'billable_minutes' => round($pricing['billable_minutes'], 2),
+            'final_hours' => round($pricing['total_billed_hours'], 2),
+            'hourly_rate' => round($pricing['hourly_rate'], 2),
+            'price_per_minute' => round($pricing['price_per_minute'], 2),
+            'minimum_hours' => round($pricing['minimum_hours'], 2),
+            'minimum_route_price' => round($pricing['minimum_route_price'], 2),
+            'minimum_adjustment' => round($pricing['minimum_adjustment'], 2),
+            'base_cost' => round($pricing['base_price'], 2),
+            'client_flight_cost' => round($pricing['client_flight_cost'], 2),
+            'repositioning_hours' => round($pricing['repositioning_hours'], 2),
+            'return_to_base_hours' => round($pricing['return_to_base_hours'], 2),
+            'overnight_hours' => round($pricing['overnight_hours'], 2),
+            'repositioning_cost' => round($pricing['initial_repositioning_cost'], 2),
+            'return_to_base_cost' => round($pricing['return_to_base_cost'], 2),
+            'overnight_cost' => round($pricing['overnight_cost'], 2),
+            'airport_expenses' => round($pricing['airport_expenses'], 2),
+            'base_price_formula' => $pricing['base_price_formula'],
+            'priority_factor' => 1,
+            'subtotal_before_margin' => round($pricing['subtotal_before_margin'], 2),
+            'margin_percentage' => round($pricing['margin_percentage'], 2),
+            'margin_amount' => round($pricing['margin_amount'], 2),
+            'flight_cost' => round($pricing['flight_cost'], 2),
+            'stripe_fee' => round($pricing['stripe_fee'], 2),
+            'administrative_fee' => round($pricing['administrative_fee'], 2),
+            'total_amount' => round($pricing['total_amount'], 2),
+            'quoted_total' => round($pricing['total_amount'], 2),
+            'overnight_fee' => round($pricing['overnight_fee'], 2),
+            'jet_a_price' => round($pricing['jet_a_price'], 2),
+            'segment_count' => max(count($pricing['client_legs']), 1),
+            'subtotal' => round($pricing['subtotal'], 2),
+            'utility' => 0,
+            'margin' => 0,
+            'taxes' => round($pricing['tax'], 2),
+            'total' => round($pricing['total_amount'], 2),
+            'currency' => $currency,
+            'final_price' => $this->formatMoney($pricing['total_amount'], $currency),
+            'debug_pricing' => $pricing['debug_pricing'],
+            'pricing_breakdown' => $pricing,
+            'pricing' => [
+                'customer_flight_cost' => round((float) ($pricing['customer_flight_cost'] ?? $pricing['client_flight_cost']), 2),
+                'repositioning_cost' => round((float) ($pricing['initial_repositioning_cost'] ?? 0), 2),
+                'return_to_base_cost' => round((float) ($pricing['return_to_base_cost'] ?? 0), 2),
+                'airport_expenses' => round((float) ($pricing['airport_expenses'] ?? 0), 2),
+                'overnight_cost' => round((float) ($pricing['overnight_cost'] ?? 0), 2),
+                'margin_amount' => round((float) ($pricing['margin_amount'] ?? 0), 2),
+                'payment_fees' => round((float) (($pricing['stripe_fee'] ?? 0) + ($pricing['administrative_fee'] ?? 0)), 2),
+                'taxes' => round((float) ($pricing['taxes'] ?? $pricing['tax'] ?? 0), 2),
+                'total_amount' => round((float) ($pricing['total_amount'] ?? 0), 2),
+                'currency' => $currency,
+            ],
+            'source_origin' => $baseAirportCode,
+            'base_airport_id' => $aircraft->base_airport_id,
+            'base_airport_code' => $baseAirportCode,
+            'base_airport_name' => $aircraft->baseAirport?->name,
+            'base_airport_city' => $aircraft->baseAirport?->city,
+            'aircraft_base_airport' => $pricing['aircraft_base_airport'] ?? ($operationalContext['aircraft_base_airport'] ?? null),
+            'based_at_origin' => $basedAtOrigin,
+            'base_airport_match' => $basedAtOrigin,
+            'requires_repositioning' => $requiresRepositioning,
+            'repositioning_distance_km' => round((float) ($pricing['repositioning_distance_km'] ?? 0), 2),
+            'repositioning_distance_nm' => round((float) ($pricing['repositioning_distance_nm'] ?? 0), 2),
+            'return_to_base_distance_km' => round((float) ($pricing['return_to_base_distance_km'] ?? 0), 2),
+            'return_to_base_distance_nm' => round((float) ($pricing['return_to_base_distance_nm'] ?? 0), 2),
+            'repositioning' => $pricing['repositioning'] ?? null,
+            'return_to_base' => $pricing['return_to_base'] ?? null,
+            'selected_radius_nm' => $operationalContext['selected_radius_nm'] ?? null,
+            'match_reason' => $this->matchReason($basedAtOrigin, $baseAirportCode),
+            'response_time' => $this->responseTime($basedAtOrigin),
+            'provider' => [
+                'id' => $aircraft->provider?->id,
+                'company_name' => $aircraft->provider?->company_name,
+                'commercial_name' => $aircraft->provider?->commercial_name,
+                'jet_a_price' => round($pricing['jet_a_price'], 2),
+            ],
+            'ui_hints' => [
+                'time_field' => 'card_time',
+                'time_hours_field' => 'card_flight_hours',
+                'time_source' => 'client_display_flight_hours',
+                'time_display_mode' => $pricing['time_display_mode'],
+                'billing_hours_mode' => $pricing['billing_hours_mode'],
+                'time_excludes_repositioning' => true,
+                'billed_time_includes_repositioning' => (bool) ($pricing['include_repositioning_in_billed_hours'] ?? false),
+            ],
+            'aircraft' => $this->aircraftPreviewPayload($aircraft),
+        ];
     }
 
     /**

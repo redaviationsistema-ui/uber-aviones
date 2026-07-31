@@ -155,6 +155,23 @@ final class FlightPricingService
             )
         );
 
+        $operationalContext = is_array($trustedInput['operational_context'] ?? null)
+            ? $trustedInput['operational_context']
+            : [];
+        $applyRepositioningPricing = filter_var(
+            $operationalContext['apply_repositioning_pricing'] ?? false,
+            FILTER_VALIDATE_BOOL
+        );
+        $repositioning = $this->normalizeOperationalSegment($operationalContext['repositioning'] ?? null);
+        $returnToBase = $this->normalizeOperationalSegment($operationalContext['return_to_base'] ?? null);
+        $aircraftBaseAirport = is_array($operationalContext['aircraft_base_airport'] ?? null)
+            ? $operationalContext['aircraft_base_airport']
+            : null;
+        $includeRepositioningInBilledHours = $applyRepositioningPricing
+            && $this->shouldIncludeBilledComponent($trustedInput, 'include_repositioning_in_billed_hours', true);
+        $includeReturnToBaseInBilledHours = $applyRepositioningPricing
+            && $this->shouldIncludeBilledComponent($trustedInput, 'include_return_to_base_in_billed_hours', true);
+
         $configuredMinimumHours = max((float) ($aircraft->minimum_hours ?? 0), 0.0);
         $fallbackMinimumHours = $configuredMinimumHours > 0
             ? 0.0
@@ -162,16 +179,20 @@ final class FlightPricingService
         $appliedMinimumHours = $configuredMinimumHours > 0
             ? $configuredMinimumHours
             : $fallbackMinimumHours;
-        $finalBillableHours = max($routeBillableHours, $appliedMinimumHours, 0.0);
-        $minimumHoursApplied = max($finalBillableHours - $routeBillableHours, 0.0);
+        $clientBillableHours = max($routeBillableHours, $appliedMinimumHours, 0.0);
+        $minimumHoursApplied = max($clientBillableHours - $routeBillableHours, 0.0);
 
-        $flightCost = $finalBillableHours * $hourlyRate;
+        $clientFlightCost = $clientBillableHours * $hourlyRate;
         $configuredMinimumRoutePrice = max((float) ($aircraft->minimum_route_price ?? 0), 0.0);
         $fallbackMinimumRoutePrice = $configuredMinimumRoutePrice > 0
             ? 0.0
             : $this->resolveCategoryMinimumRoutePrice($aircraft);
         $minimumRoutePrice = max($configuredMinimumRoutePrice, $fallbackMinimumRoutePrice, 0.0);
-        $billableFlightCost = max($flightCost, $minimumRoutePrice);
+        $customerFlightCost = max($clientFlightCost, $minimumRoutePrice);
+        $repositioningHours = (float) ($repositioning['billable_hours'] ?? 0.0);
+        $returnToBaseHours = (float) ($returnToBase['billable_hours'] ?? 0.0);
+        $repositioningCost = $applyRepositioningPricing ? (float) ($repositioning['cost'] ?? 0.0) : 0.0;
+        $returnToBaseCost = $applyRepositioningPricing ? (float) ($returnToBase['cost'] ?? 0.0) : 0.0;
         $overnightNights = $this->resolveOvernightNights($legs, $trustedInput);
         $overnightFee = $this->resolveOvernightFee($aircraft, $hourlyRate);
         $overnightCost = $overnightNights > 0 ? $overnightFee * $overnightNights : 0.0;
@@ -183,13 +204,23 @@ final class FlightPricingService
         $overnightHours = $includeOvernightInBilledHours
             ? $overnightNights * self::COMMERCIAL_OVERNIGHT_HOURS_PER_NIGHT
             : 0.0;
+        $totalBilledHours = $clientBillableHours
+            + ($includeRepositioningInBilledHours ? $repositioningHours : 0.0)
+            + ($includeReturnToBaseInBilledHours ? $returnToBaseHours : 0.0)
+            + ($includeOvernightInBilledHours ? $overnightHours : 0.0);
 
         $airportExpenseContext = $this->shouldApplyAirportExpenses($trustedInput)
             ? $this->resolveAirportExpenseContext($aircraft, $legs)
             : ['amount' => 0.0, 'source' => 'disabled_by_request'];
         $airportExpenses = (float) ($airportExpenseContext['amount'] ?? 0.0);
 
-        $subtotalBeforeMargin = $billableFlightCost + $airportExpenses + $overnightCost;
+        $subtotalOperative = $customerFlightCost
+            + ($includeRepositioningInBilledHours ? $repositioningCost : 0.0)
+            + ($includeReturnToBaseInBilledHours ? $returnToBaseCost : 0.0)
+            + $airportExpenses
+            + $overnightCost;
+        $subtotalBeforeMargin = max($subtotalOperative, $minimumRoutePrice);
+        $minimumAdjustment = max($subtotalBeforeMargin - $subtotalOperative, 0.0);
         $marginAmount = $subtotalBeforeMargin * $marginRate;
         $subtotalBeforeFees = $subtotalBeforeMargin + $marginAmount;
         $paymentBreakdown = $this->paymentFeeCalculationServicio->flightBreakdown($subtotalBeforeFees);
@@ -214,15 +245,21 @@ final class FlightPricingService
             'applied_minimum_hours' => $appliedMinimumHours,
             'minimum_hours_applied' => $minimumHoursApplied,
             'route_billable_hours' => $routeBillableHours,
-            'final_billable_hours' => $finalBillableHours,
-            'flight_cost' => round($flightCost, 2),
+            'final_billable_hours' => $clientBillableHours,
+            'flight_cost' => round($customerFlightCost + $repositioningCost + $returnToBaseCost, 2),
             'minimum_route_price' => round($minimumRoutePrice, 2),
-            'billable_flight_cost' => round($billableFlightCost, 2),
+            'billable_flight_cost' => round($customerFlightCost, 2),
+            'customer_flight_cost' => round($customerFlightCost, 2),
+            'repositioning_cost' => round($repositioningCost, 2),
+            'return_to_base_cost' => round($returnToBaseCost, 2),
+            'repositioning_hours' => round($repositioningHours, 4),
+            'return_to_base_hours' => round($returnToBaseHours, 4),
             'airport_expenses' => round($airportExpenses, 2),
             'overnight_fee' => round($overnightFee, 2),
             'overnight_nights' => $overnightNights,
             'overnight_hours' => round($overnightHours, 2),
             'overnight_cost' => round($overnightCost, 2),
+            'subtotal_operative' => round($subtotalOperative, 2),
             'margin_amount' => round($marginAmount, 2),
             'stripe_fee' => round($stripeFee, 2),
             'administrative_fee' => round($administrativeFee, 2),
@@ -244,16 +281,17 @@ final class FlightPricingService
             'minimum_hours' => $appliedMinimumHours,
             'route_direct_hours' => $routeDirectHours,
             'route_billable_hours' => $routeBillableHours,
-            'final_billable_hours' => $finalBillableHours,
-            'billable_hours' => $finalBillableHours,
-            'total_billed_hours' => $finalBillableHours,
-            'billable_minutes' => round($finalBillableHours * 60, 2),
-            'flight_cost' => round($flightCost, 2),
-            'client_flight_cost' => round($flightCost, 2),
-            'base_price' => round($flightCost, 2),
+            'final_billable_hours' => $clientBillableHours,
+            'billable_hours' => $totalBilledHours,
+            'total_billed_hours' => $totalBilledHours,
+            'billable_minutes' => round($totalBilledHours * 60, 2),
+            'flight_cost' => round($customerFlightCost + $repositioningCost + $returnToBaseCost, 2),
+            'customer_flight_cost' => round($customerFlightCost, 2),
+            'client_flight_cost' => round($customerFlightCost, 2),
+            'base_price' => round($customerFlightCost, 2),
             'minimum_route_price' => round($minimumRoutePrice, 2),
-            'minimum_adjustment' => round(max($billableFlightCost - $flightCost, 0.0), 2),
-            'billable_flight_cost' => round($billableFlightCost, 2),
+            'minimum_adjustment' => round($minimumAdjustment, 2),
+            'billable_flight_cost' => round($customerFlightCost, 2),
             'airport_expenses' => round($airportExpenses, 2),
             'airport_fees' => round($airportExpenses, 2),
             'expense_fee' => round($airportExpenses, 2),
@@ -281,35 +319,75 @@ final class FlightPricingService
             'client_legs' => $legs,
             'legs' => $legPricings,
             'client_leg_pricing' => $legPricings,
+            'repositioning_hours' => round($repositioningHours, 4),
+            'return_to_base_hours' => round($returnToBaseHours, 4),
+            'repositioning_cost' => round($repositioningCost, 2),
+            'return_to_base_cost' => round($returnToBaseCost, 2),
+            'initial_repositioning_cost' => round($repositioningCost, 2),
+            'repositioning_distance_km' => round((float) ($repositioning['distance_km'] ?? 0), 2),
+            'repositioning_distance_nm' => round((float) ($repositioning['distance_nm'] ?? 0), 2),
+            'return_to_base_distance_km' => round((float) ($returnToBase['distance_km'] ?? 0), 2),
+            'return_to_base_distance_nm' => round((float) ($returnToBase['distance_nm'] ?? 0), 2),
             'client_display_flight_hours' => $routeDisplayHours,
             'client_operational_flight_hours' => $routeOperationalHours,
             'client_direct_flight_hours' => $routeDirectHours,
             'client_pricing_flight_hours' => $routePricingHours,
             'client_climb_descent_minutes' => round($routeClimbDescentMinutes),
             'client_climb_descent_hours' => $routeClimbDescentHours,
-            'flight_base_hours' => $finalBillableHours,
+            'flight_base_hours' => $clientBillableHours,
             'flight_base_source' => 'final_billable_hours',
             'time_display_mode' => $timeDisplayMode,
             'billing_hours_mode' => $billingHoursMode,
             'quote_strategy' => self::FORMULA_VERSION,
             'pricing_formula_version' => self::FORMULA_VERSION,
             'calculated_at' => now()->toISOString(),
+            'requires_repositioning' => $applyRepositioningPricing,
+            'aircraft_base_airport' => $aircraftBaseAirport,
+            'repositioning' => [
+                ...$repositioning,
+                'cost' => round($repositioningCost, 2),
+            ],
+            'return_to_base' => [
+                ...$returnToBase,
+                'required' => $applyRepositioningPricing && (float) ($returnToBase['distance_nm'] ?? 0) > 0,
+                'cost' => round($returnToBaseCost, 2),
+            ],
             'route_snapshot' => [
                 'signature' => $routeSignature,
                 'distance_km' => (float) ($canonicalRoute['distance_km'] ?? $routeDistanceKm),
                 'distance_nm' => (float) ($canonicalRoute['distance_nm'] ?? collect($legPricings)->sum('distance_nm')),
                 'max_leg_distance_km' => (float) ($canonicalRoute['max_leg_distance_km'] ?? collect($legPricings)->max('distance_km')),
+                'operational_distance_km' => round(
+                    (float) ($canonicalRoute['distance_km'] ?? $routeDistanceKm)
+                        + (float) ($repositioning['distance_km'] ?? 0)
+                        + (float) ($returnToBase['distance_km'] ?? 0),
+                    2
+                ),
+                'operational_distance_nm' => round(
+                    (float) ($canonicalRoute['distance_nm'] ?? collect($legPricings)->sum('distance_nm'))
+                        + (float) ($repositioning['distance_nm'] ?? 0)
+                        + (float) ($returnToBase['distance_nm'] ?? 0),
+                    2
+                ),
                 'legs' => $legs,
             ],
             'duration_snapshot' => [
                 'display_flight_hours' => (float) $routeDisplayHours,
-                'operational_hours' => (float) $routeOperationalHours,
-                'billable_hours' => (float) $finalBillableHours,
+                'operational_hours' => (float) $routeOperationalHours + (float) ($repositioning['operational_hours'] ?? 0) + (float) ($returnToBase['operational_hours'] ?? 0),
+                'billable_hours' => (float) $totalBilledHours,
                 'source' => 'backend_distance_and_aircraft_speed',
             ],
             'ignored_client_pricing_fields' => $this->presentFields($rawClientPayload ?? $options),
             'debug_pricing' => $debugPricing,
             'pricing' => [
+                'customer_flight_cost' => round($customerFlightCost, 2),
+                'repositioning_cost' => round($repositioningCost, 2),
+                'return_to_base_cost' => round($returnToBaseCost, 2),
+                'airport_expenses' => round($airportExpenses, 2),
+                'overnight_cost' => round($overnightCost, 2),
+                'margin_amount' => round($marginAmount, 2),
+                'payment_fees' => round($stripeFee + $administrativeFee, 2),
+                'taxes' => round($taxes, 2),
                 'total_amount' => round($totalAmount, 2),
                 'currency' => $aircraft->currency ?: 'USD',
             ],
@@ -319,10 +397,12 @@ final class FlightPricingService
                 'fallback_minimum_hours' => round($fallbackMinimumHours, 2),
                 'applied_minimum_hours' => round($appliedMinimumHours, 2),
                 'route_billable_hours' => round($routeBillableHours, 4),
-                'final_billable_hours' => round($finalBillableHours, 4),
-                'flight_cost' => round($flightCost, 2),
+                'final_billable_hours' => round($totalBilledHours, 4),
+                'flight_cost' => round($customerFlightCost, 2),
                 'minimum_route_price' => round($minimumRoutePrice, 2),
-                'billable_flight_cost' => round($billableFlightCost, 2),
+                'billable_flight_cost' => round($customerFlightCost, 2),
+                'repositioning_cost' => round($repositioningCost, 2),
+                'return_to_base_cost' => round($returnToBaseCost, 2),
                 'airport_expenses' => round($airportExpenses, 2),
                 'overnight_cost' => round($overnightCost, 2),
                 'margin_amount' => round($marginAmount, 2),
@@ -330,15 +410,13 @@ final class FlightPricingService
                 'administrative_fee' => round($administrativeFee, 2),
                 'taxes' => round($taxes, 2),
                 'expression' => sprintf(
-                    'max(route_hours %.2f, minimum %.2f) * rate %.2f = %.2f; route_min %.2f => %.2f; airport %.2f; overnight %.2f; margin %.2f; stripe %.2f; admin %.2f; taxes %.2f; total %.2f',
-                    round($routeBillableHours, 2),
-                    round($appliedMinimumHours, 2),
-                    round($hourlyRate, 2),
-                    round($flightCost, 2),
-                    round($minimumRoutePrice, 2),
-                    round($billableFlightCost, 2),
+                    'cliente %.2f + repo %.2f + regreso %.2f + airport %.2f + overnight %.2f => %.2f; margin %.2f; stripe %.2f; admin %.2f; taxes %.2f; total %.2f',
+                    round($customerFlightCost, 2),
+                    round($repositioningCost, 2),
+                    round($returnToBaseCost, 2),
                     round($airportExpenses, 2),
                     round($overnightCost, 2),
+                    round($subtotalBeforeMargin, 2),
                     round($marginAmount, 2),
                     round($stripeFee, 2),
                     round($administrativeFee, 2),
@@ -346,21 +424,16 @@ final class FlightPricingService
                     round($totalAmount, 2),
                 ),
             ],
-            'repositioning_hours' => 0.0,
-            'return_to_base_hours' => 0.0,
-            'repositioning_cost' => 0.0,
-            'return_to_base_cost' => 0.0,
-            'initial_repositioning_cost' => 0.0,
             'jet_a_price' => 0.0,
             'operator_subtotal' => round($subtotalBeforeMargin, 2),
-            'subtotal_operativo' => round($subtotalBeforeMargin, 2),
+            'subtotal_operativo' => round($subtotalOperative, 2),
             'non_taxable_expenses' => round($airportExpenses, 2),
             'utility' => round($marginAmount, 2),
             'markup_amount' => round($marginAmount, 2),
             'redsky_markup_percent' => round($marginRate * 100, 2),
             'redsky_markup_factor' => 1 + $marginRate,
-            'include_repositioning_in_billed_hours' => false,
-            'include_return_to_base_in_billed_hours' => false,
+            'include_repositioning_in_billed_hours' => $includeRepositioningInBilledHours,
+            'include_return_to_base_in_billed_hours' => $includeReturnToBaseInBilledHours,
             'include_overnight_in_billed_hours' => $includeOvernightInBilledHours,
         ];
 
@@ -372,14 +445,16 @@ final class FlightPricingService
             'fallback_minimum_hours' => $fallbackMinimumHours,
             'applied_minimum_hours' => $appliedMinimumHours,
             'route_billable_hours' => round($routeBillableHours, 4),
-            'final_billable_hours' => round($finalBillableHours, 4),
-            'flight_cost' => round($flightCost, 2),
+            'final_billable_hours' => round($clientBillableHours, 4),
+            'flight_cost' => round($customerFlightCost + $repositioningCost + $returnToBaseCost, 2),
             'minimum_route_price' => round($minimumRoutePrice, 2),
-            'billable_flight_cost' => round($billableFlightCost, 2),
+            'billable_flight_cost' => round($customerFlightCost, 2),
             'airport_expenses' => round($airportExpenses, 2),
             'overnight_nights' => $overnightNights,
             'overnight_fee' => round($overnightFee, 2),
             'overnight_cost' => round($overnightCost, 2),
+            'repositioning_cost' => round($repositioningCost, 2),
+            'return_to_base_cost' => round($returnToBaseCost, 2),
             'margin_amount' => round($marginAmount, 2),
             'stripe_fee' => round($stripeFee, 2),
             'administrative_fee' => round($administrativeFee, 2),
@@ -393,6 +468,12 @@ final class FlightPricingService
     public function sanitizeClientPayload(array $payload): array
     {
         foreach ($payload as $key => $value) {
+            if ((string) $key === 'operational_context') {
+                $payload[$key] = is_array($value) ? $value : [];
+
+                continue;
+            }
+
             if (in_array((string) $key, self::UNTRUSTED_FIELDS, true)) {
                 unset($payload[$key]);
 
@@ -426,6 +507,41 @@ final class FlightPricingService
     private function airportFromPayload(array $payload): Aeropuerto
     {
         return new Aeropuerto($payload);
+    }
+
+    private function normalizeOperationalSegment(mixed $segment): array
+    {
+        if (! is_array($segment)) {
+            return [
+                'origin_airport_id' => null,
+                'destination_airport_id' => null,
+                'origin_iata' => null,
+                'origin_icao' => null,
+                'destination_iata' => null,
+                'destination_icao' => null,
+                'distance_km' => 0.0,
+                'distance_nm' => 0.0,
+                'flight_hours' => 0.0,
+                'operational_hours' => 0.0,
+                'billable_hours' => 0.0,
+                'cost' => 0.0,
+            ];
+        }
+
+        return [
+            'origin_airport_id' => $segment['origin_airport_id'] ?? null,
+            'destination_airport_id' => $segment['destination_airport_id'] ?? null,
+            'origin_iata' => $segment['origin_iata'] ?? null,
+            'origin_icao' => $segment['origin_icao'] ?? null,
+            'destination_iata' => $segment['destination_iata'] ?? null,
+            'destination_icao' => $segment['destination_icao'] ?? null,
+            'distance_km' => (float) ($segment['distance_km'] ?? 0.0),
+            'distance_nm' => (float) ($segment['distance_nm'] ?? 0.0),
+            'flight_hours' => (float) ($segment['flight_hours'] ?? 0.0),
+            'operational_hours' => (float) ($segment['operational_hours'] ?? 0.0),
+            'billable_hours' => (float) ($segment['billable_hours'] ?? 0.0),
+            'cost' => (float) ($segment['cost'] ?? 0.0),
+        ];
     }
 
     private function resolveTimeMode(array $requestData, string $key, string $default): string
