@@ -134,6 +134,51 @@ class PlataformaVuelosApiTest extends TestCase
         Storage::disk('public')->assertExists($verification->image_path);
     }
 
+
+    public function test_client_registration_accepts_scanned_ine_front_without_pdf_or_back_image(): void
+    {
+        Storage::fake('public');
+        Storage::fake('private');
+
+        $response = $this->post('/api/v1/auth/register', [
+            'name' => 'Cliente INE Frontal',
+            'email' => 'ine.frontal@cliente.test',
+            'phone' => '+52 555 010 2000',
+            'password' => 'password123',
+            'password_confirmation' => 'password123',
+            'role' => 'client',
+            'birth_date' => '1992-08-14',
+            'nationality' => 'Mexicana',
+            'document_type' => 'INE',
+            'document_number' => 'FRONTAL123456',
+            'document_expiration' => '2031-01-31',
+            'identity_validation_required' => '1',
+            'ine_curp' => 'FRON920814HDFXXX02',
+            'ine_scan_raw' => 'LECTURA INE FRONTAL',
+            'ine_scan_status' => 'scanned',
+            'identity_verification_status' => 'approved',
+            'identity_verified' => '1',
+            'face_detected' => '1',
+            'ine_front' => UploadedFile::fake()->image('ine-front.jpg'),
+            'selfie_biometric' => UploadedFile::fake()->image('selfie.jpg'),
+        ]);
+
+        $response
+            ->assertCreated()
+            ->assertJsonPath('user.email', 'ine.frontal@cliente.test');
+
+        $user = Usuario::query()
+            ->where('email', 'ine.frontal@cliente.test')
+            ->with('profile')
+            ->firstOrFail();
+
+        $this->assertSame('INE', $user->profile?->document_type);
+        $this->assertTrue((bool) $user->profile?->identity_validation_required);
+        $this->assertNotNull($user->profile?->ine_front_path);
+        $this->assertNull($user->profile?->ine_back_path);
+        Storage::disk('private')->assertExists($user->profile->ine_front_path);
+    }
+
     public function test_registration_identification_upload_can_be_saved_before_register_and_attached_on_signup(): void
     {
         Storage::fake('s3');

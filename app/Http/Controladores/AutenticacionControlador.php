@@ -102,19 +102,19 @@ class AutenticacionControlador extends ControladorBase
             ], 422);
         }
 
-        $hasLegacyIdentityFiles = $request->hasFile('ine_front') && $request->hasFile('ine_back');
+        $hasScannedIdentityFiles = $request->hasFile('ine_front') || $request->hasFile('ine_back');
 
         if (
             $role !== Usuario::ROLE_SOBRECARGO
             && $request->boolean('identity_validation_required')
             && ! $registrationIdentification
-            && ! $hasLegacyIdentityFiles
+            && ! $hasScannedIdentityFiles
         ) {
             return response()->json([
                 'success' => false,
-                'message' => 'Primero guarda la identificación oficial en PDF antes de completar el registro.',
+                'message' => 'Escanea tu identificación oficial o súbela en PDF antes de completar el registro.',
                 'errors' => [
-                    'identification_document_id' => ['La identificación oficial aún no fue guardada.'],
+                    'identification_document_id' => ['La identificación oficial aún no fue guardada o escaneada.'],
                 ],
             ], 422);
         }

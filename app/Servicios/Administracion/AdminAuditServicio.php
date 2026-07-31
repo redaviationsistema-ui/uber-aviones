@@ -6,6 +6,7 @@ use App\Modelos\RegistroAuditoria;
 use App\Modelos\Usuario;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Database\Eloquent\Builder;
+use Throwable;
 use Illuminate\Support\Str;
 
 class AdminAuditServicio
@@ -106,13 +107,35 @@ class AdminAuditServicio
             return null;
         }
 
-        if (($actor->role ?? null) === Usuario::ROLE_ADMIN || $actor->effectiveRole() === Usuario::ROLE_ADMIN) {
+        if (($actor->role ?? null) === Usuario::ROLE_ADMIN || ($actor->operational_role ?? null) === Usuario::ROLE_ADMIN) {
             return $actor->id;
         }
 
-        $roleCodes = method_exists($actor, 'roles')
-            ? $actor->roles()->pluck('code')->filter()->values()->all()
-            : [];
+        if (method_exists($actor, 'effectiveRole') && $actor->effectiveRole() === Usuario::ROLE_ADMIN) {
+            return $actor->id;
+        }
+
+        if (! method_exists($actor, 'roles')) {
+            return null;
+        }
+
+        try {
+            $roleCodes = $actor->relationLoaded('roles')
+                ? $actor->roles
+                    ->pluck('code')
+                    ->filter()
+                    ->values()
+                    ->all()
+                : $actor->roles()
+                    ->where('roles.code', Usuario::ROLE_ADMIN)
+                    ->limit(1)
+                    ->pluck('roles.code')
+                    ->filter()
+                    ->values()
+                    ->all();
+        } catch (Throwable) {
+            return null;
+        }
 
         return in_array(Usuario::ROLE_ADMIN, $roleCodes, true) ? $actor->id : null;
     }

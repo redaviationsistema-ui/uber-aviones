@@ -6,7 +6,9 @@ use App\Modelos\RegistroAuditoria;
 use App\Modelos\Usuario;
 use App\Servicios\Administracion\AdminAuditServicio;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
+use Throwable;
 
 abstract class ControladorBase
 {
@@ -106,22 +108,33 @@ abstract class ControladorBase
         );
         $actor = $userId ? Usuario::query()->find($userId) : null;
 
-        app(AdminAuditServicio::class)->record(
-            actor: $actor,
-            action: $action,
-            module: $module,
-            entity: (string) $entity,
-            entityId: $entityId,
-            before: is_array($before) ? $before : null,
-            after: is_array($after) ? $after : null,
-            reason: is_string($reason) ? $reason : null,
-            result: is_string($result) ? $result : 'success',
-            metadata: is_array($metadata) ? $metadata : [],
-            description: $description,
-            ipAddress: $ipAddress,
-            userAgent: $userAgent,
-            requestId: request()?->headers->get('X-Request-Id') ?: request()?->attributes->get('request_id'),
-        );
+        try {
+            app(AdminAuditServicio::class)->record(
+                actor: $actor,
+                action: $action,
+                module: $module,
+                entity: (string) $entity,
+                entityId: $entityId,
+                before: is_array($before) ? $before : null,
+                after: is_array($after) ? $after : null,
+                reason: is_string($reason) ? $reason : null,
+                result: is_string($result) ? $result : 'success',
+                metadata: is_array($metadata) ? $metadata : [],
+                description: $description,
+                ipAddress: $ipAddress,
+                userAgent: $userAgent,
+                requestId: request()?->headers->get('X-Request-Id') ?: request()?->attributes->get('request_id'),
+            );
+        } catch (Throwable $exception) {
+            Log::warning('audit_write_failed', [
+                'user_id' => $userId,
+                'action' => $action,
+                'module' => $module,
+                'entity' => (string) $entity,
+                'entity_id' => $entityId != null ? (string) $entityId : null,
+                'message' => $exception->getMessage(),
+            ]);
+        }
     }
 
     protected function resolvedProviderIdOrAbort(Request $request, int $status = 422): int
