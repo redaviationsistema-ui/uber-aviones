@@ -4,6 +4,7 @@ namespace App\Servicios\Aeronaves;
 
 use App\Modelos\Aeronave;
 use App\Modelos\Aeropuerto;
+use App\Servicios\Vuelos\DynamicFlightDurationService;
 use App\Servicios\Vuelos\FlightDurationService;
 use App\Servicios\Vuelos\FlightRouteService;
 use Carbon\CarbonInterface;
@@ -15,6 +16,7 @@ final class AircraftRepositioningService
     public function __construct(
         private readonly FlightRouteService $flightRouteService,
         private readonly FlightDurationService $flightDurationService,
+        private readonly DynamicFlightDurationService $dynamicFlightDurationService,
     ) {}
 
     public function configuredSearchRadiiNm(): array
@@ -213,7 +215,10 @@ final class AircraftRepositioningService
             return $this->emptySegmentPayload();
         }
 
-        $legPricing = $this->flightDurationService->calculateLeg(
+        $durationService = $this->useOperationalFlightTimeModel()
+            ? $this->dynamicFlightDurationService
+            : $this->flightDurationService;
+        $legPricing = $durationService->calculateLeg(
             $aircraft,
             new Aeropuerto($leg['origin_airport'] ?? []),
             new Aeropuerto($leg['destination_airport'] ?? []),
@@ -234,8 +239,15 @@ final class AircraftRepositioningService
             'flight_hours' => round((float) ($legPricing['direct_air_time_hours'] ?? 0.0), 4),
             'operational_hours' => round((float) ($legPricing['real_flight_hours'] ?? 0.0), 4),
             'billable_hours' => round((float) ($legPricing['billable_hours'] ?? 0.0), 4),
+            'billable_minutes' => round((float) ($legPricing['billable_minutes'] ?? 0.0), 2),
             'cost' => round((float) ($legPricing['leg_cost'] ?? 0.0), 2),
         ];
+    }
+
+    private function useOperationalFlightTimeModel(): bool
+    {
+        return (bool) config('vuelos.dynamic_flight_time_enabled', false)
+            && (string) config('vuelos.flight_time_model', 'direct') === 'operational';
     }
 
     private function resolveAircraftOperationalAirport(Aeronave $aircraft): ?Aeropuerto

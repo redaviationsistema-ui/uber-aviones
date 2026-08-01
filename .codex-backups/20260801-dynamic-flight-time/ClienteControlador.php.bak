@@ -633,8 +633,8 @@ class ClienteControlador extends ControladorBase
             'trip_type' => $tripType,
             'trip_label' => $data['trip_label'] ?? $data['notes'] ?? 'Ida',
             'segment_count' => count($legs),
-            'time_display_mode' => $data['time_display_mode'] ?? $this->defaultFlightTimeMode(),
-            'billing_hours_mode' => $data['billing_hours_mode'] ?? $this->defaultFlightTimeMode(),
+            'time_display_mode' => $data['time_display_mode'] ?? self::TIME_MODE_DIRECT,
+            'billing_hours_mode' => $data['billing_hours_mode'] ?? self::TIME_MODE_DIRECT,
             'legs' => $legs,
             'matches' => $quotes,
             'options' => $quotes,
@@ -2348,7 +2348,6 @@ class ClienteControlador extends ControladorBase
             'overnight_cost' => round($pricing['overnight_cost'], 2),
             'airport_expenses' => round($pricing['airport_expenses'], 2),
             'base_price_formula' => $pricing['base_price_formula'],
-            'flight_time_comparison' => $pricing['flight_time_comparison'] ?? null,
             'priority_factor' => 1,
             'subtotal_before_margin' => round($pricing['subtotal_before_margin'], 2),
             'margin_percentage' => round($pricing['margin_percentage'], 2),
@@ -3745,14 +3744,6 @@ class ClienteControlador extends ControladorBase
             '' => null,
             default => trim((string) $value),
         };
-    }
-
-    private function defaultFlightTimeMode(): string
-    {
-        return (bool) config('vuelos.dynamic_flight_time_enabled', false)
-            && (string) config('vuelos.flight_time_model', 'direct') === self::TIME_MODE_OPERATIONAL
-            ? self::TIME_MODE_OPERATIONAL
-            : self::TIME_MODE_DIRECT;
     }
 
     private function resolveCategoryPricingRule(Aeronave $aircraft): array
