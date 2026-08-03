@@ -2295,6 +2295,9 @@ class ClienteControlador extends ControladorBase
         $clientOperationalHours = round($pricing['client_operational_flight_hours'], 2);
         $clientDirectHours = round($pricing['client_direct_flight_hours'], 2);
         $cardTime = $this->formatHours($pricing['client_display_flight_hours']);
+        $billableTime = $this->formatHours($pricing['total_billed_hours']);
+        $estimatedFlightMinutes = round(((float) $pricing['client_display_flight_hours']) * 60, 2);
+        $billableFlightMinutes = round((float) $pricing['billable_minutes'], 2);
 
         return [
             'id' => 'preview-'.$aircraft->id,
@@ -2309,10 +2312,14 @@ class ClienteControlador extends ControladorBase
             'ui_time' => $cardTime,
             'trip_time' => $cardTime,
             'operative_time' => $this->formatHours($pricing['client_operational_flight_hours']),
-            'billed_time' => $this->formatHours($pricing['total_billed_hours']),
+            'billed_time' => $billableTime,
+            'estimated_flight_time' => $cardTime,
+            'billable_flight_time' => $billableTime,
             'repositioning_time' => $this->formatHours($pricing['repositioning_hours']),
             'return_to_base_time' => $this->formatHours($pricing['return_to_base_hours']),
             'flight_time' => $cardTime,
+            'estimated_flight_minutes' => $estimatedFlightMinutes,
+            'billable_flight_minutes' => $billableFlightMinutes,
             'display_flight_hours' => $clientDisplayHours,
             'client_display_flight_hours' => $clientDisplayHours,
             'card_flight_hours' => $clientDisplayHours,
@@ -2371,6 +2378,10 @@ class ClienteControlador extends ControladorBase
             'debug_pricing' => $pricing['debug_pricing'],
             'pricing_breakdown' => $pricing,
             'pricing' => [
+                'estimated_flight_minutes' => $estimatedFlightMinutes,
+                'billable_flight_minutes' => $billableFlightMinutes,
+                'estimated_flight_time' => $cardTime,
+                'billable_flight_time' => $billableTime,
                 'customer_flight_cost' => round((float) ($pricing['customer_flight_cost'] ?? $pricing['client_flight_cost']), 2),
                 'repositioning_cost' => round((float) ($pricing['initial_repositioning_cost'] ?? 0), 2),
                 'return_to_base_cost' => round((float) ($pricing['return_to_base_cost'] ?? 0), 2),
@@ -2410,6 +2421,8 @@ class ClienteControlador extends ControladorBase
                 'time_field' => 'card_time',
                 'time_hours_field' => 'card_flight_hours',
                 'time_source' => 'client_display_flight_hours',
+                'billable_time_field' => 'billable_flight_time',
+                'billable_minutes_field' => 'billable_flight_minutes',
                 'time_display_mode' => $pricing['time_display_mode'],
                 'billing_hours_mode' => $pricing['billing_hours_mode'],
                 'time_excludes_repositioning' => true,

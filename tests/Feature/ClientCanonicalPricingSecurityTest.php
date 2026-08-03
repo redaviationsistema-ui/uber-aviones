@@ -153,6 +153,28 @@ class ClientCanonicalPricingSecurityTest extends TestCase
         );
     }
 
+    public function test_preview_exposes_explicit_estimated_and_billable_time_fields(): void
+    {
+        $this->seed();
+
+        $response = $this->preview($this->basePayload());
+        $quote = collect($response['matches'])->first();
+
+        $this->assertNotNull($quote);
+        $this->assertGreaterThan(0, (float) data_get($quote, 'estimated_flight_minutes'));
+        $this->assertGreaterThan(0, (float) data_get($quote, 'billable_flight_minutes'));
+        $this->assertNotSame('', (string) data_get($quote, 'estimated_flight_time'));
+        $this->assertNotSame('', (string) data_get($quote, 'billable_flight_time'));
+        $this->assertSame(
+            (float) data_get($quote, 'pricing_breakdown.billable_minutes'),
+            (float) data_get($quote, 'billable_flight_minutes'),
+        );
+        $this->assertSame(
+            (string) data_get($quote, 'billed_time'),
+            (string) data_get($quote, 'billable_flight_time'),
+        );
+    }
+
     public function test_one_way_round_trip_and_multi_leg_use_canonical_backend_legs(): void
     {
         $this->seed();
