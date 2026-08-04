@@ -638,6 +638,10 @@ class ClienteControlador extends ControladorBase
             ])->values()->all(),
         ]);
 
+        if (app()->environment('local')) {
+            $this->logQuotePreviewPricingSummaries($quotes);
+        }
+
         return $this->ok([
             'preview' => true,
             'saved' => false,
@@ -655,6 +659,181 @@ class ClienteControlador extends ControladorBase
             'options' => $quotes,
             'access' => $user?->accessStatus(),
         ]);
+    }
+
+    private function logQuotePreviewPricingSummaries(Collection $quotes): void
+    {
+        $quotes->each(function (array $quote): void {
+            Log::info('quote_preview_pricing_summary', [
+                'aircraft_id' => $quote['aircraft_id'] ?? null,
+                'aircraft_name' => $quote['aircraft_name'] ?? $quote['aircraft'] ?? $quote['name'] ?? null,
+                'summary' => $this->buildQuotePreviewPricingSummary($quote),
+            ]);
+        });
+    }
+
+    private function buildQuotePreviewPricingSummary(array $quote): string
+    {
+        $pricing = is_array($quote['pricing_breakdown'] ?? null) ? $quote['pricing_breakdown'] : [];
+        $currency = (string) ($quote['currency'] ?? $pricing['currency'] ?? 'USD');
+        $billableHours = $this->resolveQuoteSummaryAmount($quote, [
+            'pricing_breakdown.final_billable_hours',
+            'debug_pricing.final_billable_hours',
+            'final_billable_hours',
+            'billable_hours',
+        ]);
+        $hourlyRate = $this->resolveQuoteSummaryAmount($quote, [
+            'pricing_breakdown.hourly_rate',
+            'hourly_rate',
+        ]);
+        $flightCost = $this->resolveQuoteSummaryAmount($quote, [
+            'pricing_breakdown.client_flight_cost',
+            'client_flight_cost',
+            'pricing_breakdown.flight_cost',
+            'flight_cost',
+            'base_price',
+        ]);
+        $airportExpenses = $this->resolveQuoteSummaryAmount($quote, [
+            'pricing_breakdown.airport_expenses',
+            'pricing_breakdown.expense_fee',
+            'airport_expenses',
+            'expense_fee',
+        ]);
+        $overnightNights = (int) round($this->resolveQuoteSummaryAmount($quote, [
+            'pricing_breakdown.overnight_nights',
+            'debug_pricing.overnight_nights',
+            'overnight_nights',
+        ]));
+        $overnightCost = $this->resolveQuoteSummaryAmount($quote, [
+            'pricing_breakdown.overnight_cost',
+            'debug_pricing.overnight_cost',
+            'overnight_cost',
+        ]);
+        $overnightRate = $this->resolveQuoteSummaryAmount($quote, [
+            'pricing_breakdown.overnight_fee',
+            'debug_pricing.overnight_fee',
+            'overnight_fee',
+        ]);
+        if ($overnightRate <= 0 && $overnightNights > 0 && $overnightCost > 0) {
+            $overnightRate = $overnightCost / $overnightNights;
+        }
+
+        $subtotalOperational = $this->resolveQuoteSummaryAmount($quote, [
+            'pricing_breakdown.subtotal',
+            'subtotal',
+        ], $flightCost + $airportExpenses + $overnightCost);
+        $stripeFee = $this->resolveQuoteSummaryAmount($quote, [
+            'pricing_breakdown.stripe_fee',
+            'stripe_fee',
+        ]);
+        $administrativeFee = $this->resolveQuoteSummaryAmount($quote, [
+            'pricing_breakdown.administrative_fee',
+            'administrative_fee',
+        ]);
+        $taxes = $this->resolveQuoteSummaryAmount($quote, [
+            'pricing_breakdown.tax',
+            'pricing_breakdown.taxes',
+            'taxes',
+            'tax',
+        ]);
+        $total = $this->resolveQuoteSummaryAmount($quote, [
+            'pricing_breakdown.total_amount',
+            'pricing_breakdown.total',
+            'total_amount',
+            'total',
+        ], $subtotalOperational + $stripeFee + $administrativeFee + $taxes);
+
+        $stripePercent = $subtotalOperational > 0 ? round(($stripeFee / $subtotalOperational) * 100, 2) : null;
+        $administrativePercent = $subtotalOperational > 0 ? round(($administrativeFee / $subtotalOperational) * 100, 2) : null;
+        $hoursLabel = (bool) data_get($pricing, 'minimum_applied', false) ? 'horas mínimas' : 'horas';
+        $flightCostPlain = $this->formatQuoteSummaryAmount($flightCost);
+        $airportExpensesPlain = $this->formatQuoteSummaryAmount($airportExpenses);
+        $overnightCostPlain = $this->formatQuoteSummaryAmount($overnightCost);
+        $subtotalOperationalPlain = $this->formatQuoteSummaryAmount($subtotalOperational);
+        $stripeFeePlain = $this->formatQuoteSummaryAmount($stripeFee);
+        $administrativeFeePlain = $this->formatQuoteSummaryAmount($administrativeFee);
+        $taxesPlain = $this->formatQuoteSummaryAmount($taxes);
+
+        return implode("\n", [
+            'Vuelo:',
+            $this->formatQuoteSummaryHours($billableHours).' '.$hoursLabel.' × '.$this->formatQuoteSummaryMoney($hourlyRate, $currency).' = '.$this->formatQuoteSummaryMoney($flightCost, $currency),
+            '',
+            'Gastos aeroportuarios:',
+            $this->formatQuoteSummaryMoney($airportExpenses, $currency),
+            '',
+            'Pernoctas:',
+            $overnightNights > 0
+                ? $overnightNights.' × '.$this->formatQuoteSummaryMoney($overnightRate, $currency).' = '.$this->formatQuoteSummaryMoney($overnightCost, $currency)
+                : $this->formatQuoteSummaryMoney($overnightCost, $currency),
+            '',
+            'Subtotal operativo:',
+            $flightCostPlain.' + '.$airportExpensesPlain.' + '.$overnightCostPlain.' = '.$this->formatQuoteSummaryMoney($subtotalOperational, $currency),
+            '',
+            'Stripe '.($stripePercent !== null ? $this->formatQuoteSummaryPercent($stripePercent).'%' : '').':',
+            $this->formatQuoteSummaryMoney($stripeFee, $currency),
+            '',
+            'Administrativa '.($administrativePercent !== null ? $this->formatQuoteSummaryPercent($administrativePercent).'%' : '').':',
+            $this->formatQuoteSummaryMoney($administrativeFee, $currency),
+            '',
+            'IVA:',
+            $this->formatQuoteSummaryMoney($taxes, $currency),
+            '',
+            'Total:',
+            $subtotalOperationalPlain.' + '.$stripeFeePlain.' + '.$administrativeFeePlain.' + '.$taxesPlain,
+            '= '.$this->formatQuoteSummaryMoney($total, $currency),
+        ]);
+    }
+
+    private function resolveQuoteSummaryAmount(array $quote, array $paths, float $default = 0.0): float
+    {
+        foreach ($paths as $path) {
+            $value = data_get($quote, $path);
+            if ($value === null || $value === '') {
+                continue;
+            }
+
+            return round((float) $value, 2);
+        }
+
+        return round($default, 2);
+    }
+
+    private function formatQuoteSummaryMoney(float $amount, string $currency = 'USD'): string
+    {
+        $rounded = round($amount, 2);
+        $decimals = abs($rounded - round($rounded)) < 0.01 ? 0 : 2;
+
+        return trim($currency).' '.number_format($rounded, $decimals, '.', ',');
+    }
+
+    private function formatQuoteSummaryAmount(float $amount): string
+    {
+        $rounded = round($amount, 2);
+        $decimals = abs($rounded - round($rounded)) < 0.01 ? 0 : 2;
+
+        return number_format($rounded, $decimals, '.', ',');
+    }
+
+    private function formatQuoteSummaryHours(float $hours): string
+    {
+        $rounded = round($hours, 2);
+
+        if (abs($rounded - round($rounded)) < 0.01) {
+            return (string) (int) round($rounded);
+        }
+
+        return rtrim(rtrim(number_format($rounded, 2, '.', ''), '0'), '.');
+    }
+
+    private function formatQuoteSummaryPercent(float $percent): string
+    {
+        $rounded = round($percent, 2);
+
+        if (abs($rounded - round($rounded)) < 0.01) {
+            return (string) (int) round($rounded);
+        }
+
+        return rtrim(rtrim(number_format($rounded, 2, '.', ''), '0'), '.');
     }
 
     public function storeFlightRequest(Request $request)
@@ -2349,7 +2528,11 @@ class ClienteControlador extends ControladorBase
             'distance_nm' => round($distanceNm),
             'estimated_hours' => $clientDirectHours,
             'direct_route_hours' => $clientDirectHours,
-            'real_flight_hours' => $clientDisplayHours,
+            'real_flight_hours' => $clientOperationalHours,
+            'pricing_hours' => round((float) ($pricing['pricing_hours'] ?? $pricing['final_billable_hours'] ?? 0), 2),
+            'pricing_hours_source' => $pricing['pricing_hours_source'] ?? 'route_operational_hours',
+            'final_billable_hours' => round((float) ($pricing['final_billable_hours'] ?? 0), 2),
+            'minimum_applied' => (bool) ($pricing['minimum_applied'] ?? false),
             'raw_leg_hours' => $pricing['raw_leg_hours'],
             'raw_route_hours' => $pricing['raw_route_hours'],
             'total_billed_hours' => $pricing['total_billed_hours'],
@@ -2453,7 +2636,8 @@ class ClienteControlador extends ControladorBase
     }
 
     /**
-     * @deprecated Compatibilidad interna. Toda entrada debe pasar primero por FlightPricingService.
+     * @deprecated Compatibilidad interna. No usar para el precio activo:
+     * FlightPricingService v4 es la unica fuente de verdad del costo actual.
      */
     private function calculateLegacyPricing(Aeronave $aircraft, string $tripType, array $legs, array $requestData = []): array
     {
@@ -3735,6 +3919,10 @@ class ClienteControlador extends ControladorBase
         $payload['distance_nm'] = $distanceNm !== null ? round($distanceNm) : null;
         $payload['display_flight_hours'] = round((float) $pricing['client_display_flight_hours'], 2);
         $payload['operational_flight_hours'] = round((float) $pricing['client_operational_flight_hours'], 2);
+        $payload['pricing_hours'] = round((float) ($pricing['pricing_hours'] ?? $pricing['final_billable_hours'] ?? 0), 2);
+        $payload['pricing_hours_source'] = (string) ($pricing['pricing_hours_source'] ?? 'route_operational_hours');
+        $payload['final_billable_hours'] = round((float) ($pricing['final_billable_hours'] ?? 0), 2);
+        $payload['minimum_applied'] = (bool) ($pricing['minimum_applied'] ?? false);
         $payload['billable_hours'] = round((float) $pricing['billable_hours'], 2);
         $payload['final_hours'] = round((float) $pricing['billable_hours'], 2);
         $payload['hourly_rate'] = round((float) $pricing['hourly_rate'], 2);

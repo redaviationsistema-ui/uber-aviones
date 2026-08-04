@@ -42,7 +42,7 @@ class FlightPricingServiceDynamicTest extends TestCase
         $this->assertSame('operational', $pricing['client_legs'][0]['time_model']);
     }
 
-    public function test_learjet_31a_uses_aircraft_minimum_hours_once_for_the_whole_trip(): void
+    public function test_learjet_31a_keeps_minimum_hours_as_informational_only(): void
     {
         $this->seed();
         config()->set('vuelos.dynamic_flight_time_enabled', false);
@@ -74,8 +74,14 @@ class FlightPricingServiceDynamicTest extends TestCase
         $this->assertEqualsWithDelta(1.00000592, (float) $pricing['route_billable_hours'], 0.0000001);
         $this->assertSame(2.0, (float) $pricing['configured_minimum_hours']);
         $this->assertSame(2.0, (float) $pricing['applied_minimum_hours']);
-        $this->assertSame(2.0, (float) $pricing['final_billable_hours']);
-        $this->assertSame(4600.0, (float) $pricing['flight_cost']);
+        $this->assertFalse((bool) $pricing['minimum_applied']);
+        $this->assertEqualsWithDelta((float) $pricing['route_operational_hours'], (float) $pricing['pricing_hours'], 0.0000001);
+        $this->assertEqualsWithDelta((float) $pricing['route_operational_hours'], (float) $pricing['final_billable_hours'], 0.0000001);
+        $this->assertSame('route_operational_hours', (string) $pricing['pricing_hours_source']);
+        $this->assertSame(
+            round((float) $pricing['route_operational_hours'] * 2300.0, 2),
+            (float) $pricing['flight_cost']
+        );
     }
 
     public function test_aircraft_without_configured_minimum_hours_uses_category_fallback(): void
@@ -110,7 +116,9 @@ class FlightPricingServiceDynamicTest extends TestCase
         $this->assertSame(0.0, (float) $pricing['configured_minimum_hours']);
         $this->assertSame(2.0, (float) $pricing['fallback_minimum_hours']);
         $this->assertSame(2.0, (float) $pricing['applied_minimum_hours']);
-        $this->assertSame(2.0, (float) $pricing['final_billable_hours']);
+        $this->assertFalse((bool) $pricing['minimum_applied']);
+        $this->assertEqualsWithDelta((float) $pricing['route_operational_hours'], (float) $pricing['pricing_hours'], 0.0000001);
+        $this->assertEqualsWithDelta((float) $pricing['route_operational_hours'], (float) $pricing['final_billable_hours'], 0.0000001);
     }
 
     public function test_overnight_fee_is_charged_when_itinerary_spans_nights(): void
@@ -191,12 +199,13 @@ class FlightPricingServiceDynamicTest extends TestCase
         $this->assertEqualsWithDelta($expectedLegHours, (float) $pricing['raw_leg_hours'][1], 0.0000001);
         $this->assertEqualsWithDelta($expectedRouteHours, (float) $pricing['raw_route_hours'], 0.0000001);
         $this->assertEqualsWithDelta($expectedRouteHours, (float) $pricing['route_billable_hours'], 0.0000001);
-        $this->assertEqualsWithDelta($expectedRouteHours, (float) $pricing['final_billable_hours'], 0.0000001);
-        $this->assertEqualsWithDelta($expectedRouteHours, (float) $pricing['billable_hours'], 0.0000001);
-        $this->assertSame($expectedFlightCost, (float) $pricing['flight_cost']);
+        $this->assertEqualsWithDelta((float) $pricing['route_operational_hours'], (float) $pricing['pricing_hours'], 0.0000001);
+        $this->assertEqualsWithDelta((float) $pricing['route_operational_hours'], (float) $pricing['final_billable_hours'], 0.0000001);
+        $this->assertEqualsWithDelta((float) $pricing['route_operational_hours'], (float) $pricing['billable_hours'], 0.0000001);
+        $this->assertSame(round((float) $pricing['route_operational_hours'] * 3200.0, 2), (float) $pricing['flight_cost']);
     }
 
-    public function test_minimum_mission_hours_still_apply_when_exact_route_hours_are_lower(): void
+    public function test_minimum_mission_hours_do_not_change_the_economic_hours(): void
     {
         $this->seed();
         config()->set('vuelos.dynamic_flight_time_enabled', false);
@@ -233,8 +242,10 @@ class FlightPricingServiceDynamicTest extends TestCase
         $this->assertSame('none', $pricing['rounding_mode']);
         $this->assertEqualsWithDelta($targetRouteHours, (float) $pricing['raw_route_hours'], 0.0000001);
         $this->assertEqualsWithDelta($targetRouteHours, (float) $pricing['route_billable_hours'], 0.0000001);
-        $this->assertSame(2.0, (float) $pricing['final_billable_hours']);
-        $this->assertSame(6400.0, (float) $pricing['flight_cost']);
+        $this->assertFalse((bool) $pricing['minimum_applied']);
+        $this->assertEqualsWithDelta((float) $pricing['route_operational_hours'], (float) $pricing['pricing_hours'], 0.0000001);
+        $this->assertEqualsWithDelta((float) $pricing['route_operational_hours'], (float) $pricing['final_billable_hours'], 0.0000001);
+        $this->assertSame(round((float) $pricing['route_operational_hours'] * 3200.0, 2), (float) $pricing['flight_cost']);
     }
 
     public function test_dynamic_operational_model_uses_aircraft_profile_and_rounds_each_leg(): void
@@ -300,7 +311,8 @@ class FlightPricingServiceDynamicTest extends TestCase
         $this->assertSame('operational', $pricing['billing_hours_mode']);
         $this->assertEqualsWithDelta($expectedRouteHours, (float) $pricing['route_billable_hours'], 0.0000001);
         $this->assertEqualsWithDelta($expectedRouteHours, (float) $pricing['display_route_hours'], 0.0000001);
-        $this->assertEqualsWithDelta($expectedRouteHours, (float) $pricing['final_billable_hours'], 0.0000001);
+        $this->assertEqualsWithDelta((float) $pricing['route_operational_hours'], (float) $pricing['pricing_hours'], 0.0000001);
+        $this->assertEqualsWithDelta((float) $pricing['route_operational_hours'], (float) $pricing['final_billable_hours'], 0.0000001);
         $this->assertEqualsWithDelta(145.0, (float) $pricing['legs'][0]['rounded_minutes'], 0.0000001);
         $this->assertCount(2, $pricing['client_legs']);
         foreach ($pricing['client_legs'] as $clientLeg) {
@@ -315,7 +327,8 @@ class FlightPricingServiceDynamicTest extends TestCase
         $this->assertContains((string) $pricing['legs'][0]['profile_match_level'], ['aircraft_id', 'aircraft_model']);
         $this->assertSame('database', (string) $pricing['legs'][0]['profile_source']);
         $this->assertSame('operational', (string) data_get($pricing, 'flight_time_comparison.model'));
-        $this->assertSame(15466.67, (float) $pricing['client_flight_cost']);
+        $this->assertSame(round((float) $pricing['route_operational_hours'] * 3200.0, 2), (float) $pricing['raw_client_flight_cost']);
+        $this->assertSame((float) $pricing['raw_client_flight_cost'], (float) $pricing['client_flight_cost']);
     }
 
     public function test_dynamic_operational_model_honors_speed_knots_when_present(): void
@@ -376,7 +389,7 @@ class FlightPricingServiceDynamicTest extends TestCase
         $this->assertSame(350.0, (float) $pricing['legs'][0]['speed_knots_used']);
     }
 
-    public function test_dynamic_operational_model_still_applies_minimum_hours(): void
+    public function test_dynamic_operational_model_does_not_apply_minimum_hours_to_cost(): void
     {
         $this->seed();
         config()->set('vuelos.dynamic_flight_time_enabled', true);
@@ -405,8 +418,70 @@ class FlightPricingServiceDynamicTest extends TestCase
         );
 
         $this->assertLessThan(2.0, (float) $pricing['route_billable_hours']);
-        $this->assertSame(2.0, (float) $pricing['final_billable_hours']);
-        $this->assertSame(6400.0, (float) $pricing['client_flight_cost']);
+        $this->assertFalse((bool) $pricing['minimum_applied']);
+        $this->assertEqualsWithDelta((float) $pricing['route_operational_hours'], (float) $pricing['pricing_hours'], 0.0000001);
+        $this->assertEqualsWithDelta((float) $pricing['route_operational_hours'], (float) $pricing['final_billable_hours'], 0.0000001);
+        $this->assertSame(round((float) $pricing['route_operational_hours'] * 3200.0, 2), (float) $pricing['raw_client_flight_cost']);
+        $this->assertSame(4800.0, (float) $pricing['client_flight_cost']);
+    }
+
+    public function test_flight_cost_adds_repositioning_without_double_counting_client_hours(): void
+    {
+        $this->seed();
+        config()->set('vuelos.dynamic_flight_time_enabled', false);
+        config()->set('vuelos.flight_time_model', 'direct');
+
+        $aircraft = new Aeronave([
+            'id' => 501,
+            'model' => 'Repositioning Audit Jet',
+            'category' => 'Mid Jet',
+            'hourly_rate' => 6500,
+            'minimum_hours' => 3,
+            'minimum_route_price' => 0,
+            'airport_expenses_usd' => 0,
+            'climb_descent_minutes' => 35,
+            'speed_kmh' => 741,
+            'currency' => 'USD',
+        ]);
+
+        $pricing = app(FlightPricingService::class)->calculateForAircraft(
+            $aircraft,
+            $this->canonicalRoute(distanceNm: 120.0, distanceKm: 222.24),
+            [
+                'include_iva' => false,
+                'airport_expenses' => false,
+                'apply_margin' => false,
+                'operational_context' => [
+                    'apply_repositioning_pricing' => true,
+                    'repositioning' => [
+                        'billable_hours' => 0.5,
+                        'operational_hours' => 0.5,
+                        'cost' => 3250.0,
+                    ],
+                    'return_to_base' => [
+                        'billable_hours' => 0.0,
+                        'operational_hours' => 0.0,
+                        'cost' => 0.0,
+                    ],
+                ],
+            ],
+        );
+
+        $this->assertFalse((bool) $pricing['minimum_applied']);
+        $this->assertEqualsWithDelta((float) $pricing['route_operational_hours'], (float) $pricing['pricing_hours'], 0.0000001);
+        $this->assertSame(
+            round((float) $pricing['pricing_hours'] * 6500.0, 2),
+            (float) $pricing['client_flight_cost']
+        );
+        $this->assertSame(3250.0, (float) $pricing['repositioning_cost']);
+        $this->assertSame(
+            round((float) $pricing['client_flight_cost'] + (float) $pricing['repositioning_cost'] + (float) $pricing['return_to_base_cost'], 2),
+            (float) $pricing['flight_cost']
+        );
+        $this->assertSame(
+            round((float) $pricing['pricing_hours'] + 0.5, 2),
+            round((float) $pricing['total_billed_hours'], 2)
+        );
     }
 
     public function test_dynamic_operational_model_applies_minimum_route_price_once_and_exposes_trace(): void
@@ -468,7 +543,7 @@ class FlightPricingServiceDynamicTest extends TestCase
             ],
         );
 
-        $this->assertSame(15466.67, (float) $pricing['raw_client_flight_cost']);
+        $this->assertSame(round((float) $pricing['route_operational_hours'] * 3200.0, 2), (float) $pricing['raw_client_flight_cost']);
         $this->assertSame(18000.0, (float) $pricing['minimum_route_price']);
         $this->assertTrue((bool) $pricing['minimum_route_price_applied']);
         $this->assertSame('category_minimum_route_price', (string) $pricing['minimum_route_price_reason']);

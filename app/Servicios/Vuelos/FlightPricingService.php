@@ -259,12 +259,13 @@ final class FlightPricingService
         $appliedMinimumHours = $configuredMinimumHours > 0
             ? $configuredMinimumHours
             : $fallbackMinimumHours;
-        $clientBillableHours = max($routeBillableHours, $appliedMinimumHours, 0.0);
-        $minimumHoursApplied = max($clientBillableHours - $routeBillableHours, 0.0);
+        $clientPricingHours = max($routeOperationalHours, 0.0);
+        $minimumHoursApplied = 0.0;
+        $minimumApplied = false;
 
-        $rawClientFlightCost = $clientBillableHours * $hourlyRate;
+        $rawClientFlightCost = $clientPricingHours * $hourlyRate;
         $directFlightCost = $routeDirectHours * $hourlyRate;
-        $operationalFlightCost = $routeOperationalDisplayHours * $hourlyRate;
+        $operationalFlightCost = $routeOperationalHours * $hourlyRate;
         $minimumRoutePricing = $this->resolveMinimumRoutePricing(
             $aircraft,
             $canonicalRoute,
@@ -272,7 +273,7 @@ final class FlightPricingService
                 'trip_type' => $tripType,
                 'route_distance_km' => $routeDistanceKm,
                 'route_distance_nm' => (float) collect($legPricings)->sum('distance_nm'),
-                'final_billable_hours' => $clientBillableHours,
+                'final_billable_hours' => $clientPricingHours,
                 'raw_client_flight_cost' => $rawClientFlightCost,
             ],
         );
@@ -294,7 +295,7 @@ final class FlightPricingService
         $overnightHours = $includeOvernightInBilledHours
             ? $overnightNights * self::COMMERCIAL_OVERNIGHT_HOURS_PER_NIGHT
             : 0.0;
-        $totalBilledHours = $clientBillableHours
+        $totalBilledHours = $clientPricingHours
             + ($includeRepositioningInBilledHours ? $repositioningHours : 0.0)
             + ($includeReturnToBaseInBilledHours ? $returnToBaseHours : 0.0)
             + ($includeOvernightInBilledHours ? $overnightHours : 0.0);
@@ -329,11 +330,11 @@ final class FlightPricingService
             'direct_hours' => round($routeDirectHours, 4),
             'operational_hours' => round($routeOperationalHours, 4),
             'display_hours' => round($routeDisplayHours, 4),
-            'billable_hours' => round($clientBillableHours, 4),
+            'billable_hours' => round($clientPricingHours, 4),
             'direct_price' => round($directFlightCost, 2),
             'operational_price' => round($operationalFlightCost, 2),
             'selected_price' => round($clientFlightCost, 2),
-            'difference_hours_vs_direct' => round($clientBillableHours - $routeDirectHours, 4),
+            'difference_hours_vs_direct' => round($clientPricingHours - $routeDirectHours, 4),
             'difference_price_vs_direct' => round($clientFlightCost - $directFlightCost, 2),
         ];
         $frontendPricingDebug = config('vuelos.frontend_pricing_debug') ? [
@@ -379,8 +380,11 @@ final class FlightPricingService
             'fallback_minimum_hours' => $fallbackMinimumHours,
             'applied_minimum_hours' => $appliedMinimumHours,
             'minimum_hours_applied' => $minimumHoursApplied,
+            'minimum_applied' => $minimumApplied,
             'route_billable_hours' => $routeBillableHours,
-            'final_billable_hours' => $clientBillableHours,
+            'pricing_hours' => $clientPricingHours,
+            'pricing_hours_source' => 'route_operational_hours',
+            'final_billable_hours' => $clientPricingHours,
             'comparison' => $flightTimeComparison,
             'flight_cost' => round($clientFlightCost + $repositioningCost + $returnToBaseCost, 2),
             'raw_client_flight_cost' => round($rawClientFlightCost, 2),
@@ -410,6 +414,36 @@ final class FlightPricingService
             'total_amount' => round($totalAmount, 2),
         ];
 
+        Log::info("========================================\n"
+            ."[FLIGHT HOURS DEBUG]\n"
+            .'Aircraft: '.($aircraft->model ?? $aircraft->registration ?? $aircraft->id)."\n"
+            .'Route hours: '.round($routeBillableHours, 4)."\n"
+            .'Repositioning hours: '.round($repositioningHours + $returnToBaseHours, 4)."\n"
+            .'Operational hours: '.round($routeOperationalHours, 4)."\n"
+            .'Minimum hours: '.round($appliedMinimumHours, 4)."\n"
+            .'Pricing hours: '.round($clientPricingHours, 4)."\n"
+            .'Hourly rate: '.round($hourlyRate, 2)."\n"
+            .'Expected flight cost: '.round($rawClientFlightCost, 2)."\n"
+            .'Actual flight cost: '.round($clientFlightCost, 2)."\n"
+            .'Minimum hours applied: '.($minimumApplied ? 'YES' : 'NO')."\n"
+            ."========================================", [
+                'aircraft_id' => $aircraft->id,
+                'route_direct_hours' => round($routeDirectHours, 4),
+                'route_display_hours' => round($routeDisplayHours, 4),
+                'route_operational_hours' => round($routeOperationalHours, 4),
+                'route_billable_hours' => round($routeBillableHours, 4),
+                'repositioning_hours' => round($repositioningHours, 4),
+                'return_to_base_hours' => round($returnToBaseHours, 4),
+                'configured_minimum_hours' => round($configuredMinimumHours, 4),
+                'applied_minimum_hours' => round($appliedMinimumHours, 4),
+                'pricing_hours' => round($clientPricingHours, 4),
+                'final_billable_hours' => round($clientPricingHours, 4),
+                'hourly_rate' => round($hourlyRate, 2),
+                'expected_flight_cost' => round($rawClientFlightCost, 2),
+                'actual_flight_cost' => round($clientFlightCost, 2),
+                'minimum_applied' => $minimumApplied,
+            ]);
+
         $pricing = [
             'aircraft_id' => $aircraft->id,
             'trip_type' => $tripType,
@@ -422,7 +456,8 @@ final class FlightPricingService
             'fallback_minimum_hours' => $fallbackMinimumHours,
             'applied_minimum_hours' => $appliedMinimumHours,
             'minimum_hours_applied' => $minimumHoursApplied,
-            'minimum_hours' => $appliedMinimumHours,
+            'minimum_applied' => $minimumApplied,
+            'minimum_hours' => $configuredMinimumHours,
             'route_direct_hours' => $routeDirectHours,
             'direct_route_hours' => $routeDirectHours,
             'route_operational_hours' => $routeOperationalHours,
@@ -430,7 +465,9 @@ final class FlightPricingService
             'display_route_hours' => $routeDisplayHours,
             'operational_billable_hours' => $routePricingHours,
             'route_billable_hours' => $routeBillableHours,
-            'final_billable_hours' => $clientBillableHours,
+            'pricing_hours' => $clientPricingHours,
+            'pricing_hours_source' => 'route_operational_hours',
+            'final_billable_hours' => $clientPricingHours,
             'billable_hours' => $totalBilledHours,
             'total_billed_hours' => $totalBilledHours,
             'billable_minutes' => round($totalBilledHours * 60, 2),
@@ -492,8 +529,8 @@ final class FlightPricingService
             'client_climb_descent_minutes' => round($routeClimbDescentMinutes),
             'client_climb_descent_hours' => $routeClimbDescentHours,
             'flight_time_comparison' => $flightTimeComparison,
-            'flight_base_hours' => $clientBillableHours,
-            'flight_base_source' => 'final_billable_hours',
+            'flight_base_hours' => $clientPricingHours,
+            'flight_base_source' => 'route_operational_hours',
             'rounding_mode' => $roundingMode,
             'time_display_mode' => $timeDisplayMode,
             'billing_hours_mode' => $billingHoursMode,
@@ -557,8 +594,12 @@ final class FlightPricingService
                 'configured_minimum_hours' => round($configuredMinimumHours, 2),
                 'fallback_minimum_hours' => round($fallbackMinimumHours, 2),
                 'applied_minimum_hours' => round($appliedMinimumHours, 2),
+                'minimum_applied' => $minimumApplied,
                 'route_billable_hours' => round($routeBillableHours, 4),
-                'final_billable_hours' => round($totalBilledHours, 4),
+                'pricing_hours' => round($clientPricingHours, 4),
+                'pricing_hours_source' => 'route_operational_hours',
+                'final_billable_hours' => round($clientPricingHours, 4),
+                'total_billed_hours' => round($totalBilledHours, 4),
                 'raw_client_flight_cost' => round($rawClientFlightCost, 2),
                 'flight_cost' => round($clientFlightCost, 2),
                 'minimum_route_price' => round($minimumRoutePrice, 2),
@@ -577,12 +618,11 @@ final class FlightPricingService
                 'payment_fee' => round($paymentFee, 2),
                 'taxes' => round($taxes, 2),
                 'expression' => sprintf(
-                    'horas %.6f x tarifa %.2f = %.2f; minimo %.2f (%s) => cliente %.2f; repo %.2f + regreso %.2f + airport %.2f + overnight %.2f => %.2f; margin %.2f; stripe %.2f; admin %.2f; taxes %.2f; total %.2f',
-                    round($clientBillableHours, 6),
+                    'horas operativas %.6f x tarifa %.2f = %.2f; minimo informativo %.2f; cliente %.2f; repo %.2f + regreso %.2f + airport %.2f + overnight %.2f => %.2f; margin %.2f; stripe %.2f; admin %.2f; taxes %.2f; total %.2f',
+                    round($clientPricingHours, 6),
                     round($hourlyRate, 2),
                     round($rawClientFlightCost, 2),
-                    round($minimumRoutePrice, 2),
-                    $minimumRoutePriceApplied ? 'aplicado' : 'no_aplicado',
+                    round($appliedMinimumHours, 2),
                     round($clientFlightCost, 2),
                     round($repositioningCost, 2),
                     round($returnToBaseCost, 2),
@@ -622,8 +662,9 @@ final class FlightPricingService
                 'total_rounded_minutes' => round($routeOperationalDisplayHours * 60, 2),
                 'route_billable_hours' => round($routeBillableHours, 4),
                 'minimum_hours' => round($appliedMinimumHours, 4),
-                'minimum_applied' => round($minimumHoursApplied, 4),
-                'final_billable_hours' => round($clientBillableHours, 4),
+                'minimum_applied' => $minimumApplied,
+                'pricing_hours' => round($clientPricingHours, 4),
+                'final_billable_hours' => round($clientPricingHours, 4),
                 'hourly_rate' => round($hourlyRate, 2),
                 'raw_client_flight_cost' => round($rawClientFlightCost, 2),
                 'client_flight_cost' => round($clientFlightCost, 2),
@@ -641,7 +682,9 @@ final class FlightPricingService
             'fallback_minimum_hours' => $fallbackMinimumHours,
             'applied_minimum_hours' => $appliedMinimumHours,
             'route_billable_hours' => round($routeBillableHours, 4),
-            'final_billable_hours' => round($clientBillableHours, 4),
+            'pricing_hours' => round($clientPricingHours, 4),
+            'minimum_applied' => $minimumApplied,
+            'final_billable_hours' => round($clientPricingHours, 4),
             'flight_cost' => round($clientFlightCost + $repositioningCost + $returnToBaseCost, 2),
             'raw_client_flight_cost' => round($rawClientFlightCost, 2),
             'minimum_route_price' => round($minimumRoutePrice, 2),
