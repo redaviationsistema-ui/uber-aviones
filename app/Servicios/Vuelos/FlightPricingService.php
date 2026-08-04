@@ -31,7 +31,6 @@ final class FlightPricingService
         'distance_nm',
         'billable_hours',
         'billable_minutes',
-        'time_display_mode',
         'billing_hours_mode',
         'rounding_mode',
         'flight_base_source',
@@ -128,7 +127,7 @@ final class FlightPricingService
         ?array $rawClientPayload = null,
     ): array {
         $trustedInput = $this->sanitizeClientPayload($options);
-        $dynamicOperationalEnabled = $this->useOperationalFlightTimeModel();
+        $dynamicOperationalEnabled = $this->useOperationalFlightTimeModel($trustedInput);
         $defaultTimeMode = $dynamicOperationalEnabled ? self::TIME_MODE_OPERATIONAL : self::TIME_MODE_DIRECT;
         if (! array_key_exists('time_display_mode', $trustedInput)) {
             $trustedInput['time_display_mode'] = $defaultTimeMode;
@@ -187,15 +186,20 @@ final class FlightPricingService
         }
 
         $calculatedClientLegs = collect($legs)
-            ->map(function (array $leg, int $index) use ($legPricings, $billingHoursMode): array {
+            ->map(function (array $leg, int $index) use ($legPricings, $timeDisplayMode, $billingHoursMode): array {
                 $legPricing = $legPricings[$index] ?? [];
                 $flightHours = (float) $this->resolveLegHoursByMode($legPricing, $billingHoursMode);
+                $displayHours = (float) $this->resolveLegHoursByMode($legPricing, $timeDisplayMode);
 
                 return [
                     ...$leg,
                     'sequence' => $index + 1,
                     'distance_km' => (float) ($legPricing['distance_km'] ?? $leg['distance_km'] ?? 0.0),
                     'distance_nm' => (float) ($legPricing['distance_nm'] ?? $leg['distance_nm'] ?? 0.0),
+                    'direct_flight_hours' => (float) ($legPricing['direct_air_time_hours'] ?? 0.0),
+                    'display_flight_hours' => $displayHours,
+                    'operational_flight_hours' => (float) ($legPricing['real_flight_hours'] ?? 0.0),
+                    'time_model' => $timeDisplayMode,
                     'flight_hours' => $flightHours,
                     'flight_minutes' => (int) round($flightHours * 60),
                 ];
@@ -420,8 +424,11 @@ final class FlightPricingService
             'minimum_hours_applied' => $minimumHoursApplied,
             'minimum_hours' => $appliedMinimumHours,
             'route_direct_hours' => $routeDirectHours,
+            'direct_route_hours' => $routeDirectHours,
             'route_operational_hours' => $routeOperationalHours,
             'route_operational_display_hours' => $routeOperationalDisplayHours,
+            'display_route_hours' => $routeDisplayHours,
+            'operational_billable_hours' => $routePricingHours,
             'route_billable_hours' => $routeBillableHours,
             'final_billable_hours' => $clientBillableHours,
             'billable_hours' => $totalBilledHours,
@@ -828,10 +835,13 @@ final class FlightPricingService
         return $hourlyRate;
     }
 
-    private function useOperationalFlightTimeModel(): bool
+    private function useOperationalFlightTimeModel(array $requestData = []): bool
     {
-        return (bool) config('vuelos.dynamic_flight_time_enabled', false)
-            && (string) config('vuelos.flight_time_model', 'direct') === 'operational';
+        $requestedMode = mb_strtolower(trim((string) ($requestData['time_display_mode'] ?? '')));
+
+        return $requestedMode === self::TIME_MODE_OPERATIONAL
+            || ((bool) config('vuelos.dynamic_flight_time_enabled', false)
+                && (string) config('vuelos.flight_time_model', 'direct') === self::TIME_MODE_OPERATIONAL);
     }
 
     private function resolveFallbackMinimumHours(mixed $category, float $distanceKm): float

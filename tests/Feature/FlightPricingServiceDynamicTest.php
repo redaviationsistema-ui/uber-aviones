@@ -12,6 +12,36 @@ class FlightPricingServiceDynamicTest extends TestCase
 {
     use RefreshDatabase;
 
+    public function test_operational_display_request_activates_dynamic_model_even_when_server_default_is_direct(): void
+    {
+        $this->seed();
+        config()->set('vuelos.dynamic_flight_time_enabled', false);
+        config()->set('vuelos.flight_time_model', 'direct');
+
+        $aircraft = new Aeronave([
+            'id' => 901,
+            'model' => 'Requested Operational Jet',
+            'category' => 'Light Jet',
+            'hourly_rate' => 2300,
+            'minimum_hours' => 0,
+            'minimum_route_price' => 0,
+            'airport_expenses_usd' => 0,
+            'speed_kmh' => 740,
+            'currency' => 'USD',
+        ]);
+
+        $pricing = app(FlightPricingService::class)->calculateForAircraft(
+            $aircraft,
+            $this->canonicalRoute(distanceNm: 228.0, distanceKm: 422.256),
+            ['time_display_mode' => 'operational'],
+        );
+
+        $this->assertSame('operational', $pricing['time_display_mode']);
+        $this->assertSame('dynamic_operational_profile', $pricing['legs'][0]['hours_source']);
+        $this->assertGreaterThan($pricing['direct_route_hours'], $pricing['display_route_hours']);
+        $this->assertSame('operational', $pricing['client_legs'][0]['time_model']);
+    }
+
     public function test_learjet_31a_uses_aircraft_minimum_hours_once_for_the_whole_trip(): void
     {
         $this->seed();
@@ -269,8 +299,19 @@ class FlightPricingServiceDynamicTest extends TestCase
         $this->assertSame('operational', $pricing['time_display_mode']);
         $this->assertSame('operational', $pricing['billing_hours_mode']);
         $this->assertEqualsWithDelta($expectedRouteHours, (float) $pricing['route_billable_hours'], 0.0000001);
+        $this->assertEqualsWithDelta($expectedRouteHours, (float) $pricing['display_route_hours'], 0.0000001);
         $this->assertEqualsWithDelta($expectedRouteHours, (float) $pricing['final_billable_hours'], 0.0000001);
         $this->assertEqualsWithDelta(145.0, (float) $pricing['legs'][0]['rounded_minutes'], 0.0000001);
+        $this->assertCount(2, $pricing['client_legs']);
+        foreach ($pricing['client_legs'] as $clientLeg) {
+            $this->assertSame('operational', $clientLeg['time_model']);
+            $this->assertGreaterThan((float) $clientLeg['direct_flight_hours'], (float) $clientLeg['display_flight_hours']);
+            $this->assertEqualsWithDelta(
+                (float) $clientLeg['operational_flight_hours'],
+                (float) $clientLeg['display_flight_hours'],
+                0.1,
+            );
+        }
         $this->assertContains((string) $pricing['legs'][0]['profile_match_level'], ['aircraft_id', 'aircraft_model']);
         $this->assertSame('database', (string) $pricing['legs'][0]['profile_source']);
         $this->assertSame('operational', (string) data_get($pricing, 'flight_time_comparison.model'));
