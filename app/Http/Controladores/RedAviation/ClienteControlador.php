@@ -193,6 +193,7 @@ class ClienteControlador extends ControladorBase
             'base_airport' => ['nullable', 'string', 'max:20'],
             'destination' => ['nullable', 'string', 'max:20'],
             'departure_datetime' => ['nullable', 'date'],
+            'return_date' => ['nullable', 'date'],
             'return_datetime' => ['nullable', 'date'],
             'passengers' => ['nullable', 'integer', 'min:1'],
             'trip_type' => ['nullable', 'string', 'max:50'],
@@ -342,6 +343,7 @@ class ClienteControlador extends ControladorBase
             'origin_airport' => ['nullable', 'array'],
             'destination_airport' => ['nullable', 'array'],
             'departure_datetime' => ['nullable', 'date'],
+            'return_date' => ['nullable', 'date'],
             'return_datetime' => ['nullable', 'date'],
             'passengers' => ['required', 'integer', 'min:1'],
             'trip_type' => ['nullable', 'string', 'max:50'],
@@ -374,6 +376,19 @@ class ClienteControlador extends ControladorBase
 
         $canonicalRoute = $this->flightRouteService->buildCanonicalRoute($data);
         $legs = $canonicalRoute['legs'];
+        if (app()->environment('local')) {
+            Log::debug('[QUOTE PREVIEW ROUTE INPUT]', [
+                'trip_type' => $request->input('trip_type'),
+                'origin' => $request->input('origin'),
+                'destination' => $request->input('destination'),
+                'received_legs_count' => count((array) $request->input('legs', [])),
+                'calculated_legs_count' => count($legs),
+                'legs' => $request->input('legs'),
+                'return_to_origin' => $request->boolean('return_to_origin'),
+                'return_to_start' => $request->boolean('return_to_start'),
+                'close_route' => $request->boolean('close_route'),
+            ]);
+        }
         $originAirport = $this->airportFromPayload($legs[0]['origin_airport']);
         $destinationAirport = $this->airportFromPayload($legs[0]['destination_airport']);
         $distanceKm = (float) collect($legs)->sum('distance_km');
@@ -1372,6 +1387,7 @@ class ClienteControlador extends ControladorBase
                 'aircraft_id' => $aircraftId,
                 'total_amount' => $totalAmount,
             ]);
+
             return null;
         }
 
@@ -2301,6 +2317,7 @@ class ClienteControlador extends ControladorBase
 
         return [
             'id' => 'preview-'.$aircraft->id,
+            'trip_type' => $tripType,
             'aircraft_id' => $aircraft->id,
             'aircraft_name' => $aircraft->model,
             'model' => $aircraft->model,
@@ -2368,6 +2385,7 @@ class ClienteControlador extends ControladorBase
             'overnight_fee' => round($pricing['overnight_fee'], 2),
             'jet_a_price' => round($pricing['jet_a_price'], 2),
             'segment_count' => max(count($pricing['client_legs']), 1),
+            'client_legs' => $pricing['client_legs'],
             'subtotal' => round($pricing['subtotal'], 2),
             'utility' => 0,
             'margin' => 0,

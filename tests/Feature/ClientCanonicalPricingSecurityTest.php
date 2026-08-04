@@ -234,6 +234,50 @@ class ClientCanonicalPricingSecurityTest extends TestCase
         $this->assertNull($quote);
     }
 
+    public function test_explicit_round_trip_legs_without_return_date_are_all_priced_and_auditable(): void
+    {
+        $this->seed();
+        $departure = now()->addDays(5)->setTime(9, 0);
+        $return = now()->addDays(8)->setTime(9, 0);
+
+        $response = $this->preview([
+            'origin' => 'MMMX',
+            'destination' => 'MMTO',
+            'departure_datetime' => $departure->toISOString(),
+            'passengers' => 2,
+            'trip_type' => 'round_trip',
+            'return_to_origin' => true,
+            'legs' => [
+                [
+                    'origin' => 'MMMX',
+                    'destination' => 'MMTO',
+                    'departure_datetime' => $departure->toISOString(),
+                ],
+                [
+                    'origin' => 'MMTO',
+                    'destination' => 'MMMX',
+                    'departure_datetime' => $return->toISOString(),
+                ],
+            ],
+        ]);
+
+        $quote = collect($response['matches'])->first();
+        $this->assertNotNull($quote);
+        $clientLegs = data_get($quote, 'client_legs');
+        $this->assertCount(2, $clientLegs);
+        $this->assertSame('MMMX', data_get($clientLegs, '0.origin'));
+        $this->assertSame('MMTO', data_get($clientLegs, '1.origin'));
+        $this->assertSame($departure->toISOString(), data_get($clientLegs, '0.departure_datetime'));
+        $this->assertSame($return->toISOString(), data_get($clientLegs, '1.departure_datetime'));
+
+        $summedHours = (float) collect($clientLegs)->sum('flight_hours');
+        $firstLegHours = (float) data_get($clientLegs, '0.flight_hours');
+        $routeHours = (float) data_get($quote, 'pricing_breakdown.route_billable_hours');
+        $this->assertEqualsWithDelta($summedHours, $routeHours, 0.0000001);
+        $this->assertGreaterThan($firstLegHours, $routeHours);
+        $this->assertSame('round_trip', data_get($quote, 'trip_type'));
+    }
+
     private function basePayload(): array
     {
         $departure = now()->addDays(5)->setTime(10, 0);

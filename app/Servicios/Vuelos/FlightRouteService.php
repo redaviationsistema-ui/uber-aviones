@@ -83,7 +83,7 @@ final class FlightRouteService
                 2,
                 new Aeropuerto($lastDestination),
                 new Aeropuerto($firstOrigin),
-                $payload['return_datetime'] ?? null,
+                $payload['return_datetime'] ?? $payload['return_date'] ?? null,
             );
         }
 
@@ -98,7 +98,7 @@ final class FlightRouteService
                 count($legs) + 1,
                 new Aeropuerto($lastDestination),
                 new Aeropuerto($firstOrigin),
-                $payload['return_datetime'] ?? null,
+                $payload['return_datetime'] ?? $payload['return_date'] ?? null,
             );
         }
 

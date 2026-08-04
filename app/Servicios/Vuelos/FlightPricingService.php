@@ -7,13 +7,13 @@ use App\Modelos\Aeropuerto;
 use App\Modelos\ReglaGastoAeropuerto;
 use App\Modelos\ReglaPrecioCategoria;
 use App\Servicios\Pagos\PaymentFeeCalculationServicio;
+use Carbon\Carbon;
 use Closure;
-use Illuminate\Support\Str;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
-use Carbon\Carbon;
+use Illuminate\Support\Str;
 
 final class FlightPricingService
 {
@@ -63,15 +63,25 @@ final class FlightPricingService
     ];
 
     private const TIME_MODE_DIRECT = 'direct';
+
     private const TIME_MODE_DIRECT_PLUS_CLIMB = 'direct_plus_climb';
+
     private const TIME_MODE_OPERATIONAL = 'operational';
+
     private const ROUNDING_MODE_NONE = 'none';
+
     private const ROUNDING_MODE_QUARTER_NEAREST = 'quarter_nearest';
+
     private const ROUNDING_MODE_QUARTER_UP = 'quarter_up';
+
     private const DEFAULT_IVA_RATE = 0.16;
+
     private const DEFAULT_AIRPORT_EXPENSE_USD = 1000.0;
+
     private const COMMERCIAL_OVERNIGHT_HOURS_PER_NIGHT = 0.5;
+
     private const SHORT_ROUTE_DISTANCE_KM = 300.0;
+
     private const AIRCRAFT_CATEGORY_MINIMUM_PRICE = [
         'Helicoptero' => ['minimum_route_price' => 2200.0, 'redsky_markup' => 20.0],
         'Turboprop' => ['minimum_route_price' => 2800.0, 'redsky_markup' => 20.0],
@@ -81,8 +91,11 @@ final class FlightPricingService
     ];
 
     private ?bool $categoryPricingRulesTableExists = null;
+
     private array $categoryPricingRuleCache = [];
+
     private ?bool $airportExpenseRulesTableExists = null;
+
     private ?Collection $airportExpenseRulesCache = null;
 
     public function __construct(
@@ -172,6 +185,23 @@ final class FlightPricingService
             $accumulatedMinutes += (float) ($legPricing['billable_minutes'] ?? (($legPricing['billable_hours'] ?? 0) * 60));
             $legPricings[] = $legPricing;
         }
+
+        $calculatedClientLegs = collect($legs)
+            ->map(function (array $leg, int $index) use ($legPricings, $billingHoursMode): array {
+                $legPricing = $legPricings[$index] ?? [];
+                $flightHours = (float) $this->resolveLegHoursByMode($legPricing, $billingHoursMode);
+
+                return [
+                    ...$leg,
+                    'sequence' => $index + 1,
+                    'distance_km' => (float) ($legPricing['distance_km'] ?? $leg['distance_km'] ?? 0.0),
+                    'distance_nm' => (float) ($legPricing['distance_nm'] ?? $leg['distance_nm'] ?? 0.0),
+                    'flight_hours' => $flightHours,
+                    'flight_minutes' => (int) round($flightHours * 60),
+                ];
+            })
+            ->values()
+            ->all();
 
         $routeDistanceKm = (float) collect($legPricings)->sum('distance_km');
         $routeDirectHours = (float) collect($legPricings)->sum('direct_air_time_hours');
@@ -436,7 +466,7 @@ final class FlightPricingService
             'total_amount' => round($totalAmount, 2),
             'final_price' => round($totalAmount, 2),
             'selected_card_price' => round($totalAmount, 2),
-            'client_legs' => $legs,
+            'client_legs' => $calculatedClientLegs,
             'legs' => $legPricings,
             'client_leg_pricing' => $legPricings,
             'repositioning_hours' => round($repositioningHours, 4),
