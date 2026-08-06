@@ -248,7 +248,7 @@ class FlightPricingServiceDynamicTest extends TestCase
         $this->assertSame(round((float) $pricing['route_operational_hours'] * 3200.0, 2), (float) $pricing['flight_cost']);
     }
 
-    public function test_dynamic_operational_model_uses_aircraft_profile_and_rounds_each_leg(): void
+    public function test_dynamic_operational_model_exposes_unrounded_visible_time(): void
     {
         $this->seed();
         config()->set('vuelos.dynamic_flight_time_enabled', true);
@@ -256,16 +256,228 @@ class FlightPricingServiceDynamicTest extends TestCase
 
         DB::table('aircraft_performance_profiles')->insert([
             'aircraft_id' => null,
-            'aircraft_model' => 'HAWKER 800XPI',
+            'aircraft_model' => 'Route Rounded Jet',
             'aircraft_type' => null,
+            'taxi_out_minutes' => 0,
+            'taxi_in_minutes' => 0,
+            'takeoff_minutes' => 0,
+            'landing_minutes' => 0,
+            'climb_minutes' => 0,
+            'climb_distance_nm' => 0,
+            'descent_minutes' => 0,
+            'descent_distance_nm' => 0,
+            'fixed_operational_minutes' => 0,
+            'short_leg_threshold_nm' => 180,
+            'medium_leg_threshold_nm' => 500,
+            'short_leg_speed_factor' => 1.0,
+            'medium_leg_speed_factor' => 1.0,
+            'long_leg_speed_factor' => 1.0,
+            'rounding_increment_minutes' => 5,
+            'is_active' => true,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $aircraft = new Aeronave([
+            'id' => 12,
+            'model' => 'Route Rounded Jet',
+            'category' => 'Mid Jet',
+            'hourly_rate' => 3200,
+            'minimum_hours' => 2,
+            'minimum_route_price' => 0,
+            'airport_expenses_usd' => 0,
+            'speed_kmh' => 555,
+            'currency' => 'USD',
+        ]);
+
+        $pricing = app(FlightPricingService::class)->calculateForAircraft(
+            $aircraft,
+            $this->multiLegCanonicalRoute([303.0, 303.0]),
+            [
+                'include_iva' => false,
+                'airport_expenses' => false,
+                'apply_margin' => false,
+            ],
+        );
+
+        $baseSpeedKnots = 555.0 / 1.852;
+        $expectedOperationalMinutesPerLeg = (303.0 / $baseSpeedKnots) * 60;
+        $expectedRouteOperationalHours = ($expectedOperationalMinutesPerLeg * 2) / 60;
+        $legacyPerLegRoundedHours = ((ceil($expectedOperationalMinutesPerLeg / 5.0) * 5.0) * 2) / 60;
+
+        $this->assertSame('operational', $pricing['time_display_mode']);
+        $this->assertSame('operational', $pricing['billing_hours_mode']);
+        $this->assertEqualsWithDelta($expectedRouteOperationalHours, (float) $pricing['route_billable_hours'], 0.0000001);
+        $this->assertEqualsWithDelta($expectedRouteOperationalHours, (float) $pricing['display_route_hours'], 0.0000001);
+        $this->assertEqualsWithDelta($expectedRouteOperationalHours, (float) $pricing['route_operational_display_hours'], 0.0000001);
+        $this->assertNotEqualsWithDelta($legacyPerLegRoundedHours, (float) $pricing['display_route_hours'], 0.0000001);
+        $this->assertEqualsWithDelta((float) $pricing['route_operational_hours'], (float) $pricing['pricing_hours'], 0.0000001);
+        $this->assertEqualsWithDelta((float) $pricing['route_operational_hours'], (float) $pricing['final_billable_hours'], 0.0000001);
+        $this->assertCount(2, $pricing['client_legs']);
+        foreach ($pricing['client_legs'] as $clientLeg) {
+            $this->assertSame('operational', $clientLeg['time_model']);
+            $this->assertEqualsWithDelta(
+                (float) $clientLeg['operational_flight_hours'],
+                (float) $clientLeg['display_flight_hours'],
+                0.0000001,
+            );
+        }
+        $this->assertContains((string) $pricing['legs'][0]['profile_match_level'], ['aircraft_id', 'aircraft_model']);
+        $this->assertSame('database', (string) $pricing['legs'][0]['profile_source']);
+        $this->assertSame('operational', (string) data_get($pricing, 'flight_time_comparison.model'));
+        $this->assertSame(round((float) $pricing['route_operational_hours'] * 3200.0, 2), (float) $pricing['raw_client_flight_cost']);
+        $this->assertSame((float) $pricing['raw_client_flight_cost'], (float) $pricing['client_flight_cost']);
+    }
+
+    public function test_dynamic_operational_model_generates_profile_from_new_aircraft_data_without_model_rules(): void
+    {
+        $this->seed();
+        config()->set('vuelos.dynamic_flight_time_enabled', true);
+        config()->set('vuelos.flight_time_model', 'operational');
+
+        $aircraft = new Aeronave([
+            'id' => 912,
+            'model' => 'Future Platform 9000',
+            'category' => 'Heavy Jet',
+            'hourly_rate' => 7200,
+            'minimum_hours' => 0,
+            'minimum_route_price' => 0,
+            'airport_expenses_usd' => 0,
+            'speed_kmh' => 870,
+            'climb_descent_minutes' => 52,
+            'climb_descent_source' => Aeronave::CLIMB_DESCENT_SOURCE_MANUAL,
+            'currency' => 'USD',
+        ]);
+        $aircraft->fixed_minutes_per_leg = 9;
+
+        $pricing = app(FlightPricingService::class)->calculateForAircraft(
+            $aircraft,
+            $this->canonicalRoute(distanceNm: 640.0, distanceKm: 1185.28),
+            [
+                'include_iva' => false,
+                'airport_expenses' => false,
+                'apply_margin' => false,
+            ],
+        );
+
+        $baseSpeedKnots = 870.0 / 1.852;
+        $climbShare = 16.0 / (16.0 + 12.0);
+        $expectedClimbMinutes = round(52.0 * $climbShare, 2);
+        $expectedDescentMinutes = round(52.0 - $expectedClimbMinutes, 2);
+        $expectedCruiseMinutes = ((640.0 - 70.0 - 55.0) / $baseSpeedKnots) * 60;
+        $expectedOperationalHours = (
+            4.0
+            + 1.0
+            + $expectedClimbMinutes
+            + $expectedCruiseMinutes
+            + $expectedDescentMinutes
+            + 2.0
+            + 3.0
+            + 9.0
+        ) / 60;
+
+        $this->assertSame('aircraft_generated', (string) $pricing['legs'][0]['profile_source']);
+        $this->assertSame('aircraft_dynamic', (string) $pricing['legs'][0]['profile_match_level']);
+        $this->assertSame('aircraft.speed_kmh', (string) $pricing['legs'][0]['speed_source']);
+        $this->assertEqualsWithDelta($expectedClimbMinutes, (float) $pricing['legs'][0]['climb_minutes'], 0.0000001);
+        $this->assertEqualsWithDelta($expectedDescentMinutes, (float) $pricing['legs'][0]['descent_minutes'], 0.0000001);
+        $this->assertSame(9.0, (float) $pricing['legs'][0]['fixed_operational_minutes']);
+        $this->assertEqualsWithDelta($expectedOperationalHours, (float) $pricing['route_operational_hours'], 0.0000001);
+        $this->assertEqualsWithDelta((float) $pricing['route_operational_hours'], (float) $pricing['pricing_hours'], 0.0000001);
+    }
+
+    public function test_persisted_category_default_minutes_override_type_profile_climb_descent_total(): void
+    {
+        $this->seed();
+        config()->set('vuelos.dynamic_flight_time_enabled', true);
+        config()->set('vuelos.flight_time_model', 'operational');
+
+        $aircraft = new Aeronave([
+            'id' => 913,
+            'model' => 'Category Default Light Jet',
+            'category' => 'Light Jet',
+            'hourly_rate' => 3200,
+            'minimum_hours' => 0,
+            'minimum_route_price' => 0,
+            'airport_expenses_usd' => 0,
+            'speed_kmh' => 780,
+            'climb_descent_minutes' => 30,
+            'climb_descent_source' => Aeronave::CLIMB_DESCENT_SOURCE_CATEGORY_DEFAULT,
+            'currency' => 'USD',
+        ]);
+
+        $pricing = app(FlightPricingService::class)->calculateForAircraft(
+            $aircraft,
+            $this->canonicalRoute(distanceNm: 640.0, distanceKm: 1185.28),
+            [
+                'include_iva' => false,
+                'airport_expenses' => false,
+                'apply_margin' => false,
+            ],
+        );
+
+        $this->assertEqualsWithDelta(16.36, (float) $pricing['legs'][0]['climb_minutes'], 0.01);
+        $this->assertEqualsWithDelta(13.64, (float) $pricing['legs'][0]['descent_minutes'], 0.01);
+        $this->assertSame(30.0, (float) $pricing['legs'][0]['climb_descent_minutes_effective']);
+        $this->assertSame('category_default', (string) $pricing['legs'][0]['climb_descent_source_recorded']);
+        $this->assertSame('category_fallback', (string) $pricing['legs'][0]['climb_descent_source_effective']);
+    }
+
+    public function test_manual_climb_descent_source_overrides_dynamic_profile(): void
+    {
+        $this->seed();
+        config()->set('vuelos.dynamic_flight_time_enabled', true);
+        config()->set('vuelos.flight_time_model', 'operational');
+
+        $aircraft = new Aeronave([
+            'id' => 914,
+            'model' => 'Manual Climb Jet',
+            'category' => 'Light Jet',
+            'hourly_rate' => 3200,
+            'minimum_hours' => 0,
+            'minimum_route_price' => 0,
+            'airport_expenses_usd' => 0,
+            'speed_kmh' => 780,
+            'climb_descent_minutes' => 52,
+            'climb_descent_source' => Aeronave::CLIMB_DESCENT_SOURCE_MANUAL,
+            'currency' => 'USD',
+        ]);
+
+        $pricing = app(FlightPricingService::class)->calculateForAircraft(
+            $aircraft,
+            $this->canonicalRoute(distanceNm: 640.0, distanceKm: 1185.28),
+            [
+                'include_iva' => false,
+                'airport_expenses' => false,
+                'apply_margin' => false,
+            ],
+        );
+
+        $this->assertEqualsWithDelta(28.36, (float) $pricing['legs'][0]['climb_minutes'], 0.01);
+        $this->assertEqualsWithDelta(23.64, (float) $pricing['legs'][0]['descent_minutes'], 0.01);
+        $this->assertSame(52.0, (float) $pricing['legs'][0]['climb_descent_minutes_effective']);
+        $this->assertSame('manual', (string) $pricing['legs'][0]['climb_descent_source_recorded']);
+        $this->assertSame('manual', (string) $pricing['legs'][0]['climb_descent_source_effective']);
+    }
+
+    public function test_database_type_profile_is_used_when_aircraft_has_no_persisted_minutes(): void
+    {
+        $this->seed();
+        config()->set('vuelos.dynamic_flight_time_enabled', true);
+        config()->set('vuelos.flight_time_model', 'operational');
+
+        DB::table('aircraft_performance_profiles')->insert([
+            'aircraft_id' => null,
+            'aircraft_model' => null,
+            'aircraft_type' => 'Mid Jet',
             'taxi_out_minutes' => 4,
             'taxi_in_minutes' => 3,
             'takeoff_minutes' => 1,
             'landing_minutes' => 2,
-            'climb_minutes' => 14,
-            'climb_distance_nm' => 55,
-            'descent_minutes' => 10,
-            'descent_distance_nm' => 40,
+            'climb_minutes' => 18,
+            'climb_distance_nm' => 58,
+            'descent_minutes' => 11,
+            'descent_distance_nm' => 42,
             'fixed_operational_minutes' => 3,
             'short_leg_threshold_nm' => 180,
             'medium_leg_threshold_nm' => 500,
@@ -279,21 +491,22 @@ class FlightPricingServiceDynamicTest extends TestCase
         ]);
 
         $aircraft = new Aeronave([
-            'id' => 12,
-            'model' => 'HAWKER 800XPI',
+            'id' => 915,
+            'model' => 'Mid Jet Type Override',
             'category' => 'Mid Jet',
             'hourly_rate' => 3200,
-            'minimum_hours' => 2,
+            'minimum_hours' => 0,
             'minimum_route_price' => 0,
             'airport_expenses_usd' => 0,
-            'climb_descent_minutes' => 35,
             'speed_kmh' => 741,
+            'climb_descent_minutes' => 0,
+            'climb_descent_source' => Aeronave::CLIMB_DESCENT_SOURCE_CATEGORY_DEFAULT,
             'currency' => 'USD',
         ]);
 
         $pricing = app(FlightPricingService::class)->calculateForAircraft(
             $aircraft,
-            $this->roundTripCanonicalRoute(distanceNm: 811.0, distanceKm: 1502.0),
+            $this->canonicalRoute(distanceNm: 640.0, distanceKm: 1185.28),
             [
                 'include_iva' => false,
                 'airport_expenses' => false,
@@ -301,34 +514,72 @@ class FlightPricingServiceDynamicTest extends TestCase
             ],
         );
 
-        $baseSpeedKnots = 741.0 / 1.852;
-        $cruiseDistanceNm = 811.0 - 55.0 - 40.0;
-        $expectedOperationalMinutes = 4.0 + 1.0 + 14.0 + (($cruiseDistanceNm / $baseSpeedKnots) * 60) + 10.0 + 2.0 + 3.0 + 3.0;
-        $expectedRoundedMinutes = ceil($expectedOperationalMinutes / 5.0) * 5.0;
-        $expectedRouteHours = ($expectedRoundedMinutes * 2) / 60;
-
-        $this->assertSame('operational', $pricing['time_display_mode']);
-        $this->assertSame('operational', $pricing['billing_hours_mode']);
-        $this->assertEqualsWithDelta($expectedRouteHours, (float) $pricing['route_billable_hours'], 0.0000001);
-        $this->assertEqualsWithDelta($expectedRouteHours, (float) $pricing['display_route_hours'], 0.0000001);
-        $this->assertEqualsWithDelta((float) $pricing['route_operational_hours'], (float) $pricing['pricing_hours'], 0.0000001);
-        $this->assertEqualsWithDelta((float) $pricing['route_operational_hours'], (float) $pricing['final_billable_hours'], 0.0000001);
-        $this->assertEqualsWithDelta(145.0, (float) $pricing['legs'][0]['rounded_minutes'], 0.0000001);
-        $this->assertCount(2, $pricing['client_legs']);
-        foreach ($pricing['client_legs'] as $clientLeg) {
-            $this->assertSame('operational', $clientLeg['time_model']);
-            $this->assertGreaterThan((float) $clientLeg['direct_flight_hours'], (float) $clientLeg['display_flight_hours']);
-            $this->assertEqualsWithDelta(
-                (float) $clientLeg['operational_flight_hours'],
-                (float) $clientLeg['display_flight_hours'],
-                0.1,
-            );
-        }
-        $this->assertContains((string) $pricing['legs'][0]['profile_match_level'], ['aircraft_id', 'aircraft_model']);
+        $this->assertSame(18.0, (float) $pricing['legs'][0]['climb_minutes']);
+        $this->assertSame(11.0, (float) $pricing['legs'][0]['descent_minutes']);
+        $this->assertSame(29.0, (float) $pricing['legs'][0]['climb_descent_minutes_effective']);
         $this->assertSame('database', (string) $pricing['legs'][0]['profile_source']);
-        $this->assertSame('operational', (string) data_get($pricing, 'flight_time_comparison.model'));
-        $this->assertSame(round((float) $pricing['route_operational_hours'] * 3200.0, 2), (float) $pricing['raw_client_flight_cost']);
-        $this->assertSame((float) $pricing['raw_client_flight_cost'], (float) $pricing['client_flight_cost']);
+        $this->assertContains((string) $pricing['legs'][0]['profile_match_level'], ['aircraft_type', 'aircraft_model', 'aircraft_id']);
+        $this->assertSame('profile_db', (string) $pricing['legs'][0]['climb_descent_source_effective']);
+    }
+
+    public function test_database_model_profile_takes_precedence_over_persisted_aircraft_minutes(): void
+    {
+        $this->seed();
+        config()->set('vuelos.dynamic_flight_time_enabled', true);
+        config()->set('vuelos.flight_time_model', 'operational');
+
+        DB::table('aircraft_performance_profiles')->insert([
+            'aircraft_id' => null,
+            'aircraft_model' => 'Model Priority Jet',
+            'aircraft_type' => null,
+            'taxi_out_minutes' => 4,
+            'taxi_in_minutes' => 3,
+            'takeoff_minutes' => 1,
+            'landing_minutes' => 2,
+            'climb_minutes' => 21,
+            'climb_distance_nm' => 58,
+            'descent_minutes' => 9,
+            'descent_distance_nm' => 42,
+            'fixed_operational_minutes' => 3,
+            'short_leg_threshold_nm' => 180,
+            'medium_leg_threshold_nm' => 500,
+            'short_leg_speed_factor' => 0.76,
+            'medium_leg_speed_factor' => 0.88,
+            'long_leg_speed_factor' => 1.0,
+            'rounding_increment_minutes' => 5,
+            'is_active' => true,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $aircraft = new Aeronave([
+            'id' => 916,
+            'model' => 'Model Priority Jet',
+            'category' => 'Mid Jet',
+            'hourly_rate' => 3200,
+            'minimum_hours' => 0,
+            'minimum_route_price' => 0,
+            'airport_expenses_usd' => 0,
+            'speed_kmh' => 741,
+            'climb_descent_minutes' => 35,
+            'climb_descent_source' => Aeronave::CLIMB_DESCENT_SOURCE_CATEGORY_DEFAULT,
+            'currency' => 'USD',
+        ]);
+
+        $pricing = app(FlightPricingService::class)->calculateForAircraft(
+            $aircraft,
+            $this->canonicalRoute(distanceNm: 640.0, distanceKm: 1185.28),
+            [
+                'include_iva' => false,
+                'airport_expenses' => false,
+                'apply_margin' => false,
+            ],
+        );
+
+        $this->assertSame(21.0, (float) $pricing['legs'][0]['climb_minutes']);
+        $this->assertSame(9.0, (float) $pricing['legs'][0]['descent_minutes']);
+        $this->assertSame(30.0, (float) $pricing['legs'][0]['climb_descent_minutes_effective']);
+        $this->assertSame('profile_db', (string) $pricing['legs'][0]['climb_descent_source_effective']);
     }
 
     public function test_dynamic_operational_model_honors_speed_knots_when_present(): void
@@ -706,6 +957,61 @@ class FlightPricingServiceDynamicTest extends TestCase
                     'departure_datetime' => '2026-08-03T18:00:00Z',
                 ],
             ],
+        ];
+    }
+
+    private function multiLegCanonicalRoute(array $distancesNm): array
+    {
+        $originAirport = [
+            'id' => 1,
+            'icao' => 'MMMX',
+            'iata' => 'MEX',
+            'country' => 'MX',
+            'latitude' => 19.4361,
+            'longitude' => -99.0719,
+            'climb_descent_adjustment_minutes' => 0,
+        ];
+        $destinationAirport = [
+            'id' => 2,
+            'icao' => 'MMTO',
+            'iata' => 'TLC',
+            'country' => 'MX',
+            'latitude' => 19.3371,
+            'longitude' => -99.5660,
+            'climb_descent_adjustment_minutes' => 0,
+        ];
+
+        $legs = [];
+        $totalDistanceNm = 0.0;
+        $totalDistanceKm = 0.0;
+
+        foreach (array_values($distancesNm) as $index => $distanceNm) {
+            $distanceKm = (float) $distanceNm * 1.852;
+            $isEvenLeg = $index % 2 === 0;
+            $legs[] = [
+                'position' => $index + 1,
+                'origin' => $isEvenLeg ? 'MMMX' : 'MMTO',
+                'destination' => $isEvenLeg ? 'MMTO' : 'MMMX',
+                'origin_airport' => $isEvenLeg ? $originAirport : $destinationAirport,
+                'destination_airport' => $isEvenLeg ? $destinationAirport : $originAirport,
+                'distance_km' => $distanceKm,
+                'distance_nm' => (float) $distanceNm,
+                'international' => false,
+                'departure_datetime' => sprintf('2026-08-%02dT10:00:00Z', $index + 3),
+            ];
+            $totalDistanceNm += (float) $distanceNm;
+            $totalDistanceKm += $distanceKm;
+        }
+
+        return [
+            'trip_type' => 'multi_leg',
+            'origin' => 'MMMX',
+            'destination' => 'MMTO',
+            'route_signature' => 'MMMX>MMTO>MMMX',
+            'distance_km' => $totalDistanceKm,
+            'distance_nm' => $totalDistanceNm,
+            'max_leg_distance_km' => max(array_map(fn ($leg) => (float) $leg['distance_km'], $legs)),
+            'legs' => $legs,
         ];
     }
 }

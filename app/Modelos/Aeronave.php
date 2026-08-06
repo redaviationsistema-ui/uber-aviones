@@ -33,6 +33,16 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  */
 class Aeronave extends Model
 {
+    public const CLIMB_DESCENT_SOURCE_MANUAL = 'manual';
+
+    public const CLIMB_DESCENT_SOURCE_CATEGORY_DEFAULT = 'category_default';
+
+    public const CLIMB_DESCENT_SOURCE_PROFILE_DB = 'profile_db';
+
+    public const CLIMB_DESCENT_SOURCE_GLOBAL_DEFAULT = 'global_default';
+
+    public const CLIMB_DESCENT_SOURCE_LEGACY_UNKNOWN = 'legacy_unknown';
+
     protected $table = 'aircraft';
 
     private bool $baseAirportResolved = false;
@@ -65,6 +75,7 @@ class Aeronave extends Model
         'minimum_hours',
         'minimum_route_price',
         'climb_descent_minutes',
+        'climb_descent_source',
         'operational_cost',
         'fuel_burn_gph',
         'engine_reserve_rate',
@@ -111,6 +122,7 @@ class Aeronave extends Model
             'minimum_hours' => 'decimal:2',
             'minimum_route_price' => 'decimal:2',
             'climb_descent_minutes' => 'integer',
+            'climb_descent_source' => 'string',
             'operational_cost' => 'decimal:2',
             'fuel_burn_gph' => 'decimal:2',
             'engine_reserve_rate' => 'decimal:2',

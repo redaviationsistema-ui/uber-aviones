@@ -29,12 +29,31 @@ final class DynamicFlightDurationService
         'rounding_increment_minutes',
     ];
 
+    private const PROFILE_DB_LEVEL_TYPE = 'aircraft_type';
+
+    private const PROFILE_DB_LEVEL_MODEL = 'aircraft_model';
+
+    private const PROFILE_DB_LEVEL_AIRCRAFT_ID = 'aircraft_id';
+
+    private const CLIMB_DESCENT_SOURCE_EFFECTIVE_MANUAL = 'manual';
+
+    private const CLIMB_DESCENT_SOURCE_EFFECTIVE_PROFILE_DB = 'profile_db';
+
+    private const CLIMB_DESCENT_SOURCE_EFFECTIVE_CATEGORY_FALLBACK = 'category_fallback';
+
+    private const CLIMB_DESCENT_SOURCE_EFFECTIVE_GLOBAL_FALLBACK = 'global_fallback';
+
+    private const CLIMB_DESCENT_SOURCE_EFFECTIVE_LEGACY_UNKNOWN = 'legacy_unknown_fallback';
+
     private ?bool $profilesTableExists = null;
 
     private array $resolvedProfiles = [];
 
+    private array $resolvedClimbDescentDiagnostics = [];
+
     public function __construct(
         private readonly FlightDurationService $legacyFlightDurationService,
+        private readonly ClimbDescentCategoryResolver $climbDescentCategoryResolver,
     ) {}
 
     public function calculateLeg(
@@ -47,6 +66,7 @@ final class DynamicFlightDurationService
         array $context = [],
     ): array {
         $profile = $this->resolveProfile($aircraft);
+        $climbDescentDiagnostics = $this->resolveClimbDescentDiagnostics($aircraft, $profile);
         $storedSpeedValue = $this->resolveStoredSpeedValue($aircraft);
         $storedSpeedUnit = $this->resolveStoredSpeedUnit($aircraft);
         $speedConversionApplied = $storedSpeedUnit === 'km/h_to_knots';
@@ -77,6 +97,7 @@ final class DynamicFlightDurationService
             : 0.0;
         $billableMinutes = max($roundedMinutes, $minimumHours * 60);
         $billableHours = $billableMinutes / 60;
+        $displayOperationalHours = $operationalMinutesRaw / 60;
         $hourlyRate = $this->commercialHourlyRate($aircraft->hourly_rate);
         $accumulatedMinutes = max(0.0, (float) ($context['accumulated_minutes_before'] ?? 0.0)) + $billableMinutes;
         $departureDateTime = filled($context['departure_datetime'] ?? null)
@@ -101,8 +122,8 @@ final class DynamicFlightDurationService
             'climb_descent_minutes' => (float) $profile['climb_minutes'] + (float) $profile['descent_minutes'],
             'climb_descent_hours' => ((float) $profile['climb_minutes'] + (float) $profile['descent_minutes']) / 60,
             'reserve_hours' => 0.0,
-            'display_flight_hours' => $billableHours,
-            'operational_display_hours' => $billableHours,
+            'display_flight_hours' => $displayOperationalHours,
+            'operational_display_hours' => $displayOperationalHours,
             'operational_factor' => $effectiveSpeedFactor,
             'fixed_minutes_per_leg' => (float) $profile['fixed_operational_minutes'],
             'minimum_minutes_per_leg' => 0.0,
@@ -132,6 +153,9 @@ final class DynamicFlightDurationService
             'cruise_distance_nm' => $cruiseDistanceNm,
             'descent_minutes' => (float) $profile['descent_minutes'],
             'descent_distance_nm' => (float) $profile['descent_distance_nm'],
+            'climb_descent_minutes_effective' => (float) ($climbDescentDiagnostics['effective_minutes'] ?? 0.0),
+            'climb_descent_source_effective' => (string) ($climbDescentDiagnostics['effective_source'] ?? self::CLIMB_DESCENT_SOURCE_EFFECTIVE_GLOBAL_FALLBACK),
+            'climb_descent_source_recorded' => (string) ($climbDescentDiagnostics['recorded_source'] ?? Aeronave::CLIMB_DESCENT_SOURCE_LEGACY_UNKNOWN),
             'fixed_operational_minutes' => (float) $profile['fixed_operational_minutes'],
             'rounding_increment_minutes' => $roundingIncrementMinutes,
             'stored_speed_value' => $storedSpeedValue,
@@ -168,6 +192,9 @@ final class DynamicFlightDurationService
                 'descent_minutes' => $leg['descent_minutes'],
                 'landing_minutes' => $leg['landing_minutes'],
                 'taxi_in_minutes' => $leg['taxi_in_minutes'],
+                'climb_descent_minutes_effective' => $leg['climb_descent_minutes_effective'],
+                'climb_descent_source_recorded' => $leg['climb_descent_source_recorded'],
+                'climb_descent_source_effective' => $leg['climb_descent_source_effective'],
                 'operational_minutes_raw' => $operationalMinutesRaw,
                 'rounded_minutes' => $roundedMinutes,
                 'billable_minutes' => $billableMinutes,
@@ -195,51 +222,97 @@ final class DynamicFlightDurationService
         $globalProfile = $this->globalProfile();
         $typeProfile = $this->typeProfile((string) ($aircraft->category ?? ''));
         $resolved = [...$globalProfile, ...$typeProfile];
+        $profileSource = $typeProfile !== [] ? 'config.aircraft_type' : 'config.global';
+        $profileMatchLevel = $typeProfile !== [] ? 'aircraft_type' : 'global';
+        $profileId = null;
 
-        $dbProfile = $this->findDatabaseProfile($aircraft);
-        if ($dbProfile instanceof AircraftPerformanceProfile) {
-            $resolved = [...$resolved, ...$this->profileFromModel($dbProfile)];
-            $resolved['profile_source'] = 'database';
-            $resolved['profile_match_level'] = $this->profileMatchLevel($dbProfile, $aircraft);
-            $resolved['profile_id'] = $dbProfile->id;
-        } else {
-            $resolved['profile_source'] = $typeProfile !== [] ? 'config.aircraft_type' : 'config.global';
-            $resolved['profile_match_level'] = $typeProfile !== [] ? 'aircraft_type' : 'global';
-            $resolved['profile_id'] = null;
+        $aircraftGeneratedProfile = $this->aircraftGeneratedProfile($aircraft, $resolved);
+        if ($aircraftGeneratedProfile !== []) {
+            $resolved = [...$resolved, ...$aircraftGeneratedProfile];
+            $profileSource = 'aircraft_generated';
+            $profileMatchLevel = 'aircraft_dynamic';
         }
+
+        $databaseProfiles = $this->findDatabaseProfiles($aircraft);
+
+        foreach (['type', 'model', 'aircraft_id'] as $databaseLevel) {
+            $databaseProfile = $databaseProfiles[$databaseLevel] ?? null;
+            if (! $databaseProfile instanceof AircraftPerformanceProfile) {
+                continue;
+            }
+
+            $resolved = [...$resolved, ...$this->profileFromModel($databaseProfile)];
+            $profileSource = 'database';
+            $profileMatchLevel = $this->profileMatchLevel($databaseProfile, $aircraft);
+            $profileId = $databaseProfile->id;
+        }
+
+        $climbDescentResolution = $this->resolveClimbDescentProfile($aircraft, $resolved, $databaseProfiles);
+        if (($climbDescentResolution['profile'] ?? []) !== []) {
+            $resolved = [...$resolved, ...$climbDescentResolution['profile']];
+        }
+
+        $resolved['climb_descent_resolution_source'] = (string) ($climbDescentResolution['source'] ?? 'global_profile');
+        $resolved['climb_descent_resolution_level'] = (string) ($climbDescentResolution['level'] ?? 'global');
+
+        $resolved['profile_source'] = $profileSource;
+        $resolved['profile_match_level'] = $profileMatchLevel;
+        $resolved['profile_id'] = $profileId;
 
         return $this->resolvedProfiles[$cacheKey] = $resolved;
     }
 
-    private function findDatabaseProfile(Aeronave $aircraft): ?AircraftPerformanceProfile
+    /**
+     * @return array{type?: AircraftPerformanceProfile, model?: AircraftPerformanceProfile, aircraft_id?: AircraftPerformanceProfile}
+     */
+    private function findDatabaseProfiles(Aeronave $aircraft): array
     {
         if (! $this->profilesTableExists()) {
-            return null;
+            return [];
         }
 
-        $query = AircraftPerformanceProfile::query()
-            ->where('is_active', true)
-            ->where(function ($query) use ($aircraft) {
-                $query->where('aircraft_id', $aircraft->id);
+        $profiles = [];
+        $type = mb_strtolower(trim((string) ($aircraft->category ?? '')));
+        $model = mb_strtolower(trim((string) ($aircraft->model ?? '')));
+        $aircraftId = (int) ($aircraft->id ?? 0);
 
-                $model = mb_strtolower(trim((string) ($aircraft->model ?? '')));
-                if ($model !== '') {
-                    $query->orWhereRaw('LOWER(aircraft_model) = ?', [$model]);
-                }
+        if ($type !== '') {
+            $typeProfile = AircraftPerformanceProfile::query()
+                ->where('is_active', true)
+                ->whereRaw('LOWER(aircraft_type) = ?', [$type])
+                ->orderByDesc('id')
+                ->first();
 
-                $type = mb_strtolower(trim((string) ($aircraft->category ?? '')));
-                if ($type !== '') {
-                    $query->orWhereRaw('LOWER(aircraft_type) = ?', [$type]);
-                }
-            })
-            ->orderByRaw('case when aircraft_id = ? then 0 when LOWER(aircraft_model) = ? then 1 when LOWER(aircraft_type) = ? then 2 else 3 end', [
-                $aircraft->id,
-                mb_strtolower(trim((string) ($aircraft->model ?? ''))),
-                mb_strtolower(trim((string) ($aircraft->category ?? ''))),
-            ])
-            ->orderByDesc('id');
+            if ($typeProfile instanceof AircraftPerformanceProfile) {
+                $profiles['type'] = $typeProfile;
+            }
+        }
 
-        return $query->first();
+        if ($model !== '') {
+            $modelProfile = AircraftPerformanceProfile::query()
+                ->where('is_active', true)
+                ->whereRaw('LOWER(aircraft_model) = ?', [$model])
+                ->orderByDesc('id')
+                ->first();
+
+            if ($modelProfile instanceof AircraftPerformanceProfile) {
+                $profiles['model'] = $modelProfile;
+            }
+        }
+
+        if ($aircraftId > 0) {
+            $aircraftProfile = AircraftPerformanceProfile::query()
+                ->where('is_active', true)
+                ->where('aircraft_id', $aircraftId)
+                ->orderByDesc('id')
+                ->first();
+
+            if ($aircraftProfile instanceof AircraftPerformanceProfile) {
+                $profiles['aircraft_id'] = $aircraftProfile;
+            }
+        }
+
+        return $profiles;
     }
 
     private function profilesTableExists(): bool
@@ -290,14 +363,183 @@ final class DynamicFlightDurationService
     private function profileMatchLevel(AircraftPerformanceProfile $profile, Aeronave $aircraft): string
     {
         if ((int) ($profile->aircraft_id ?? 0) === (int) ($aircraft->id ?? 0)) {
-            return 'aircraft_id';
+            return self::PROFILE_DB_LEVEL_AIRCRAFT_ID;
         }
 
         if (mb_strtolower(trim((string) ($profile->aircraft_model ?? ''))) === mb_strtolower(trim((string) ($aircraft->model ?? '')))) {
-            return 'aircraft_model';
+            return self::PROFILE_DB_LEVEL_MODEL;
         }
 
-        return 'aircraft_type';
+        return self::PROFILE_DB_LEVEL_TYPE;
+    }
+
+    private function aircraftGeneratedProfile(Aeronave $aircraft, array $fallbackProfile): array
+    {
+        $generated = [];
+
+        if ((float) ($aircraft->fixed_minutes_per_leg ?? 0) > 0) {
+            $generated['fixed_operational_minutes'] = (float) $aircraft->fixed_minutes_per_leg;
+        }
+
+        if ((float) ($aircraft->operational_factor ?? 0) > 0) {
+            $speedFactor = max(min(1 / (float) $aircraft->operational_factor, 1.0), 0.1);
+            $generated['short_leg_speed_factor'] = $speedFactor;
+            $generated['medium_leg_speed_factor'] = $speedFactor;
+            $generated['long_leg_speed_factor'] = $speedFactor;
+        }
+
+        if ((float) ($aircraft->minimum_minutes_per_leg ?? 0) > 0) {
+            $generated['rounding_increment_minutes'] = max((float) ($fallbackProfile['rounding_increment_minutes'] ?? 5.0), 1.0);
+        }
+
+        return $generated;
+    }
+
+    /**
+     * @param  array<string, mixed>  $resolvedProfile
+     * @param  array{type?: AircraftPerformanceProfile, model?: AircraftPerformanceProfile, aircraft_id?: AircraftPerformanceProfile}  $databaseProfiles
+     * @return array{profile: array<string, float>, source: string, level: string}
+     */
+    private function resolveClimbDescentProfile(Aeronave $aircraft, array $resolvedProfile, array $databaseProfiles): array
+    {
+        $aircraftIdProfile = $databaseProfiles['aircraft_id'] ?? null;
+        if ($aircraftIdProfile instanceof AircraftPerformanceProfile) {
+            return [
+                'profile' => $this->splitClimbDescentMinutes(
+                    $this->totalProfileClimbDescentMinutes($this->profileFromModel($aircraftIdProfile)),
+                    $this->profileFromModel($aircraftIdProfile),
+                ),
+                'source' => 'profile_db',
+                'level' => self::PROFILE_DB_LEVEL_AIRCRAFT_ID,
+            ];
+        }
+
+        $modelProfile = $databaseProfiles['model'] ?? null;
+        if ($modelProfile instanceof AircraftPerformanceProfile) {
+            return [
+                'profile' => $this->splitClimbDescentMinutes(
+                    $this->totalProfileClimbDescentMinutes($this->profileFromModel($modelProfile)),
+                    $this->profileFromModel($modelProfile),
+                ),
+                'source' => 'profile_db',
+                'level' => self::PROFILE_DB_LEVEL_MODEL,
+            ];
+        }
+
+        $persistedMinutes = max((float) ($aircraft->climb_descent_minutes ?? 0), 0.0);
+        if ($persistedMinutes > 0) {
+            return [
+                'profile' => $this->splitClimbDescentMinutes($persistedMinutes, $resolvedProfile),
+                'source' => 'aircraft_record',
+                'level' => 'aircraft_record',
+            ];
+        }
+
+        $typeProfile = $databaseProfiles['type'] ?? null;
+        if ($typeProfile instanceof AircraftPerformanceProfile) {
+            return [
+                'profile' => $this->splitClimbDescentMinutes(
+                    $this->totalProfileClimbDescentMinutes($this->profileFromModel($typeProfile)),
+                    $this->profileFromModel($typeProfile),
+                ),
+                'source' => 'profile_db',
+                'level' => self::PROFILE_DB_LEVEL_TYPE,
+            ];
+        }
+
+        $categoryDefaultMinutes = (float) $this->climbDescentCategoryResolver->resolveClimbDescentMinutesForCategory((string) ($aircraft->category ?? ''));
+        if ($categoryDefaultMinutes > 0) {
+            return [
+                'profile' => $this->splitClimbDescentMinutes($categoryDefaultMinutes, $resolvedProfile),
+                'source' => 'config_category_default',
+                'level' => 'category_default',
+            ];
+        }
+
+        return [
+            'profile' => [],
+            'source' => 'global_profile',
+            'level' => 'global',
+        ];
+    }
+
+    private function resolveClimbDescentDiagnostics(Aeronave $aircraft, array $profile): array
+    {
+        $cacheKey = implode(':', [
+            (string) ($aircraft->id ?? 'new'),
+            mb_strtolower(trim((string) ($aircraft->model ?? ''))),
+            mb_strtolower(trim((string) ($aircraft->category ?? ''))),
+            (string) ($aircraft->climb_descent_minutes ?? 0),
+            (string) ($aircraft->climb_descent_source ?? ''),
+            (string) ($profile['profile_match_level'] ?? ''),
+        ]);
+
+        if (array_key_exists($cacheKey, $this->resolvedClimbDescentDiagnostics)) {
+            return $this->resolvedClimbDescentDiagnostics[$cacheKey];
+        }
+
+        $recordedSource = $this->resolveRecordedClimbDescentSource($aircraft);
+        $effectiveMinutes = (float) $profile['climb_minutes'] + (float) $profile['descent_minutes'];
+        $climbDescentResolutionSource = (string) ($profile['climb_descent_resolution_source'] ?? '');
+        $effectiveSource = match (true) {
+            $climbDescentResolutionSource === 'profile_db' => self::CLIMB_DESCENT_SOURCE_EFFECTIVE_PROFILE_DB,
+            $climbDescentResolutionSource === 'aircraft_record' && $recordedSource === Aeronave::CLIMB_DESCENT_SOURCE_MANUAL => self::CLIMB_DESCENT_SOURCE_EFFECTIVE_MANUAL,
+            $climbDescentResolutionSource === 'aircraft_record' && $recordedSource === Aeronave::CLIMB_DESCENT_SOURCE_LEGACY_UNKNOWN => self::CLIMB_DESCENT_SOURCE_EFFECTIVE_LEGACY_UNKNOWN,
+            $climbDescentResolutionSource === 'aircraft_record' => self::CLIMB_DESCENT_SOURCE_EFFECTIVE_CATEGORY_FALLBACK,
+            $climbDescentResolutionSource === 'config_category_default' => self::CLIMB_DESCENT_SOURCE_EFFECTIVE_CATEGORY_FALLBACK,
+            default => self::CLIMB_DESCENT_SOURCE_EFFECTIVE_GLOBAL_FALLBACK,
+        };
+
+        return $this->resolvedClimbDescentDiagnostics[$cacheKey] = [
+            'recorded_source' => $recordedSource,
+            'effective_source' => $effectiveSource,
+            'effective_minutes' => $effectiveMinutes,
+        ];
+    }
+
+    private function resolveRecordedClimbDescentSource(Aeronave $aircraft): string
+    {
+        $source = trim((string) ($aircraft->climb_descent_source ?? ''));
+
+        return in_array($source, [
+            Aeronave::CLIMB_DESCENT_SOURCE_MANUAL,
+            Aeronave::CLIMB_DESCENT_SOURCE_CATEGORY_DEFAULT,
+            Aeronave::CLIMB_DESCENT_SOURCE_PROFILE_DB,
+            Aeronave::CLIMB_DESCENT_SOURCE_GLOBAL_DEFAULT,
+            Aeronave::CLIMB_DESCENT_SOURCE_LEGACY_UNKNOWN,
+        ], true) ? $source : Aeronave::CLIMB_DESCENT_SOURCE_LEGACY_UNKNOWN;
+    }
+
+    /**
+     * @param  array<string, mixed>  $profile
+     * @return array<string, float>
+     */
+    private function splitClimbDescentMinutes(float $totalMinutes, array $profile): array
+    {
+        $totalMinutes = max($totalMinutes, 0.0);
+        if ($totalMinutes <= 0.0) {
+            return [];
+        }
+
+        $referenceClimb = max((float) ($profile['climb_minutes'] ?? 0.0), 0.0);
+        $referenceDescent = max((float) ($profile['descent_minutes'] ?? 0.0), 0.0);
+        $referenceTotal = $referenceClimb + $referenceDescent;
+        $climbShare = $referenceTotal > 0.0 ? $referenceClimb / $referenceTotal : 0.5;
+        $climbMinutes = round($totalMinutes * $climbShare, 2);
+
+        return [
+            'climb_minutes' => $climbMinutes,
+            'descent_minutes' => round($totalMinutes - $climbMinutes, 2),
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $profile
+     */
+    private function totalProfileClimbDescentMinutes(array $profile): float
+    {
+        return max((float) ($profile['climb_minutes'] ?? 0.0), 0.0)
+            + max((float) ($profile['descent_minutes'] ?? 0.0), 0.0);
     }
 
     private function resolveEffectiveSpeedFactor(float $distanceNm, array $profile): float

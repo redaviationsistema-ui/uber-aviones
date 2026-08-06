@@ -145,12 +145,61 @@ class ClientCanonicalPricingSecurityTest extends TestCase
         );
         $this->assertSame(
             'official_backend_pricing_v4',
+            data_get($previewQuote, 'pricing_breakdown.pricing_version'),
+        );
+        $this->assertSame(
+            'official_backend_pricing_v4',
+            data_get($stored, 'flight_request.pricing_breakdown.pricing_version'),
+        );
+        $this->assertSame(
+            'official_backend_pricing_v4',
             data_get($stored, 'flight_request.pricing_context.pricing_formula_version'),
         );
         $this->assertSame(
             'backend_distance_and_aircraft_speed',
             data_get($stored, 'flight_request.pricing_context.duration_snapshot.source'),
         );
+
+        foreach ([
+            'display_route_hours',
+            'final_billable_hours',
+            'billable_hours',
+            'flight_cost',
+            'airport_expenses',
+            'stripe_fee',
+            'administrative_fee',
+            'taxes',
+            'total_amount',
+        ] as $field) {
+            $this->assertSame(
+                (float) data_get($previewQuote, "pricing_breakdown.{$field}"),
+                (float) data_get($stored, "flight_request.pricing_breakdown.{$field}"),
+                $field,
+            );
+            $this->assertSame(
+                (float) data_get($previewQuote, "pricing_breakdown.{$field}"),
+                (float) data_get($previewQuote, $field),
+                'preview_top_level_'.$field,
+            );
+            $this->assertSame(
+                (float) data_get($stored, "flight_request.pricing_breakdown.{$field}"),
+                (float) data_get($stored, "flight_request.{$field}"),
+                'stored_top_level_'.$field,
+            );
+        }
+
+        foreach (['time', 'card_time', 'trip_time'] as $field) {
+            $this->assertSame(
+                (string) data_get($previewQuote, 'time'),
+                (string) data_get($previewQuote, $field),
+                'preview_'.$field,
+            );
+            $this->assertSame(
+                (string) data_get($stored, 'flight_request.time'),
+                (string) data_get($stored, "flight_request.{$field}"),
+                'stored_'.$field,
+            );
+        }
     }
 
     public function test_preview_exposes_explicit_estimated_and_billable_time_fields(): void
@@ -172,6 +221,19 @@ class ClientCanonicalPricingSecurityTest extends TestCase
         $this->assertSame(
             (string) data_get($quote, 'billed_time'),
             (string) data_get($quote, 'billable_flight_time'),
+        );
+        $this->assertSame(
+            (string) data_get($quote, 'time'),
+            (string) data_get($quote, 'card_time'),
+        );
+        $this->assertSame(
+            (string) data_get($quote, 'time'),
+            (string) data_get($quote, 'trip_time'),
+        );
+        $this->assertMatchesRegularExpression('/\b(min|h)\b/i', (string) data_get($quote, 'time'));
+        $this->assertSame(
+            (float) data_get($quote, 'pricing_breakdown.display_route_hours'),
+            (float) data_get($quote, 'display_route_hours'),
         );
     }
 

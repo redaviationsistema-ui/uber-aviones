@@ -2,6 +2,7 @@
 
 namespace App\Servicios\RedAviation;
 
+use App\Http\Resources\RedAviation\OfficialQuotePricingResource;
 use App\Modelos\Aeronave;
 use App\Modelos\ImagenAeronave;
 use App\Modelos\Operacion;
@@ -95,6 +96,10 @@ class VisibilidadServicio
             'accepted_quote_total' => $acceptedQuote?->total,
             'currency' => $solicitud->currency,
         ]);
+        $pricingPayload = $this->officialPricingPayload(
+            is_array($solicitud->pricing_context) ? $solicitud->pricing_context : [],
+            $solicitud->currency,
+        );
 
         return [
             'id' => $solicitud->id,
@@ -130,10 +135,7 @@ class VisibilidadServicio
             'operational_fee' => $solicitud->operational_fee,
             'priority_price' => $solicitud->priority_price,
             'final_price' => $solicitud->final_price,
-            'flight_cost' => data_get($solicitud->pricing_context, 'flight_cost'),
-            'stripe_fee' => data_get($solicitud->pricing_context, 'stripe_fee'),
-            'administrative_fee' => data_get($solicitud->pricing_context, 'administrative_fee'),
-            'total_amount' => data_get($solicitud->pricing_context, 'total_amount', $solicitud->final_price),
+            ...$pricingPayload,
             'currency' => $solicitud->currency,
             'pricing_context' => $solicitud->pricing_context,
             'visibility_payload' => $visibilityPayload,
@@ -255,6 +257,10 @@ class VisibilidadServicio
             : ($match?->status === 'accepted'
                 ? 'accepted'
                 : ($solicitud->workflow_status ?? $solicitud->status));
+        $pricingPayload = $this->officialPricingPayload(
+            is_array($solicitud->pricing_context) ? $solicitud->pricing_context : [],
+            $solicitud->currency,
+        );
 
         return [
             'id' => $solicitud->id,
@@ -282,10 +288,7 @@ class VisibilidadServicio
             'operational_fee' => $solicitud->operational_fee,
             'priority_price' => $solicitud->priority_price,
             'final_price' => $solicitud->final_price,
-            'flight_cost' => data_get($solicitud->pricing_context, 'flight_cost'),
-            'stripe_fee' => data_get($solicitud->pricing_context, 'stripe_fee'),
-            'administrative_fee' => data_get($solicitud->pricing_context, 'administrative_fee'),
-            'total_amount' => data_get($solicitud->pricing_context, 'total_amount', $solicitud->final_price),
+            ...$pricingPayload,
             'currency' => $solicitud->currency,
             'pricing_context' => $solicitud->pricing_context,
             'visibility_payload' => $visibilityPayload,
@@ -337,6 +340,10 @@ class VisibilidadServicio
             : collect();
         $latestPayment = $this->resolveLatestPayment($reservation);
         $client = $this->resolveClient($solicitud);
+        $pricingPayload = $this->officialPricingPayload(
+            is_array($solicitud->pricing_context) ? $solicitud->pricing_context : [],
+            $solicitud->currency,
+        );
 
         return [
             'id' => $solicitud->id,
@@ -370,10 +377,7 @@ class VisibilidadServicio
             'operational_fee' => $solicitud->operational_fee,
             'priority_price' => $solicitud->priority_price,
             'final_price' => $solicitud->final_price,
-            'flight_cost' => data_get($solicitud->pricing_context, 'flight_cost'),
-            'stripe_fee' => data_get($solicitud->pricing_context, 'stripe_fee'),
-            'administrative_fee' => data_get($solicitud->pricing_context, 'administrative_fee'),
-            'total_amount' => data_get($solicitud->pricing_context, 'total_amount', $solicitud->final_price),
+            ...$pricingPayload,
             'currency' => $solicitud->currency,
             'pricing_context' => $solicitud->pricing_context,
             'visibility_payload' => $visibilityPayload,
@@ -542,6 +546,17 @@ class VisibilidadServicio
         return $matches->first(fn ($match) => $match->status === 'accepted')
             ?? $matches->first(fn ($match) => in_array($match->status, ['sent_to_provider', 'pending'], true))
             ?? $matches->first();
+    }
+
+    private function officialPricingPayload(array $pricingContext, ?string $currency = null): array
+    {
+        if ($pricingContext === []) {
+            return [];
+        }
+
+        return OfficialQuotePricingResource::build($pricingContext, array_filter([
+            'currency' => $currency,
+        ], fn ($value) => $value !== null && $value !== ''));
     }
 
     private function matchPreferidoParaCliente(SolicitudVuelo $solicitud)

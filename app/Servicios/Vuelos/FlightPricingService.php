@@ -210,12 +210,12 @@ final class FlightPricingService
         $routeDistanceKm = (float) collect($legPricings)->sum('distance_km');
         $routeDirectHours = (float) collect($legPricings)->sum('direct_air_time_hours');
         $routeOperationalHours = (float) collect($legPricings)->sum('real_flight_hours');
-        $routeOperationalDisplayHours = (float) collect($legPricings)->sum(
-            fn (array $legPricing): float => (float) ($legPricing['operational_display_hours'] ?? ($legPricing['real_flight_hours'] ?? 0.0))
-        );
-        $routeDisplayHours = (float) collect($legPricings)->sum(
-            fn (array $legPricing) => $this->resolveLegHoursByMode($legPricing, $timeDisplayMode)
-        );
+        $routeOperationalDisplayHours = $this->resolveOperationalRouteDisplayHours($routeOperationalHours, $legPricings);
+        $routeDisplayHours = $timeDisplayMode === self::TIME_MODE_OPERATIONAL
+            ? $routeOperationalDisplayHours
+            : (float) collect($legPricings)->sum(
+                fn (array $legPricing) => $this->resolveLegHoursByMode($legPricing, $timeDisplayMode)
+            );
         $routePricingHours = (float) collect($legPricings)->sum(
             fn (array $legPricing) => $this->resolveLegHoursByMode($legPricing, $billingHoursMode)
         );
@@ -803,6 +803,13 @@ final class FlightPricingService
             self::TIME_MODE_DIRECT_PLUS_CLIMB => (float) ($legPricing['direct_air_time_hours'] ?? 0) + (float) ($legPricing['climb_descent_hours'] ?? 0),
             default => (float) ($legPricing['direct_air_time_hours'] ?? 0),
         };
+    }
+
+    private function resolveOperationalRouteDisplayHours(float $routeOperationalHours, array $legPricings): float
+    {
+        unset($legPricings);
+
+        return $routeOperationalHours;
     }
 
     private function resolveRoundingMode(array $requestData, string $hoursSource): string

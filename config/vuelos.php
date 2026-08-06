@@ -10,6 +10,14 @@ return [
     'pricing_debug' => (bool) env('PRICING_DEBUG', false),
     'frontend_pricing_debug' => (bool) env('VITE_PRICING_DEBUG', false),
     'minimum_route_price_v2_enabled' => (bool) env('MINIMUM_ROUTE_PRICE_V2_ENABLED', false),
+    'climb_descent_defaults' => [
+        'Helicoptero' => 15,
+        'Turboprop' => 25,
+        'Light Jet' => 30,
+        'Mid Jet' => 35,
+        'Heavy Jet' => 45,
+    ],
+    'climb_descent_default_fallback' => 30,
     'dynamic_flight_time' => [
         'rounding_strategy' => env('FLIGHT_TIME_ROUNDING_STRATEGY', 'ceil'),
         'global_profile' => [

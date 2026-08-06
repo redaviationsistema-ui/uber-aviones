@@ -13,6 +13,7 @@ use App\Modelos\SuscripcionAeronave;
 use App\Servicios\Billing\BillingPlanServicio;
 use App\Servicios\ReintentoCoincidenciaSolicitudServicio;
 use App\Servicios\RedAviation\VisibilidadServicio;
+use App\Servicios\Vuelos\ClimbDescentCategoryResolver;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\Storage;
@@ -53,17 +54,10 @@ class OperadorControlador extends ControladorBase
         'Heavy Jet',
     ];
 
-    private const CATEGORY_CLIMB_DESCENT_MINUTES = [
-        'Helicoptero' => 25,
-        'Turboprop' => 25,
-        'Light Jet' => 30,
-        'Mid Jet' => 35,
-        'Heavy Jet' => 45,
-    ];
-
     public function __construct(
         private readonly VisibilidadServicio $visibilidadServicio,
         private readonly ReintentoCoincidenciaSolicitudServicio $reintentoServicio,
+        private readonly ClimbDescentCategoryResolver $climbDescentCategoryResolver,
     )
     {
     }
@@ -205,6 +199,7 @@ class OperadorControlador extends ControladorBase
                 'hourly_rate',
                 'minimum_hours',
                 'climb_descent_minutes',
+                'climb_descent_source',
                 'fuel_burn_gph',
                 'engine_reserve_rate',
                 'insurance_rate',
@@ -628,11 +623,8 @@ class OperadorControlador extends ControladorBase
         $resolvedCategory = $data['category'] ?? $this->normalizeAircraftCategory($aircraft?->category);
         if ($resolvedCategory) {
             $data['minimum_hours'] = $this->resolveMinimumHoursForCategory($resolvedCategory);
-
-            if (! array_key_exists('climb_descent_minutes', $data) || (int) ($data['climb_descent_minutes'] ?? 0) <= 0) {
-                $data['climb_descent_minutes'] = $this->resolveClimbDescentMinutesForCategory($resolvedCategory);
-            }
         }
+        $data = $this->normalizeClimbDescentInput($data, $resolvedCategory, $aircraft);
 
         if (array_key_exists('coverage', $data)) {
             $data['coverage'] = $this->normalizeNullableString($data['coverage']);
@@ -669,7 +661,39 @@ class OperadorControlador extends ControladorBase
 
     private function resolveClimbDescentMinutesForCategory(?string $category): int
     {
-        return self::CATEGORY_CLIMB_DESCENT_MINUTES[$this->normalizeAircraftCategory($category) ?? ''] ?? 30;
+        return $this->climbDescentCategoryResolver->resolveClimbDescentMinutesForCategory($category);
+    }
+
+    private function normalizeClimbDescentInput(array $data, ?string $resolvedCategory, ?Aeronave $aircraft = null): array
+    {
+        if (! $resolvedCategory) {
+            return $data;
+        }
+
+        $hasExplicitInput = array_key_exists('climb_descent_minutes', $data);
+        $explicitMinutes = (int) ($data['climb_descent_minutes'] ?? 0);
+        if ($hasExplicitInput && $explicitMinutes > 0) {
+            $data['climb_descent_minutes'] = $explicitMinutes;
+            $data['climb_descent_source'] = Aeronave::CLIMB_DESCENT_SOURCE_MANUAL;
+
+            return $data;
+        }
+
+        if (! $hasExplicitInput) {
+            if ((int) ($aircraft?->climb_descent_minutes ?? 0) > 0) {
+                return $data;
+            }
+
+            $data['climb_descent_minutes'] = $this->resolveClimbDescentMinutesForCategory($resolvedCategory);
+            $data['climb_descent_source'] = Aeronave::CLIMB_DESCENT_SOURCE_CATEGORY_DEFAULT;
+
+            return $data;
+        }
+
+        $data['climb_descent_minutes'] = $this->resolveClimbDescentMinutesForCategory($resolvedCategory);
+        $data['climb_descent_source'] = Aeronave::CLIMB_DESCENT_SOURCE_CATEGORY_DEFAULT;
+
+        return $data;
     }
 
     private function formatAircraftPayload(Aeronave $aircraft, $plan = null, ?int $fleetCount = null, bool $includeDetails = false): array
@@ -710,7 +734,8 @@ class OperadorControlador extends ControladorBase
             'hourly_rate' => $aircraft->hourly_rate,
             'year' => $aircraft->model_year,
             'minimum_hours' => $aircraft->minimum_hours ?: $this->resolveMinimumHoursForCategory($aircraft->category),
-            'climb_descent_minutes' => $aircraft->climb_descent_minutes ?: $this->resolveClimbDescentMinutesForCategory($aircraft->category),
+            'climb_descent_minutes' => $this->climbDescentCategoryResolver->resolveAircraftMinutes($aircraft),
+            'climb_descent_source' => $aircraft->climb_descent_source ?: Aeronave::CLIMB_DESCENT_SOURCE_LEGACY_UNKNOWN,
             'amenities' => $this->parseAmenities($aircraft->amenities),
             'fuel_burn_gph' => $aircraft->fuel_burn_gph,
             'engine_reserve_rate' => $aircraft->engine_reserve_rate,
