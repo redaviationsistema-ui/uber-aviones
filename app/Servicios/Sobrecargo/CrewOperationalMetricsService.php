@@ -3,10 +3,7 @@
 namespace App\Servicios\Sobrecargo;
 
 use App\Dominio\Sobrecargo\CrewAssignmentStatus;
-use App\Modelos\AsignacionSobrecargo;
-use App\Modelos\Operacion;
 use Carbon\CarbonImmutable;
-use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
@@ -18,51 +15,60 @@ class CrewOperationalMetricsService
     {
         [$from, $to] = $this->period($filters);
         $crewId = isset($filters['crew_member_id']) ? (int) $filters['crew_member_id'] : null;
-
-        $assignments = AsignacionSobrecargo::query()
-            ->whereBetween('assigned_at', [$from->utc(), $to->utc()])
-            ->when($crewId, fn (Builder $query) => $query->where('sobrecargo_user_id', $crewId))
-            ->when($filters['status'] ?? null, fn (Builder $query, string $status) => $query->where('status', $status))
-            ->when($filters['base'] ?? null, fn (Builder $query, string $base) => $query->whereHas('operacion.sobrecargo.profile', fn (Builder $profile) => $profile->where('base_airport', $base)))
-            ->when($filters['operation_type'] ?? null, fn (Builder $query, string $type) => $query->whereHas('operacion.solicitudVuelo', fn (Builder $flight) => $flight->where('trip_type', $type)));
-        $created = (clone $assignments)->count();
-        $pending = (clone $assignments)->where('status', CrewAssignmentStatus::PENDING_CONFIRMATION)->count();
-        $accepted = (clone $assignments)->where('status', CrewAssignmentStatus::CONFIRMED)->count();
-        $rejected = (clone $assignments)->where('status', CrewAssignmentStatus::REJECTED)->count();
+        $assignments = (array) $this->assignmentMetricsQuery($filters, $from, $to, $crewId)
+            ->selectRaw('COUNT(*)::int as created')
+            ->selectRaw(
+                'COUNT(*) FILTER (WHERE status = ?)::int as pending',
+                [CrewAssignmentStatus::PENDING_CONFIRMATION]
+            )
+            ->selectRaw(
+                'COUNT(*) FILTER (WHERE status = ?)::int as accepted',
+                [CrewAssignmentStatus::CONFIRMED]
+            )
+            ->selectRaw(
+                'COUNT(*) FILTER (WHERE status = ?)::int as rejected',
+                [CrewAssignmentStatus::REJECTED]
+            )
+            ->selectRaw(
+                'AVG(EXTRACT(EPOCH FROM (COALESCE(accepted_at, rejected_at) - assigned_at)) / 60.0) FILTER (WHERE assigned_at IS NOT NULL AND (accepted_at IS NOT NULL OR rejected_at IS NOT NULL)) as average_response_time_minutes'
+            )
+            ->first();
+        $created = (int) ($assignments['created'] ?? 0);
+        $pending = (int) ($assignments['pending'] ?? 0);
+        $accepted = (int) ($assignments['accepted'] ?? 0);
+        $rejected = (int) ($assignments['rejected'] ?? 0);
         $responded = $accepted + $rejected;
-        $averageResponse = (clone $assignments)
-            ->whereNotNull('assigned_at')
-            ->where(fn (Builder $query) => $query->whereNotNull('accepted_at')->orWhereNotNull('rejected_at'))
-            ->get(['assigned_at', 'accepted_at', 'rejected_at'])
-            ->average(fn (AsignacionSobrecargo $assignment) => $assignment->assigned_at?->diffInMinutes($assignment->accepted_at ?: $assignment->rejected_at));
+        $averageResponse = isset($assignments['average_response_time_minutes'])
+            ? (float) $assignments['average_response_time_minutes']
+            : null;
 
-        $operations = Operacion::query()
-            ->whereBetween('created_at', [$from->utc(), $to->utc()])
-            ->when($crewId, fn (Builder $query) => $query->where('sobrecargo_user_id', $crewId))
-            ->when($filters['status'] ?? null, fn (Builder $query, string $status) => $query->where('crew_status', $status))
-            ->when($filters['base'] ?? null, fn (Builder $query, string $base) => $query->whereHas('sobrecargo.profile', fn (Builder $profile) => $profile->where('base_airport', $base)))
-            ->when($filters['operation_type'] ?? null, fn (Builder $query, string $type) => $query->whereHas('solicitudVuelo', fn (Builder $flight) => $flight->where('trip_type', $type)));
-        $onTime = (clone $operations)->where('crew_checkin_status', 'on_time')->count();
-        $late = (clone $operations)->whereIn('crew_checkin_status', ['late', 'very_late'])->count();
+        $operations = (array) $this->operationsMetricsQuery($filters, $from, $to, $crewId)
+            ->selectRaw("COUNT(*) FILTER (WHERE crew_checkin_status = 'on_time')::int as on_time")
+            ->selectRaw("COUNT(*) FILTER (WHERE crew_checkin_status IN ('late', 'very_late'))::int as late")
+            ->selectRaw('COUNT(*) FILTER (WHERE crew_status = ?)::int as no_shows', [CrewAssignmentStatus::NO_SHOW])
+            ->selectRaw('COUNT(*) FILTER (WHERE crew_status = ?)::int as pending_reports', [CrewAssignmentStatus::REPORT_PENDING])
+            ->selectRaw('COUNT(*) FILTER (WHERE crew_administratively_closed_at IS NOT NULL)::int as completed')
+            ->selectRaw(
+                'AVG(EXTRACT(EPOCH FROM (crew_administratively_closed_at - created_at)) / 60.0) as average_closure_time_minutes'
+            )
+            ->first();
+        $onTime = (int) ($operations['on_time'] ?? 0);
+        $late = (int) ($operations['late'] ?? 0);
         $checkIns = $onTime + $late;
-        $noShows = (clone $operations)->where('crew_status', CrewAssignmentStatus::NO_SHOW)->count();
-        $pendingReports = (clone $operations)->where('crew_status', CrewAssignmentStatus::REPORT_PENDING)->count();
-        $completed = (clone $operations)->whereNotNull('crew_administratively_closed_at')->count();
-        $averageClosure = (clone $operations)->whereNotNull('crew_administratively_closed_at')
-            ->get(['created_at', 'crew_administratively_closed_at'])
-            ->average(fn (Operacion $operation) => $operation->created_at?->diffInMinutes($operation->crew_administratively_closed_at));
+        $noShows = (int) ($operations['no_shows'] ?? 0);
+        $pendingReports = (int) ($operations['pending_reports'] ?? 0);
+        $completed = (int) ($operations['completed'] ?? 0);
+        $averageClosure = isset($operations['average_closure_time_minutes'])
+            ? (float) $operations['average_closure_time_minutes']
+            : null;
 
-        $incidents = DB::table('crew_operation_incidents')
-            ->join('operations', 'operations.id', '=', 'crew_operation_incidents.crew_operation_id')
-            ->whereBetween('crew_operation_incidents.reported_at', [$from->utc(), $to->utc()])
-            ->when($crewId, fn ($query) => $query->where('crew_operation_incidents.crew_id', $crewId))
-            ->when($filters['status'] ?? null, fn ($query, string $status) => $query->where('operations.crew_status', $status))
-            ->when($filters['operation_type'] ?? null, fn ($query, string $type) => $query->join('flight_requests', 'flight_requests.id', '=', 'operations.flight_request_id')->where('flight_requests.trip_type', $type))
-            ->when($filters['base'] ?? null, fn ($query, string $base) => $query->join('profiles', 'profiles.user_id', '=', 'crew_operation_incidents.crew_id')->where('profiles.base_airport', $base))
-            ->when($filters['incident_severity'] ?? null, fn ($query, string $severity) => $query->where('crew_operation_incidents.priority', $severity));
-        $severity = collect(['baja', 'media', 'alta', 'critica'])->mapWithKeys(
-            fn (string $level) => [$level => (clone $incidents)->where('crew_operation_incidents.priority', $level)->count()]
-        );
+        $incidents = (array) $this->incidentsMetricsQuery($filters, $from, $to, $crewId)
+            ->selectRaw("COUNT(*) FILTER (WHERE crew_operation_incidents.priority = 'baja')::int as low")
+            ->selectRaw("COUNT(*) FILTER (WHERE crew_operation_incidents.priority = 'media')::int as medium")
+            ->selectRaw("COUNT(*) FILTER (WHERE crew_operation_incidents.priority = 'alta')::int as high")
+            ->selectRaw("COUNT(*) FILTER (WHERE crew_operation_incidents.priority = 'critica')::int as critical")
+            ->selectRaw("COUNT(*) FILTER (WHERE crew_operation_incidents.status = 'open')::int as open")
+            ->first();
 
         return [
             'period' => ['from' => $from->toIso8601String(), 'to' => $to->toIso8601String(), 'timezone' => self::TIMEZONE],
@@ -74,7 +80,13 @@ class CrewOperationalMetricsService
                     'average_response_time_minutes' => $averageResponse === null ? null : round((float) $averageResponse, 2),
                 ],
                 'punctuality' => ['on_time' => $onTime, 'late' => $late, 'rate' => $this->rate($onTime, $checkIns), 'no_shows' => $noShows],
-                'incidents' => ['low' => $severity['baja'], 'medium' => $severity['media'], 'high' => $severity['alta'], 'critical' => $severity['critica'], 'open' => (clone $incidents)->where('crew_operation_incidents.status', 'open')->count()],
+                'incidents' => [
+                    'low' => (int) ($incidents['low'] ?? 0),
+                    'medium' => (int) ($incidents['medium'] ?? 0),
+                    'high' => (int) ($incidents['high'] ?? 0),
+                    'critical' => (int) ($incidents['critical'] ?? 0),
+                    'open' => (int) ($incidents['open'] ?? 0),
+                ],
                 'reports' => ['pending' => $pendingReports],
                 'operations' => ['completed' => $completed, 'average_closure_time_minutes' => $averageClosure === null ? null : round((float) $averageClosure, 2)],
                 'documents' => ['expiring' => $this->expiringDocuments($crewId)],
@@ -105,6 +117,75 @@ class CrewOperationalMetricsService
     private function rate(int $numerator, int $denominator): array
     {
         return ['numerator' => $numerator, 'denominator' => $denominator, 'percentage' => $denominator === 0 ? null : round(($numerator / $denominator) * 100, 2)];
+    }
+
+    private function assignmentMetricsQuery(array $filters, CarbonImmutable $from, CarbonImmutable $to, ?int $crewId)
+    {
+        return DB::table('sobrecargo_assignments')
+            ->when(
+                ($filters['base'] ?? null) || ($filters['operation_type'] ?? null),
+                fn ($query) => $query->join('operations as assignment_operations', 'assignment_operations.id', '=', 'sobrecargo_assignments.operation_id')
+            )
+            ->when(
+                $filters['base'] ?? null,
+                fn ($query, string $base) => $query
+                    ->join('profiles as assignment_profiles', 'assignment_profiles.user_id', '=', 'assignment_operations.sobrecargo_user_id')
+                    ->where('assignment_profiles.base_airport', $base)
+            )
+            ->when(
+                $filters['operation_type'] ?? null,
+                fn ($query, string $type) => $query
+                    ->join('flight_requests as assignment_flight_requests', 'assignment_flight_requests.id', '=', 'assignment_operations.flight_request_id')
+                    ->where('assignment_flight_requests.trip_type', $type)
+            )
+            ->whereBetween('sobrecargo_assignments.assigned_at', [$from->utc(), $to->utc()])
+            ->when($crewId, fn ($query) => $query->where('sobrecargo_assignments.sobrecargo_user_id', $crewId))
+            ->when($filters['status'] ?? null, fn ($query, string $status) => $query->where('sobrecargo_assignments.status', $status));
+    }
+
+    private function operationsMetricsQuery(array $filters, CarbonImmutable $from, CarbonImmutable $to, ?int $crewId)
+    {
+        return DB::table('operations')
+            ->when(
+                $filters['base'] ?? null,
+                fn ($query, string $base) => $query
+                    ->join('profiles as operation_profiles', 'operation_profiles.user_id', '=', 'operations.sobrecargo_user_id')
+                    ->where('operation_profiles.base_airport', $base)
+            )
+            ->when(
+                $filters['operation_type'] ?? null,
+                fn ($query, string $type) => $query
+                    ->join('flight_requests as operation_flight_requests', 'operation_flight_requests.id', '=', 'operations.flight_request_id')
+                    ->where('operation_flight_requests.trip_type', $type)
+            )
+            ->whereBetween('operations.created_at', [$from->utc(), $to->utc()])
+            ->when($crewId, fn ($query) => $query->where('operations.sobrecargo_user_id', $crewId))
+            ->when($filters['status'] ?? null, fn ($query, string $status) => $query->where('operations.crew_status', $status));
+    }
+
+    private function incidentsMetricsQuery(array $filters, CarbonImmutable $from, CarbonImmutable $to, ?int $crewId)
+    {
+        return DB::table('crew_operation_incidents')
+            ->join('operations', 'operations.id', '=', 'crew_operation_incidents.crew_operation_id')
+            ->when(
+                $filters['base'] ?? null,
+                fn ($query, string $base) => $query
+                    ->join('profiles as incident_profiles', 'incident_profiles.user_id', '=', 'crew_operation_incidents.crew_id')
+                    ->where('incident_profiles.base_airport', $base)
+            )
+            ->when(
+                $filters['operation_type'] ?? null,
+                fn ($query, string $type) => $query
+                    ->join('flight_requests as incident_flight_requests', 'incident_flight_requests.id', '=', 'operations.flight_request_id')
+                    ->where('incident_flight_requests.trip_type', $type)
+            )
+            ->whereBetween('crew_operation_incidents.reported_at', [$from->utc(), $to->utc()])
+            ->when($crewId, fn ($query) => $query->where('crew_operation_incidents.crew_id', $crewId))
+            ->when($filters['status'] ?? null, fn ($query, string $status) => $query->where('operations.crew_status', $status))
+            ->when(
+                $filters['incident_severity'] ?? null,
+                fn ($query, string $severity) => $query->where('crew_operation_incidents.priority', $severity)
+            );
     }
 
     private function expiringDocuments(?int $crewId): int

@@ -8,6 +8,43 @@ use Illuminate\Http\Resources\Json\JsonResource;
 
 class OfficialQuotePricingResource extends JsonResource
 {
+    private const DISPLAY_ROUTE_HOURS_PATHS = [
+        'display_route_hours',
+        'client_display_flight_hours',
+        'route_operational_display_hours',
+    ];
+
+    private const OPERATIONAL_HOURS_PATHS = [
+        'operational_flight_hours',
+        'client_operational_flight_hours',
+        'route_operational_hours',
+    ];
+
+    private const DIRECT_HOURS_PATHS = [
+        'direct_flight_hours',
+        'client_direct_flight_hours',
+        'direct_route_hours',
+        'route_direct_hours',
+    ];
+
+    private const FINAL_BILLABLE_HOURS_PATHS = [
+        'final_billable_hours',
+        'pricing_hours',
+        'flight_base_hours',
+    ];
+
+    private const BILLABLE_HOURS_PATHS = [
+        'billable_hours',
+        'total_billed_hours',
+        'duration_snapshot.billable_hours',
+    ];
+
+    private const TOTAL_AMOUNT_PATHS = [
+        'total_amount',
+        'total',
+        'final_price',
+    ];
+
     public function toArray(Request $request): array
     {
         return self::build(is_array($this->resource) ? $this->resource : []);
@@ -30,6 +67,10 @@ class OfficialQuotePricingResource extends JsonResource
         $pricingVersion = (string) ($breakdown['pricing_version'] ?? FlightPricingService::FORMULA_VERSION);
 
         return [
+            'official_pricing_source' => 'pricing_breakdown',
+            'official_display_time_field' => 'pricing_breakdown.display_route_hours',
+            'official_billable_hours_field' => 'pricing_breakdown.final_billable_hours',
+            'official_total_field' => 'pricing_breakdown.total_amount',
             'time' => $cardTime,
             'card_time' => $cardTime,
             'display_time' => $cardTime,
@@ -114,32 +155,11 @@ class OfficialQuotePricingResource extends JsonResource
             'distance_nm',
             'route_snapshot.distance_nm',
         ], 0));
-        $directHours = self::resolveFloat($pricing, [
-            'direct_flight_hours',
-            'client_direct_flight_hours',
-            'direct_route_hours',
-            'route_direct_hours',
-        ], 0);
-        $operationalHours = self::resolveFloat($pricing, [
-            'operational_flight_hours',
-            'client_operational_flight_hours',
-            'route_operational_hours',
-        ], 0);
-        $displayHours = self::resolveFloat($pricing, [
-            'display_route_hours',
-            'client_display_flight_hours',
-            'route_operational_display_hours',
-        ], $operationalHours);
-        $finalBillableHours = self::resolveFloat($pricing, [
-            'final_billable_hours',
-            'pricing_hours',
-            'flight_base_hours',
-        ], $operationalHours);
-        $billableHours = self::resolveFloat($pricing, [
-            'billable_hours',
-            'total_billed_hours',
-            'duration_snapshot.billable_hours',
-        ], $finalBillableHours);
+        $directHours = self::resolveFloat($pricing, self::DIRECT_HOURS_PATHS, 0);
+        $operationalHours = self::resolveFloat($pricing, self::OPERATIONAL_HOURS_PATHS, 0);
+        $displayHours = self::resolveFloat($pricing, self::DISPLAY_ROUTE_HOURS_PATHS, $operationalHours);
+        $finalBillableHours = self::resolveFloat($pricing, self::FINAL_BILLABLE_HOURS_PATHS, $operationalHours);
+        $billableHours = self::resolveFloat($pricing, self::BILLABLE_HOURS_PATHS, $finalBillableHours);
         $currency = (string) self::resolveValue($overrides, ['currency'], self::resolveValue($pricing, ['currency'], 'USD'));
         $pricingVersion = (string) self::resolveValue($pricing, [
             'pricing_version',
@@ -164,12 +184,16 @@ class OfficialQuotePricingResource extends JsonResource
             'administrative_fee' => round((float) self::resolveValue($pricing, ['administrative_fee'], 0), 2),
             'taxes' => round((float) self::resolveValue($pricing, ['taxes', 'tax', 'iva', 'iva_amount'], 0), 2),
             'subtotal' => round((float) self::resolveValue($pricing, ['subtotal'], 0), 2),
-            'total_amount' => round((float) self::resolveValue($pricing, ['total_amount', 'total', 'final_price'], 0), 2),
+            'total_amount' => round((float) self::resolveValue($pricing, self::TOTAL_AMOUNT_PATHS, 0), 2),
             'currency' => $currency,
             'pricing_version' => $pricingVersion,
             'pricing_formula_version' => $pricingVersion,
             'quote_strategy' => $pricingVersion,
             'calculated_at' => $calculatedAt,
+            'official_pricing_source' => 'pricing_breakdown',
+            'official_display_time_field' => 'pricing_breakdown.display_route_hours',
+            'official_billable_hours_field' => 'pricing_breakdown.final_billable_hours',
+            'official_total_field' => 'pricing_breakdown.total_amount',
         ]);
 
         if (! array_key_exists('tax', $breakdown)) {

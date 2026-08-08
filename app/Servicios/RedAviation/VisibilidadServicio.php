@@ -605,6 +605,10 @@ class VisibilidadServicio
             return null;
         }
 
+        if (! $withImages && filled($solicitud->assigned_aircraft_model)) {
+            return null;
+        }
+
         $relation = $solicitud->assignedAircraft();
 
         if ($withImages) {

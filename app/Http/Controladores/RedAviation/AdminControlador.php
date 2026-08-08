@@ -1268,20 +1268,26 @@ class AdminControlador extends ControladorBase
         return $this->ok(['operators' => $operators]);
     }
 
-    public function sobrecargos()
+    public function sobrecargos(Request $request)
     {
+        $perPage = min(max((int) $request->integer('per_page', 20), 1), 100);
+        $skipTotal = $request->boolean('skip_total');
+        $crewQuery = Usuario::whereHas('roles', fn ($query) => $query->where('code', Usuario::ROLE_SOBRECARGO))
+            ->with([
+                'profile',
+                'provider',
+                'ownedProvider',
+                'roles',
+                'demo',
+                'latestAccessPayment',
+                'activeSuscripcion.plan',
+            ])
+            ->latest('id');
+
         return $this->ok([
-            'sobrecargos' => Usuario::whereHas('roles', fn ($query) => $query->where('code', Usuario::ROLE_SOBRECARGO))
-                ->with([
-                    'profile',
-                    'provider',
-                    'ownedProvider',
-                    'roles',
-                    'demo',
-                    'activeSuscripcion.plan',
-                ])
-                ->latest('id')
-                ->paginate(20),
+            'sobrecargos' => $skipTotal
+                ? $crewQuery->simplePaginate($perPage)
+                : $crewQuery->paginate($perPage),
         ]);
     }
 
@@ -1577,8 +1583,9 @@ class AdminControlador extends ControladorBase
     public function requests(Request $request)
     {
         $perPage = min(max((int) $request->integer('per_page', 20), 1), 100);
+        $skipTotal = $request->boolean('skip_total');
 
-        $requestsPaginator = SolicitudVuelo::query()
+        $requestsQuery = SolicitudVuelo::query()
             ->select([
                 'id',
                 'client_id',
@@ -1615,7 +1622,6 @@ class AdminControlador extends ControladorBase
                     'visibility_payload',
                 ]),
                 'matches.aircraft:id,model,category,capacity',
-                'assignedAircraft:id,model,category,capacity',
                 'legs:id,flight_request_id,leg_order,origin,destination,departure_datetime,arrival_datetime,passengers,distance_km',
                 'reservation:id,flight_request_id,status',
                 'reservation.contract:id,reservation_id,status',
@@ -1645,22 +1651,27 @@ class AdminControlador extends ControladorBase
                     ->latest('id')
                     ->limit(20),
             ])
-            ->latest('id')
-            ->paginate($perPage);
+            ->latest('id');
+
+        $requestsPaginator = $skipTotal
+            ? $requestsQuery->simplePaginate($perPage)
+            : $requestsQuery->paginate($perPage);
 
         $requests = $requestsPaginator->getCollection()
             ->map(fn ($solicitud) => $this->visibilidadServicio->solicitudParaAdmin($solicitud))
             ->values();
 
         $requestsPaginator->setCollection($requests);
+        $supportsTotals = method_exists($requestsPaginator, 'total');
+        $supportsLastPage = method_exists($requestsPaginator, 'lastPage');
 
         return $this->ok([
             'requests' => $requests,
             'pagination' => [
                 'current_page' => $requestsPaginator->currentPage(),
-                'last_page' => $requestsPaginator->lastPage(),
+                'last_page' => $supportsLastPage ? $requestsPaginator->lastPage() : null,
                 'per_page' => $requestsPaginator->perPage(),
-                'total' => $requestsPaginator->total(),
+                'total' => $supportsTotals ? $requestsPaginator->total() : null,
                 'has_more_pages' => $requestsPaginator->hasMorePages(),
             ],
         ]);
