@@ -17,6 +17,7 @@ use Illuminate\Support\Str;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rule;
 
@@ -78,57 +79,7 @@ class AeronaveControlador extends ControladorBase
         $perPage = min(max((int) $request->integer('per_page', 20), 1), 50);
 
         $query = Aeronave::query()
-            ->select([
-                'id',
-                'provider_id',
-                'model',
-                'manufacturer',
-                'category',
-                'model_year',
-                'registration',
-                'capacity',
-                'base_airport',
-                'base_airport_id',
-                'range_km',
-                'speed_kmh',
-                'coverage',
-                'amenities',
-                'hourly_rate',
-                'airport_expenses_usd',
-                'minimum_hours',
-                'minimum_route_price',
-                'climb_descent_minutes',
-                'climb_descent_source',
-                'operational_cost',
-                'fuel_burn_gph',
-                'engine_reserve_rate',
-                'insurance_rate',
-                'maintenance_rate',
-                'crew_rate',
-                'repositioning_fee',
-                'overnight_fee',
-                'currency',
-                'status',
-                'billing_status',
-                'billing_plan_id',
-                'subscription_status',
-                'subscription_started_at',
-                'subscription_ends_at',
-                'last_payment_at',
-                'security_filter',
-                'security_score',
-                'airworthiness_status',
-                'last_maintenance_at',
-                'engine_run_at',
-                'captain_training_at',
-                'lodging_location',
-                'client_fbo',
-                'dispatch_center',
-                'dispatch_notes',
-                'security_notes',
-                'created_at',
-                'updated_at',
-            ])
+            ->select($this->resolveAircraftIndexColumns())
             ->with([
                 'provider' => fn ($query) => $query
                     ->select(['id', 'user_id', 'company_name', 'commercial_name'])
@@ -986,7 +937,89 @@ class AeronaveControlador extends ControladorBase
             $data['amenities'] = $this->normalizeAmenities($data['amenities']);
         }
 
-        return $data;
+        return $this->filterAircraftPayloadByExistingColumns($data);
+    }
+
+    private function filterAircraftPayloadByExistingColumns(array $data): array
+    {
+        static $availableColumns = null;
+
+        if (! is_array($availableColumns)) {
+            $availableColumns = array_flip(Schema::getColumnListing('aircraft'));
+        }
+
+        return array_filter(
+            $data,
+            fn (string $column) => isset($availableColumns[$column]),
+            ARRAY_FILTER_USE_KEY,
+        );
+    }
+
+    private function resolveAircraftIndexColumns(): array
+    {
+        static $resolvedColumns = null;
+
+        if (is_array($resolvedColumns)) {
+            return $resolvedColumns;
+        }
+
+        $availableColumns = array_flip(Schema::getColumnListing('aircraft'));
+        $desiredColumns = [
+            'id',
+            'provider_id',
+            'model',
+            'manufacturer',
+            'category',
+            'model_year',
+            'registration',
+            'capacity',
+            'base_airport',
+            'base_airport_id',
+            'range_km',
+            'speed_kmh',
+            'coverage',
+            'amenities',
+            'hourly_rate',
+            'airport_expenses_usd',
+            'minimum_hours',
+            'minimum_route_price',
+            'climb_descent_minutes',
+            'climb_descent_source',
+            'operational_cost',
+            'fuel_burn_gph',
+            'engine_reserve_rate',
+            'insurance_rate',
+            'maintenance_rate',
+            'crew_rate',
+            'repositioning_fee',
+            'overnight_fee',
+            'currency',
+            'status',
+            'billing_status',
+            'billing_plan_id',
+            'subscription_status',
+            'subscription_started_at',
+            'subscription_ends_at',
+            'last_payment_at',
+            'security_filter',
+            'security_score',
+            'airworthiness_status',
+            'last_maintenance_at',
+            'engine_run_at',
+            'captain_training_at',
+            'lodging_location',
+            'client_fbo',
+            'dispatch_center',
+            'dispatch_notes',
+            'security_notes',
+            'created_at',
+            'updated_at',
+        ];
+
+        return $resolvedColumns = array_values(array_filter(
+            $desiredColumns,
+            fn (string $column) => isset($availableColumns[$column]),
+        ));
     }
 
     private function rules(bool $creating = true, ?Aeronave $aircraft = null): array

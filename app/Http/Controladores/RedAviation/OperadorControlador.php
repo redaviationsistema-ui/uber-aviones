@@ -16,6 +16,7 @@ use App\Servicios\RedAviation\VisibilidadServicio;
 use App\Servicios\Vuelos\ClimbDescentCategoryResolver;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rule;
 
@@ -181,45 +182,7 @@ class OperadorControlador extends ControladorBase
         $perPage = min(max((int) $request->integer('per_page', self::DEFAULT_OPERATOR_AIRCRAFT_PAGE_SIZE), 1), self::MAX_OPERATOR_AIRCRAFT_PAGE_SIZE);
 
         $aircraft = Aeronave::query()
-            ->select([
-                'id',
-                'provider_id',
-                'model',
-                'manufacturer',
-                'category',
-                'model_year',
-                'registration',
-                'capacity',
-                'range_km',
-                'speed_kmh',
-                'amenities',
-                'base_airport',
-                'coverage',
-                'airport_expenses_usd',
-                'hourly_rate',
-                'minimum_hours',
-                'climb_descent_minutes',
-                'climb_descent_source',
-                'fuel_burn_gph',
-                'engine_reserve_rate',
-                'insurance_rate',
-                'maintenance_rate',
-                'crew_rate',
-                'repositioning_fee',
-                'overnight_fee',
-                'operational_cost',
-                'currency',
-                'status',
-                'billing_status',
-                'billing_plan_id',
-                'subscription_status',
-                'subscription_started_at',
-                'subscription_ends_at',
-                'last_payment_at',
-                'notes',
-                'created_at',
-                'updated_at',
-            ])
+            ->select($this->resolveOperatorAircraftIndexColumns())
             ->with([
                 'images:id,aircraft_id,kind,title,image_url,is_main,visible_to_client,sort_order',
                 'documents:id,aircraft_id,type,document_type,document_name,status,expires_at',
@@ -646,7 +609,77 @@ class OperadorControlador extends ControladorBase
             $data['amenities'] = $this->normalizeAmenities($data['amenities']);
         }
 
-        return $data;
+        return $this->filterAircraftPayloadByExistingColumns($data);
+    }
+
+    private function filterAircraftPayloadByExistingColumns(array $data): array
+    {
+        static $availableColumns = null;
+
+        if (! is_array($availableColumns)) {
+            $availableColumns = array_flip(Schema::getColumnListing('aircraft'));
+        }
+
+        return array_filter(
+            $data,
+            fn (string $column) => isset($availableColumns[$column]),
+            ARRAY_FILTER_USE_KEY,
+        );
+    }
+
+    private function resolveOperatorAircraftIndexColumns(): array
+    {
+        static $resolvedColumns = null;
+
+        if (is_array($resolvedColumns)) {
+            return $resolvedColumns;
+        }
+
+        $availableColumns = array_flip(Schema::getColumnListing('aircraft'));
+        $desiredColumns = [
+            'id',
+            'provider_id',
+            'model',
+            'manufacturer',
+            'category',
+            'model_year',
+            'registration',
+            'capacity',
+            'range_km',
+            'speed_kmh',
+            'amenities',
+            'base_airport',
+            'coverage',
+            'airport_expenses_usd',
+            'hourly_rate',
+            'minimum_hours',
+            'climb_descent_minutes',
+            'climb_descent_source',
+            'fuel_burn_gph',
+            'engine_reserve_rate',
+            'insurance_rate',
+            'maintenance_rate',
+            'crew_rate',
+            'repositioning_fee',
+            'overnight_fee',
+            'operational_cost',
+            'currency',
+            'status',
+            'billing_status',
+            'billing_plan_id',
+            'subscription_status',
+            'subscription_started_at',
+            'subscription_ends_at',
+            'last_payment_at',
+            'notes',
+            'created_at',
+            'updated_at',
+        ];
+
+        return $resolvedColumns = array_values(array_filter(
+            $desiredColumns,
+            fn (string $column) => isset($availableColumns[$column]),
+        ));
     }
 
     private function resolveMinimumHoursForCategory(?string $category): float
