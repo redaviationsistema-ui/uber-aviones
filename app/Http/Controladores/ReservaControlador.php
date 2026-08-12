@@ -183,29 +183,45 @@ class ReservaControlador extends ControladorBase
             'Debes enviar quote_id o flight_request_id para crear la reserva.'
         );
 
-        if ($data['quote_id'] ?? null) {
-            $quote = Cotizacion::with('flightRequest')->lockForUpdate()->findOrFail($data['quote_id']);
-            $flightRequest = $quote->flightRequest;
+        [$reservation, $flightRequest] = DB::transaction(function () use ($data, $request) {
+            if ($data['quote_id'] ?? null) {
+                $quote = Cotizacion::with('flightRequest')->lockForUpdate()->findOrFail($data['quote_id']);
+                $flightRequest = SolicitudVuelo::query()
+                    ->with(['matches', 'quotes'])
+                    ->lockForUpdate()
+                    ->findOrFail($quote->flight_request_id);
 
-            abort_if($quote->flightRequest->client_id !== $request->user()->id, 403, 'No puedes reservar esta cotizacion.');
-            abort_if($quote->status !== 'accepted', 409, 'Primero debes aceptar la cotizacion.');
+                abort_if($quote->flightRequest->client_id !== $request->user()->id, 403, 'No puedes reservar esta cotizacion.');
+                abort_if($quote->status !== 'accepted', 409, 'Primero debes aceptar la cotizacion.');
 
-            $reservation = Reserva::firstOrCreate(
-                ['quote_id' => $quote->id],
-                [
-                    'client_id' => $request->user()->id,
-                    'provider_id' => $quote->provider_id,
-                    'aircraft_id' => $quote->aircraft_id,
-                    'flight_request_id' => $quote->flight_request_id,
-                    'reservation_code' => 'PV-'.now()->format('ymd').'-'.Str::upper(Str::random(6)),
-                    'status' => 'pending_payment',
-                    'total_amount' => $quote->total,
-                    'currency' => $quote->currency ?? 'USD',
-                ]
-            );
+                if ($quote->aircraft_id) {
+                    DB::table('aircraft')
+                        ->where('id', $quote->aircraft_id)
+                        ->lockForUpdate()
+                        ->get();
 
-            $quote->flightRequest->update(['status' => 'reserved']);
-        } else {
+                    $this->ensureAircraftAvailableForContractEntry((int) $quote->aircraft_id, $flightRequest);
+                }
+
+                $reservation = Reserva::firstOrCreate(
+                    ['quote_id' => $quote->id],
+                    [
+                        'client_id' => $request->user()->id,
+                        'provider_id' => $quote->provider_id,
+                        'aircraft_id' => $quote->aircraft_id,
+                        'flight_request_id' => $quote->flight_request_id,
+                        'reservation_code' => 'PV-'.now()->format('ymd').'-'.Str::upper(Str::random(6)),
+                        'status' => 'pending_payment',
+                        'total_amount' => $quote->total,
+                        'currency' => $quote->currency ?? 'USD',
+                    ]
+                );
+
+                $flightRequest->update(['status' => 'reserved']);
+
+                return [$reservation, $flightRequest];
+            }
+
             $flightRequest = SolicitudVuelo::with(['matches', 'quotes'])
                 ->lockForUpdate()
                 ->findOrFail($data['flight_request_id']);
@@ -213,6 +229,7 @@ class ReservaControlador extends ControladorBase
             abort_if($flightRequest->client_id !== $request->user()->id, 403, 'No puedes reservar esta solicitud.');
 
             $reservation = Reserva::where('flight_request_id', $flightRequest->id)
+                ->lockForUpdate()
                 ->latest('id')
                 ->first();
 
@@ -239,6 +256,11 @@ class ReservaControlador extends ControladorBase
 
                 abort_if($amount <= 0, 422, 'La solicitud no tiene un monto valido para crear la reserva.');
 
+                DB::table('aircraft')
+                    ->where('id', (int) $flightRequest->assigned_aircraft_id)
+                    ->lockForUpdate()
+                    ->get();
+
                 $this->ensureAircraftAvailableForContractEntry(
                     (int) ($acceptedQuote?->aircraft_id ?? $flightRequest->assigned_aircraft_id),
                     $flightRequest
@@ -263,7 +285,9 @@ class ReservaControlador extends ControladorBase
                 'status' => 'reserved',
                 'workflow_status' => $flightRequest->workflow_status ?: 'contrato pendiente',
             ]);
-        }
+
+            return [$reservation, $flightRequest];
+        });
 
         $reservation = $this->commercialSnapshotService->persistIfMissing($reservation);
         $commissionBaseAmount = (float) (data_get($flightRequest->pricing_context, 'flight_cost') ?? $reservation->total_amount);
