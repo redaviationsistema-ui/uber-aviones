@@ -10,6 +10,7 @@ use App\Modelos\Operacion;
 use App\Modelos\Plan;
 use App\Modelos\SolicitudVuelo;
 use App\Modelos\SuscripcionAeronave;
+use App\Servicios\Aeronaves\AircraftStateService;
 use App\Servicios\Billing\BillingPlanServicio;
 use App\Servicios\ReintentoCoincidenciaSolicitudServicio;
 use App\Servicios\RedAviation\VisibilidadServicio;
@@ -59,6 +60,7 @@ class OperadorControlador extends ControladorBase
         private readonly VisibilidadServicio $visibilidadServicio,
         private readonly ReintentoCoincidenciaSolicitudServicio $reintentoServicio,
         private readonly ClimbDescentCategoryResolver $climbDescentCategoryResolver,
+        private readonly AircraftStateService $aircraftStateService,
     )
     {
     }
@@ -748,6 +750,10 @@ class OperadorControlador extends ControladorBase
             ? $aircraft->suscripcionesAeronave->first()
             : null;
         $documents = $aircraft->relationLoaded('documents') ? $aircraft->documents : collect();
+        $state = $this->aircraftStateService->evaluate($aircraft);
+        $documentsState = $state['documents'] ?? [];
+        $canonicalDocuments = $this->aircraftStateService->canonicalAircraftDocuments($documents);
+        $activationState = $state['activation'] ?? [];
         $availability = $aircraft->relationLoaded('availability') ? $aircraft->availability : collect();
 
         $payload = [
@@ -802,10 +808,10 @@ class OperadorControlador extends ControladorBase
                 'visible_to_client' => $image->visible_to_client,
                 'sort_order' => $image->sort_order,
             ])->values(),
-            'documents_count' => $documents->count(),
+            'documents_count' => $canonicalDocuments->count(),
             'documents' => ($includeDetails
-                ? $documents->map(fn (DocumentoAeronave $document) => $this->formatAircraftDocumentPayload($document))
-                : $documents->map(fn (DocumentoAeronave $document) => [
+                ? $canonicalDocuments->map(fn (DocumentoAeronave $document) => $this->formatAircraftDocumentPayload($document))
+                : $canonicalDocuments->map(fn (DocumentoAeronave $document) => [
                     'id' => $document->id,
                     'type' => $document->type,
                     'document_type' => $document->document_type,
@@ -813,6 +819,19 @@ class OperadorControlador extends ControladorBase
                     'status' => $document->status,
                     'expires_at' => $document->expires_at,
                 ]))->values(),
+            'documents_summary' => $documentsState['summary'] ?? null,
+            'documentation_status' => $documentsState['status'] ?? null,
+            'documentation_status_label' => $documentsState['status_label'] ?? null,
+            'commercial_status' => $activationState['commercial_status'] ?? null,
+            'commercial_status_label' => $activationState['commercial_status_label'] ?? null,
+            'commercial_block_reason' => $activationState['commercial_block_reason'] ?? null,
+            'payment_status' => $activationState['payment_status'] ?? null,
+            'payment_status_label' => $activationState['payment_status_label'] ?? null,
+            'operational_status' => $activationState['operational_status'] ?? null,
+            'operational_status_label' => $activationState['operational_status_label'] ?? null,
+            'status_label' => $activationState['status_label'] ?? null,
+            'is_quotable' => (bool) ($activationState['is_quotable'] ?? false),
+            'is_reservable' => (bool) ($activationState['is_reservable'] ?? false),
             'availability_status' => $availability->sortByDesc('end_datetime')->first()?->status,
             'availability_count' => $availability->count(),
             'aircraft_subscription' => $activeAircraftSub ? [
@@ -906,10 +925,11 @@ class OperadorControlador extends ControladorBase
 
     private function formatAircraftDocumentPayload(DocumentoAeronave $document): array
     {
+        $normalized = $this->aircraftStateService->serializeAircraftDocument($document);
         $resolvedUrl = $this->resolveAircraftDocumentUrl($document);
         $resolvedThumbnailUrl = $this->resolveAircraftDocumentThumbnailUrl($document);
 
-        return [
+        return array_merge($normalized, [
             'id' => $document->id,
             'aircraft_id' => $document->aircraft_id,
             'type' => $document->type,
@@ -924,7 +944,7 @@ class OperadorControlador extends ControladorBase
             'document_url' => $resolvedUrl,
             'url' => $resolvedUrl,
             'thumbnail_url' => $resolvedThumbnailUrl,
-        ];
+        ]);
     }
 
     private function resolveAircraftDocumentUrl(DocumentoAeronave $document): string

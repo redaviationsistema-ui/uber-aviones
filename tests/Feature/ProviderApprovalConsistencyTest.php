@@ -117,6 +117,45 @@ class ProviderApprovalConsistencyTest extends TestCase
         $this->assertNotNull($aircraft->fresh()->approved_at);
     }
 
+    public function test_admin_can_reactivate_blocked_aircraft_when_requirements_are_complete(): void
+    {
+        $this->seed();
+
+        $adminToken = $this->postJson('/api/v1/auth/login', [
+            'email' => 'admin@privateflights.test',
+            'password' => 'password',
+        ])->assertOk()->json('token');
+
+        $provider = $this->createProvider([
+            'approval_status' => 'pending',
+            'admin_validation_status' => 'approved',
+            'status' => 'pending',
+            'access_enabled' => true,
+        ]);
+
+        $aircraft = $this->createAircraft($provider, [
+            'status' => 'blocked',
+            'approved_at' => now(),
+            'billing_status' => 'active',
+            'subscription_status' => 'active',
+            'subscription_started_at' => now()->subDay(),
+            'subscription_ends_at' => now()->addMonth(),
+            'last_payment_at' => now()->subDay(),
+        ]);
+
+        $this->withToken($adminToken)
+            ->postJson("/api/v1/admin/aeronaves/{$aircraft->id}/activar")
+            ->assertOk()
+            ->assertJsonPath('success', true)
+            ->assertJsonPath('aircraft.status', 'active')
+            ->assertJsonPath('aircraft.review_status', 'approved');
+
+        $this->assertDatabaseHas('aircraft', [
+            'id' => $aircraft->id,
+            'status' => 'active',
+        ]);
+    }
+
     public function test_admin_aircraft_detail_exposes_approved_state_without_forcing_active_status(): void
     {
         $this->seed();
@@ -192,6 +231,38 @@ class ProviderApprovalConsistencyTest extends TestCase
             ->assertJsonPath('aircraft.status', 'inactive');
     }
 
+    public function test_operator_aircraft_payload_uses_canonical_document_state_summary(): void
+    {
+        $this->seed();
+
+        [$user, $provider] = $this->createProviderContext([
+            'approval_status' => 'approved',
+            'admin_validation_status' => 'approved',
+            'operator_status' => 'active',
+            'status' => 'approved',
+            'access_enabled' => true,
+        ]);
+
+        $aircraft = $this->createAircraft($provider, [
+            'status' => 'blocked',
+            'billing_status' => 'active',
+            'subscription_status' => 'active',
+        ]);
+
+        $response = $this->withToken(TokenApi::issue($user))
+            ->getJson("/api/v1/operator/aircraft/{$aircraft->id}")
+            ->assertOk();
+
+        $response
+            ->assertJsonPath('aircraft.documents_summary.total_required', 5)
+            ->assertJsonPath('aircraft.documents_summary.approved', 5)
+            ->assertJsonPath('aircraft.documents_summary.pending', 0)
+            ->assertJsonPath('aircraft.documentation_status', 'complete')
+            ->assertJsonPath('aircraft.documentation_status_label', 'Documentación válida')
+            ->assertJsonPath('aircraft.documents.0.status', 'approved')
+            ->assertJsonPath('aircraft.documents.0.status_label', 'Aprobado');
+    }
+
     private function createProvider(array $attributes = []): Proveedor
     {
         $user = Usuario::factory()->create([
@@ -237,7 +308,7 @@ class ProviderApprovalConsistencyTest extends TestCase
             ...$attributes,
         ]);
 
-        foreach (['airworthiness', 'registration', 'insurance', 'maintenance'] as $type) {
+        foreach (['airworthiness_certificate', 'registration', 'insurance_policy', 'maintenance_sticker', 'flight_logbook'] as $type) {
             DocumentoAeronave::query()->create([
                 'aircraft_id' => $aircraft->id,
                 'provider_id' => $provider->id,

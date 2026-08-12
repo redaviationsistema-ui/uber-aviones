@@ -500,7 +500,7 @@ class AeronaveControlador extends ControladorBase
         }
 
         $documentUrl = $data['file_url'] ?? $data['document_url'];
-        $document = $aircraft->documents()->create([
+        $document = $this->upsertAircraftDocumentRecord($aircraft, $documentType, [
             'provider_id' => $aircraft->provider_id,
             'type' => $documentType,
             'document_type' => $documentType,
@@ -512,6 +512,9 @@ class AeronaveControlador extends ControladorBase
             'status' => 'pending',
             'verified_by_admin' => false,
             'notes' => $data['notes'] ?? null,
+            'metadata' => [
+                'original_name' => $data['document_name'] ?? basename((string) parse_url($documentUrl, PHP_URL_PATH)),
+            ],
         ]);
 
         $state = $this->aircraftStateService->evaluateAndSyncAircraftState($aircraft);
@@ -731,7 +734,7 @@ class AeronaveControlador extends ControladorBase
         $metadata['variants'] = $stored['variants'] ?? [];
         $metadata['processed'] = $stored['processed'] ?? false;
 
-        return $aircraft->documents()->create([
+        return $this->upsertAircraftDocumentRecord($aircraft, $documentType, [
             'provider_id' => $aircraft->provider_id,
             'type' => $documentType,
             'document_type' => $documentType,
@@ -765,6 +768,41 @@ class AeronaveControlador extends ControladorBase
         }
 
         return 'other';
+    }
+
+    private function upsertAircraftDocumentRecord(Aeronave $aircraft, string $documentType, array $attributes): DocumentoAeronave
+    {
+        $normalizedType = trim((string) $documentType);
+        $current = $aircraft->documents()
+            ->where(function ($query) use ($normalizedType) {
+                $query->where('document_type', $normalizedType)
+                    ->orWhere('type', $normalizedType);
+            })
+            ->orderByDesc('updated_at')
+            ->orderByDesc('id')
+            ->first();
+
+        $metadata = is_array($current?->metadata) ? $current->metadata : [];
+        unset($metadata['admin_review']);
+
+        $payload = [
+            ...$attributes,
+            'status' => 'pending',
+            'verified_by_admin' => false,
+            'notes' => $attributes['notes'] ?? null,
+            'metadata' => [
+                ...$metadata,
+                ...(is_array($attributes['metadata'] ?? null) ? $attributes['metadata'] : []),
+            ],
+        ];
+
+        if ($current) {
+            $current->update($payload);
+
+            return $current->fresh();
+        }
+
+        return $aircraft->documents()->create($payload);
     }
 
     private function storeImageDocumentVariants(UploadedFile $file, string $basePath, string $safeName): array
@@ -1095,7 +1133,11 @@ class AeronaveControlador extends ControladorBase
             ])
             ->values();
 
-        $documents = $this->deduplicateAircraftDocuments($aircraft->documents);
+        $documents = $this->aircraftStateService->canonicalAircraftDocuments($aircraft->documents);
+        $documentsState = $resolvedStateSnapshot['documents'] ?? [];
+        $activationState = $resolvedStateSnapshot['activation'] ?? [];
+        $paymentState = $resolvedStateSnapshot['payment'] ?? [];
+        $reviewState = $resolvedStateSnapshot['review'] ?? [];
 
         return [
             ...$aircraft->attributesToArray(),
@@ -1111,8 +1153,11 @@ class AeronaveControlador extends ControladorBase
                 'commercial_name' => $aircraft->provider->commercial_name,
             ] : null,
             'documents' => $documents
-                ->map(fn (DocumentoAeronave $document) => $this->formatAircraftDocumentPayload($document))
+                ->map(fn (DocumentoAeronave $document) => $this->aircraftStateService->serializeAircraftDocument($document))
                 ->values(),
+            'documents_summary' => $documentsState['summary'] ?? null,
+            'documentation_status' => $documentsState['status'] ?? null,
+            'documentation_status_label' => $documentsState['status_label'] ?? null,
             'main_image' => $images->firstWhere('is_main', true)?->image_url ?? $images->first()?->image_url,
             'images' => $images->map(fn (ImagenAeronave $image) => [
                 'id' => $image->id,
@@ -1132,15 +1177,16 @@ class AeronaveControlador extends ControladorBase
                 'within_plan_limit' => $plan->max_aircraft ? $providerAircraftCount <= $plan->max_aircraft : true,
             ] : null,
             'approved_at' => $aircraft->approved_at,
-            'approved' => $resolvedStateSnapshot['review']['approved'] ?? $aircraft->isAdministrativelyApproved(),
-            'review_status' => $resolvedStateSnapshot['review']['status'] ?? $aircraft->resolvedReviewStatus(),
+            'approved' => $reviewState['approved'] ?? $aircraft->isAdministrativelyApproved(),
+            'review_status' => $reviewState['status'] ?? $aircraft->resolvedReviewStatus(),
             'billing_status' => $resolvedBillingSnapshot['billing_status'] ?? $aircraft->billing_status,
             'billing_plan_id' => $aircraft->billing_plan_id,
             'subscription_status' => $resolvedBillingSnapshot['subscription_status'] ?? $aircraft->subscription_status,
             'subscription_started_at' => $aircraft->subscription_started_at,
             'subscription_ends_at' => $resolvedBillingSnapshot['subscription_ends_at'] ?? $aircraft->subscription_ends_at,
             'last_payment_at' => $resolvedBillingSnapshot['last_payment_at'] ?? $aircraft->last_payment_at,
-            'payment_status' => $resolvedBillingSnapshot['payment_status'] ?? null,
+            'payment_status' => $paymentState['status'] ?? $resolvedBillingSnapshot['payment_status'] ?? null,
+            'payment_status_label' => $paymentState['label'] ?? null,
             'checkout_session_id' => $resolvedBillingSnapshot['checkout_session_id'] ?? null,
             'stripe_subscription_id' => $resolvedBillingSnapshot['stripe_subscription_id'] ?? null,
             'has_pending_checkout' => $resolvedBillingSnapshot['has_pending_checkout'] ?? false,
@@ -1150,13 +1196,21 @@ class AeronaveControlador extends ControladorBase
             'can_operate' => $resolvedBillingSnapshot['can_operate'] ?? false,
             'primary_action' => $resolvedBillingSnapshot['primary_action'] ?? 'activate',
             'billing_state' => $resolvedBillingSnapshot,
-            'documents_state' => $resolvedStateSnapshot['documents'] ?? [],
-            'review' => $resolvedStateSnapshot['review'] ?? [],
+            'documents_state' => $documentsState,
+            'review' => $reviewState,
             'operation' => $resolvedStateSnapshot['operation'] ?? [],
             'pricing' => $resolvedStateSnapshot['pricing'] ?? [],
             'matching' => $resolvedStateSnapshot['matching'] ?? [],
-            'activation' => $resolvedStateSnapshot['activation'] ?? [],
+            'activation' => $activationState,
             'aircraft_state' => $resolvedStateSnapshot,
+            'commercial_status' => $activationState['commercial_status'] ?? null,
+            'commercial_status_label' => $activationState['commercial_status_label'] ?? null,
+            'commercial_block_reason' => $activationState['commercial_block_reason'] ?? null,
+            'operational_status' => $aircraft->status,
+            'operational_status_label' => $activationState['is_active'] ?? false ? 'Activa' : 'Inactiva',
+            'status_label' => ($activationState['commercial_status_label'] ?? null) ?: (($activationState['is_active'] ?? false) ? 'Activa' : 'Inactiva'),
+            'is_quotable' => $resolvedStateSnapshot['ready_to_quote'] ?? false,
+            'is_reservable' => $resolvedStateSnapshot['ready_to_book'] ?? false,
             'ready_to_quote' => $resolvedStateSnapshot['ready_to_quote'] ?? false,
             'ready_to_book' => $resolvedStateSnapshot['ready_to_book'] ?? false,
         ];

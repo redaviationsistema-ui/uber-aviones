@@ -167,4 +167,71 @@ class AeronaveDocumentoS3Test extends TestCase
         Storage::disk('s3')->assertMissing($path);
         $this->assertDatabaseMissing('aircraft_documents', ['id' => $document->id]);
     }
+
+    public function test_replacing_an_approved_aircraft_document_resets_it_to_pending_on_the_same_record(): void
+    {
+        Storage::fake('s3');
+        config()->set('filesystems.disks.s3.url', 'https://red-aviation-docs.s3.us-east-1.amazonaws.com');
+
+        $this->seed();
+
+        $user = Usuario::factory()->create([
+            'role' => 'provider',
+            'status' => 'active',
+        ]);
+
+        $provider = $user->ownedProvider()->create([
+            'company_name' => 'Red Aviation Replace',
+            'commercial_name' => 'Red Aviation Replace',
+            'approval_status' => 'approved',
+        ]);
+
+        $user->forceFill(['provider_id' => $provider->id])->saveQuietly();
+
+        $aircraft = Aeronave::factory()->create([
+            'provider_id' => $provider->id,
+        ]);
+
+        $document = DocumentoAeronave::query()->create([
+            'aircraft_id' => $aircraft->id,
+            'provider_id' => $provider->id,
+            'type' => 'insurance_policy',
+            'document_type' => 'insurance_policy',
+            'document_name' => 'seguro_original.pdf',
+            'file_type' => 'application/pdf',
+            'file_url' => 'https://red-aviation-docs.s3.us-east-1.amazonaws.com/provider/demo/seguro_original.pdf',
+            'document_url' => 'https://red-aviation-docs.s3.us-east-1.amazonaws.com/provider/demo/seguro_original.pdf',
+            'status' => 'approved',
+            'verified_by_admin' => true,
+            'metadata' => [
+                'admin_review' => [
+                    'status' => 'approved',
+                    'reason' => null,
+                    'reviewed_by' => 999,
+                    'reviewed_at' => now()->subDay()->toIso8601String(),
+                ],
+            ],
+        ]);
+
+        $token = TokenApi::issue($user);
+
+        $response = $this->withToken($token)
+            ->post('/api/v1/proveedor/aeronaves/'.$aircraft->id.'/documentos', [
+                'file' => UploadedFile::fake()->create('seguro_actualizado.pdf', 120, 'application/pdf'),
+                'type' => 'insurance_policy',
+                'document_name' => 'Seguro actualizado',
+            ]);
+
+        $response->assertCreated()
+            ->assertJsonPath('document.id', $document->id)
+            ->assertJsonPath('document.status', 'pending')
+            ->assertJsonPath('aircraft.documents.0.status', 'pending');
+
+        $document->refresh();
+
+        $this->assertSame('pending', $document->status);
+        $this->assertFalse((bool) $document->verified_by_admin);
+        $this->assertNull(data_get($document->metadata, 'admin_review'));
+        $this->assertSame('Seguro actualizado', $document->document_name);
+    }
 }

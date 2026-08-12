@@ -6,6 +6,7 @@ use App\Modelos\Aeronave;
 use App\Modelos\AircraftChecklist;
 use App\Modelos\AircraftChecklistItem;
 use App\Modelos\DocumentoAeronave;
+use App\Servicios\Aeronaves\AircraftStateService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Schema;
@@ -32,9 +33,14 @@ class AdminAircraftChecklistController extends ControladorBase
             'aliases' => ['insurance', 'seguro', 'insurance_policy', 'poliza', 'poliza_seguro'],
         ],
         [
-            'key' => 'maintenance',
-            'label' => 'Programa o evidencia de mantenimiento',
-            'aliases' => ['maintenance', 'mantenimiento', 'maintenance_sticker', 'logbook', 'bitacora', 'bitacora_vuelo'],
+            'key' => 'maintenance_sticker',
+            'label' => 'Sticker de mantenimiento',
+            'aliases' => ['maintenance', 'mantenimiento', 'maintenance_sticker'],
+        ],
+        [
+            'key' => 'flight_logbook',
+            'label' => 'Bitácora de vuelo',
+            'aliases' => ['flight_logbook', 'logbook', 'bitacora', 'bitacora_vuelo'],
         ],
         [
             'key' => 'exterior_photos',
@@ -42,6 +48,11 @@ class AdminAircraftChecklistController extends ControladorBase
             'aliases' => ['exterior', 'photo', 'photos', 'fotografias', 'gallery', 'image'],
         ],
     ];
+
+    public function __construct(
+        private readonly AircraftStateService $aircraftStateService,
+    ) {
+    }
 
     public function show(Aeronave $aircraft)
     {
@@ -127,19 +138,21 @@ class AdminAircraftChecklistController extends ControladorBase
 
     private function buildResponseItems(Aeronave $aircraft, ?AircraftChecklist $checklist): array
     {
-        $documents = $aircraft->documents()->get();
+        $documentsState = $this->aircraftStateService->evaluateDocuments($aircraft);
+        $requirementStatuses = collect($documentsState['requirements'] ?? [])->keyBy('key');
         $images = $aircraft->images()->get();
         $persistedItems = $checklist?->items?->keyBy('item_key') ?? collect();
 
         return collect(self::DEFINITIONS)
-            ->map(function (array $definition) use ($documents, $images, $persistedItems) {
+            ->map(function (array $definition) use ($images, $persistedItems, $requirementStatuses) {
                 /** @var AircraftChecklistItem|null $persisted */
                 $persisted = $persistedItems->get($definition['key']);
+                $canonicalStatus = $requirementStatuses->get($definition['key'])['status'] ?? null;
 
                 return [
                     'key' => $definition['key'],
                     'label' => $definition['label'],
-                    'status' => $persisted?->status ?: $this->inferStatus($definition, $documents, $images),
+                    'status' => $canonicalStatus ?: ($persisted?->status ?: $this->inferStatus($definition, collect(), $images)),
                     'notes' => $persisted?->notes,
                   ];
             })

@@ -17,8 +17,10 @@ class AircraftStateService
 
     private const REQUIRED_DOCUMENTS = [
         [
-            'key' => 'airworthiness',
+            'key' => 'airworthiness_certificate',
             'label' => 'Certificado de aeronavegabilidad',
+            'category' => 'certificates',
+            'category_label' => 'Certificados',
             'aliases' => [
                 'airworthiness',
                 'aeronavegabilidad',
@@ -30,7 +32,9 @@ class AircraftStateService
         ],
         [
             'key' => 'registration',
-            'label' => 'Matricula',
+            'label' => 'Matrícula',
+            'category' => 'certificates',
+            'category_label' => 'Certificados',
             'aliases' => [
                 'registration',
                 'registro',
@@ -41,8 +45,10 @@ class AircraftStateService
             ],
         ],
         [
-            'key' => 'insurance',
-            'label' => 'Seguro',
+            'key' => 'insurance_policy',
+            'label' => 'Seguro vigente',
+            'category' => 'insurance',
+            'category_label' => 'Seguros',
             'aliases' => [
                 'insurance',
                 'seguro',
@@ -54,14 +60,24 @@ class AircraftStateService
             ],
         ],
         [
-            'key' => 'maintenance',
-            'label' => 'Mantenimiento',
+            'key' => 'maintenance_sticker',
+            'label' => 'Sticker de mantenimiento',
+            'category' => 'maintenance',
+            'category_label' => 'Mantenimiento',
             'aliases' => [
                 'maintenance',
                 'mantenimiento',
                 'maintenance_sticker',
                 'sticker_mantenimiento',
                 'maintenance_sticker_document',
+            ],
+        ],
+        [
+            'key' => 'flight_logbook',
+            'label' => 'Bitácora de vuelo',
+            'category' => 'maintenance',
+            'category_label' => 'Mantenimiento',
+            'aliases' => [
                 'flight_logbook',
                 'logbook',
                 'bitacora_vuelo',
@@ -163,6 +179,76 @@ class AircraftStateService
         );
     }
 
+    public function getRequiredDocumentDefinitions(): array
+    {
+        return self::REQUIRED_DOCUMENTS;
+    }
+
+    public function canonicalAircraftDocuments(iterable $documents): Collection
+    {
+        return collect($documents)
+            ->filter(fn ($document) => $document instanceof DocumentoAeronave)
+            ->groupBy(function (DocumentoAeronave $document) {
+                return $this->resolveRequirementKeyForDocument($document)
+                    ?: $this->normalizeValue($document->document_type ?: $document->type ?: $document->id);
+            })
+            ->map(function (Collection $group) {
+                return $group
+                    ->sortByDesc(fn (DocumentoAeronave $document) => sprintf(
+                        '%010d:%010d:%010d',
+                        (int) optional($document->updated_at)->getTimestamp(),
+                        (int) optional($document->created_at)->getTimestamp(),
+                        (int) $document->id,
+                    ))
+                    ->first();
+            })
+            ->filter()
+            ->values();
+    }
+
+    public function serializeAircraftDocument(DocumentoAeronave $document): array
+    {
+        $definition = $this->resolveDefinitionForDocument($document);
+        $status = $this->documentStatus($document);
+        $review = is_array($document->metadata) ? (array) data_get($document->metadata, 'admin_review', []) : [];
+        $fileName = $this->resolveOriginalFileName($document);
+        $fileExtension = strtoupper(pathinfo($fileName, PATHINFO_EXTENSION));
+        $reviewedAt = $review['reviewed_at'] ?? null;
+        $rejectionReason = $status === 'rejected'
+            ? trim((string) ($review['reason'] ?? $document->notes ?? '')) ?: null
+            : null;
+
+        return [
+            'id' => $document->id,
+            'aircraft_id' => $document->aircraft_id,
+            'provider_id' => $document->provider_id,
+            'type' => $definition['key'] ?? ($document->document_type ?: $document->type ?: 'document'),
+            'label' => $definition['label'] ?? ($document->document_name ?: 'Documento'),
+            'category' => $definition['category'] ?? 'general',
+            'category_label' => $definition['category_label'] ?? 'General',
+            'file_name' => $fileName,
+            'original_file_name' => $fileName,
+            'storage_file_name' => trim((string) ($document->storage_path ?: '')) ?: null,
+            'mime_type' => $document->file_type,
+            'file_extension' => $fileExtension !== '' ? $fileExtension : strtoupper(pathinfo((string) ($document->document_url ?: $document->file_url ?: ''), PATHINFO_EXTENSION)),
+            'status' => $status,
+            'status_label' => $this->documentStatusLabel($status),
+            'expires_at' => optional($document->expires_at)->toDateString(),
+            'expiration_label' => $document->expires_at ? $document->expires_at->translatedFormat('d M Y') : 'Sin vencimiento',
+            'uploaded_at' => optional($document->created_at)->toIso8601String(),
+            'updated_at' => optional($document->updated_at)->toIso8601String(),
+            'reviewed_at' => $reviewedAt,
+            'reviewed_by' => $review['reviewed_by'] ?? null,
+            'rejection_reason' => $rejectionReason,
+            'is_expired' => $this->isDocumentExpired($document),
+            'can_preview' => $this->documentCanPreview($document),
+            'can_download' => true,
+            'can_replace' => $status === 'rejected',
+            'file_url' => trim((string) ($document->document_url ?: $document->file_url ?: '')),
+            'thumbnail_url' => trim((string) ($document->thumbnail_url ?: '')) ?: null,
+        ];
+    }
+
     public function evaluateAndSyncAircraftState(Aeronave|int $aircraft, ?array $billingSnapshot = null): array
     {
         $aircraftId = $aircraft instanceof Aeronave ? (int) $aircraft->id : (int) $aircraft;
@@ -233,6 +319,7 @@ class AircraftStateService
     private function buildDocumentsState(Aeronave $aircraft, Collection $documents): array
     {
         $required = count(self::REQUIRED_DOCUMENTS);
+        $canonicalDocuments = $this->canonicalAircraftDocuments($documents);
         $uploaded = 0;
         $approved = 0;
         $pending = 0;
@@ -242,30 +329,22 @@ class AircraftStateService
         $statusByRequirement = [];
 
         foreach (self::REQUIRED_DOCUMENTS as $requirement) {
-            $matched = $documents
-                ->filter(fn (DocumentoAeronave $document) => $this->documentMatchesRequirement($document, $requirement))
-                ->values();
+            $document = $canonicalDocuments
+                ->first(fn (DocumentoAeronave $candidate) => $this->documentMatchesRequirement($candidate, $requirement));
+            $serializedDocument = $document ? $this->serializeAircraftDocument($document) : null;
+            $status = $serializedDocument['status'] ?? 'missing';
 
-            $status = 'missing';
-
-            if ($matched->isNotEmpty()) {
+            if ($serializedDocument !== null) {
                 $uploaded++;
-
-                $hasApprovedCurrent = $matched->contains(fn (DocumentoAeronave $document) => $this->documentStatus($document) === 'approved' && ! $this->isDocumentExpired($document));
-                $hasExpired = $matched->contains(fn (DocumentoAeronave $document) => $this->documentStatus($document) === 'expired' || $this->isDocumentExpired($document));
-                $hasRejected = $matched->contains(fn (DocumentoAeronave $document) => in_array($this->documentStatus($document), ['rejected', 'correction_required'], true));
-
-                if ($hasApprovedCurrent) {
-                    $status = 'approved';
-                    $approved++;
-                } elseif ($hasExpired) {
-                    $status = 'expired';
+                if ($serializedDocument['is_expired'] === true) {
                     $expired++;
-                } elseif ($hasRejected) {
-                    $status = 'rejected';
+                }
+
+                if ($status === 'approved') {
+                    $approved++;
+                } elseif ($status === 'rejected') {
                     $rejected++;
-                } else {
-                    $status = 'pending';
+                } elseif ($status === 'pending') {
                     $pending++;
                 }
             } else {
@@ -275,16 +354,21 @@ class AircraftStateService
             $statusByRequirement[$requirement['key']] = [
                 'key' => $requirement['key'],
                 'label' => $requirement['label'],
+                'category' => $requirement['category'] ?? 'general',
+                'category_label' => $requirement['category_label'] ?? 'General',
                 'status' => $status,
-                'documents' => $matched->map(fn (DocumentoAeronave $document) => [
-                    'id' => $document->id,
-                    'status' => $this->documentStatus($document),
-                    'document_type' => $document->document_type,
-                    'document_name' => $document->document_name,
-                    'expires_at' => optional($document->expires_at)->toIso8601String(),
-                ])->values()->all(),
+                'status_label' => $this->documentStatusLabel($status),
+                'document' => $serializedDocument,
             ];
         }
+
+        $documentationStatus = match (true) {
+            $rejected > 0 => 'rejected',
+            $pending > 0 => 'pending',
+            $missing > 0 || $expired > 0 => 'incomplete',
+            $approved === $required && $required > 0 => 'complete',
+            default => 'incomplete',
+        };
 
         return [
             'required' => $required,
@@ -299,11 +383,21 @@ class AircraftStateService
             'complete' => $approved === $required,
             'valid' => $approved === $required && $expired === 0,
             'files_count' => $documents->count(),
-            'status' => $approved === 0
-                ? ($uploaded === 0 ? 'missing' : 'pending')
-                : ($approved < $required ? 'incomplete' : 'complete'),
+            'status' => $documentationStatus,
+            'status_label' => $this->documentationStatusLabel($documentationStatus),
             'requirements' => array_values($statusByRequirement),
-            'last_updated_at' => optional($documents->max('updated_at'))->toIso8601String(),
+            'documents' => $canonicalDocuments->map(fn (DocumentoAeronave $document) => $this->serializeAircraftDocument($document))->values()->all(),
+            'summary' => [
+                'total_required' => $required,
+                'uploaded' => $uploaded,
+                'approved' => $approved,
+                'pending' => $pending,
+                'rejected' => $rejected,
+                'missing' => $missing,
+                'expired' => $expired,
+                'completion_percentage' => $required > 0 ? (int) round(($uploaded / $required) * 100) : 0,
+            ],
+            'last_updated_at' => optional($canonicalDocuments->max('updated_at'))->toIso8601String(),
         ];
     }
 
@@ -396,6 +490,8 @@ class AircraftStateService
             'can_deactivate' => $isActive,
             'requirements_complete' => $requirementsComplete,
             'commercial_status' => $commercialStatus,
+            'commercial_status_label' => $this->commercialStatusLabel($commercialStatus),
+            'commercial_block_reason' => $this->buildCommercialBlockReason($missingRequirements, $documentsState, $paymentActive, $isBlocked),
             'missing_requirements' => array_values(array_unique($missingRequirements)),
             'provider_approved' => $providerApproved,
             'aircraft_approved' => $aircraftApproved,
@@ -463,13 +559,12 @@ class AircraftStateService
         $status = $this->normalizeValue($document->status);
 
         return match (true) {
-            $this->isDocumentExpired($document) => 'expired',
             $document->verified_by_admin === true => 'approved',
             in_array($status, ['approved', 'aprobado', 'aprobada', 'validated', 'vigente'], true) => 'approved',
-            in_array($status, ['rejected', 'rechazado', 'rechazada'], true) => 'rejected',
-            in_array($status, ['changes_requested', 'changes_required', 'correction_required', 'needs_changes'], true) => 'correction_required',
+            in_array($status, ['rejected', 'rechazado', 'rechazada', 'changes_requested', 'changes_required', 'correction_required', 'needs_changes'], true) => 'rejected',
+            $status === 'missing' => 'missing',
             $status === '' => 'pending',
-            default => $status,
+            default => in_array($status, ['approved', 'pending', 'rejected', 'missing'], true) ? $status : 'pending',
         };
     }
 
@@ -506,6 +601,116 @@ class AircraftStateService
             ->replaceMatches('/[\s-]+/', '_')
             ->replaceMatches('/_+/', '_')
             ->value();
+    }
+
+    private function resolveDefinitionForDocument(DocumentoAeronave $document): ?array
+    {
+        $key = $this->resolveRequirementKeyForDocument($document);
+        if ($key === null) {
+            return null;
+        }
+
+        return collect(self::REQUIRED_DOCUMENTS)->firstWhere('key', $key);
+    }
+
+    private function resolveRequirementKeyForDocument(DocumentoAeronave $document): ?string
+    {
+        foreach (self::REQUIRED_DOCUMENTS as $requirement) {
+            if ($this->documentMatchesRequirement($document, $requirement)) {
+                return $requirement['key'];
+            }
+        }
+
+        return null;
+    }
+
+    private function resolveOriginalFileName(DocumentoAeronave $document): string
+    {
+        $metadata = is_array($document->metadata) ? $document->metadata : [];
+        $originalName = trim((string) (
+            $metadata['original_name'] ??
+            $document->document_name ??
+            basename((string) ($document->storage_path ?: $document->document_url ?: $document->file_url ?: ''))
+        ));
+
+        return $originalName !== '' ? $originalName : 'documento';
+    }
+
+    private function documentStatusLabel(string $status): string
+    {
+        return match ($status) {
+            'approved' => 'Aprobado',
+            'rejected' => 'Rechazado',
+            'missing' => 'Pendiente de cargar',
+            default => 'Pendiente de revisión',
+        };
+    }
+
+    private function documentationStatusLabel(string $status): string
+    {
+        return match ($status) {
+            'complete' => 'Documentación válida',
+            'pending' => 'Documentación en revisión',
+            'rejected' => 'Documentación con observaciones',
+            default => 'Documentación incompleta',
+        };
+    }
+
+    private function commercialStatusLabel(string $status): string
+    {
+        return match ($status) {
+            'active' => 'Activa',
+            'blocked' => 'Suspendida',
+            'pending_payment' => 'Pendiente de pago',
+            'pending_approval' => 'Pendiente de aprobación',
+            default => 'Inactiva',
+        };
+    }
+
+    private function documentCanPreview(DocumentoAeronave $document): bool
+    {
+        $mime = strtolower((string) ($document->file_type ?: ''));
+        $name = strtolower($this->resolveOriginalFileName($document));
+
+        return $mime === 'application/pdf'
+            || str_starts_with($mime, 'image/')
+            || str_ends_with($name, '.pdf')
+            || preg_match('/\.(jpg|jpeg|png|webp|heic|heif)$/', $name) === 1;
+    }
+
+    private function buildCommercialBlockReason(array $missingRequirements, array $documentsState, bool $paymentActive, bool $isBlocked): ?string
+    {
+        if ($isBlocked) {
+            return 'Aeronave suspendida por administrador.';
+        }
+
+        if (($documentsState['rejected'] ?? 0) > 0) {
+            return 'Documentación con observaciones pendientes.';
+        }
+
+        if (($documentsState['pending'] ?? 0) > 0) {
+            return 'Documentación pendiente de aprobación.';
+        }
+
+        if (($documentsState['missing'] ?? 0) > 0 || ($documentsState['expired'] ?? 0) > 0) {
+            return 'Documentación incompleta.';
+        }
+
+        if (! $paymentActive) {
+            return 'Pago inactivo.';
+        }
+
+        $firstRequirement = $missingRequirements[0] ?? null;
+
+        return match ($firstRequirement) {
+            'provider_not_approved' => 'Proveedor pendiente de aprobación administrativa.',
+            'aircraft_not_approved' => 'Aeronave pendiente de aprobación administrativa.',
+            'range_missing' => 'Rango máximo pendiente.',
+            'capacity_missing' => 'Capacidad pendiente.',
+            'base_missing' => 'Base operativa pendiente.',
+            'commercial_information_incomplete' => 'Información comercial incompleta.',
+            default => null,
+        };
     }
 
     private function adminAircraftFleetProfiler(): ?AdminAircraftFleetProfiler

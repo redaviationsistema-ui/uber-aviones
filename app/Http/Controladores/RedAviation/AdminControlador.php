@@ -3049,25 +3049,13 @@ class AdminControlador extends ControladorBase
 
                 $payload = [
                     ...$item->attributesToArray(),
-                    'documents' => $this->deduplicateAircraftDocuments($item->documents)
-                        ->map(fn ($document) => [
-                            'id' => $document->id,
-                            'aircraft_id' => $document->aircraft_id,
-                            'provider_id' => $document->provider_id,
-                            'document_type' => $document->document_type,
-                            'type' => $document->type,
-                            'document_name' => $document->document_name,
-                            'document_url' => $document->document_url,
-                            'file_url' => $document->file_url,
-                            'storage_path' => $document->storage_path,
-                            'expires_at' => optional($document->expires_at)->toIso8601String(),
-                            'status' => $document->status,
-                            'verified_by_admin' => $document->verified_by_admin,
-                            'created_at' => optional($document->created_at)->toIso8601String(),
-                            'updated_at' => optional($document->updated_at)->toIso8601String(),
-                        ])
+                    'documents' => $this->aircraftStateService->canonicalAircraftDocuments($item->documents)
+                        ->map(fn ($document) => $this->aircraftStateService->serializeAircraftDocument($document))
                         ->values()
                         ->all(),
+                    'documents_summary' => data_get($state, 'documents.summary'),
+                    'documentation_status' => data_get($state, 'documents.status'),
+                    'documentation_status_label' => data_get($state, 'documents.status_label'),
                     'images' => $item->images->map(fn ($image) => [
                         'id' => $image->id,
                         'aircraft_id' => $image->aircraft_id,
@@ -3101,6 +3089,11 @@ class AdminControlador extends ControladorBase
                         'access_enabled' => $provider->access_enabled,
                     ] : null,
                     'aircraft_state' => $state,
+                    'commercial_status' => data_get($state, 'activation.commercial_status'),
+                    'commercial_status_label' => data_get($state, 'activation.commercial_status_label'),
+                    'commercial_block_reason' => data_get($state, 'activation.commercial_block_reason'),
+                    'payment_status' => data_get($state, 'payment.status'),
+                    'payment_status_label' => data_get($state, 'payment.label'),
                     'ready_to_quote' => $state['ready_to_quote'] ?? false,
                     'ready_to_book' => $state['ready_to_book'] ?? false,
                 ];

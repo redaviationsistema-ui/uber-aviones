@@ -35,6 +35,7 @@ class DocumentoAeronave extends Model
             'expires_at' => 'datetime',
             'verified_by_admin' => 'boolean',
             'metadata' => 'array',
+            'reviewed_at' => 'datetime',
         ];
     }
 

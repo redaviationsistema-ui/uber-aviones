@@ -738,13 +738,20 @@ class AdministradorControlador extends ControladorBase
         $validationStartedAt = microtime(true);
         $state = $this->aircraftStateService->evaluateAndSyncAircraftState($aircraft);
         $validationMs = round((microtime(true) - $validationStartedAt) * 1000, 2);
+        $activationState = is_array($state['activation'] ?? null) ? $state['activation'] : [];
+        $canReactivateBlockedAircraft =
+            ($activationState['commercial_status'] ?? null) === 'blocked'
+            && ($activationState['requirements_complete'] ?? false) === true
+            && ($state['review']['approved'] ?? false) === true;
 
-        if (! ($state['activation']['can_activate'] ?? false)) {
+        if (! (($activationState['can_activate'] ?? false) || $canReactivateBlockedAircraft)) {
             Log::info('admin.aircraft_activation.rejected', [
                 'aircraft_id' => $aircraft->id,
                 'validation_ms' => $validationMs,
                 'total_ms' => round((microtime(true) - $requestStartedAt) * 1000, 2),
-                'missing_requirements' => $state['activation']['missing_requirements'] ?? [],
+                'missing_requirements' => $activationState['missing_requirements'] ?? [],
+                'commercial_status' => $activationState['commercial_status'] ?? null,
+                'commercial_block_reason' => $activationState['commercial_block_reason'] ?? null,
             ]);
 
             return $this->ok([
@@ -793,6 +800,7 @@ class AdministradorControlador extends ControladorBase
             'post_save_snapshot_ms' => 0,
             'events_and_jobs_ms' => 0,
             'total_before_response_ms' => $totalMs,
+            'reactivated_from_blocked' => $canReactivateBlockedAircraft,
         ]);
 
         return $this->ok([
