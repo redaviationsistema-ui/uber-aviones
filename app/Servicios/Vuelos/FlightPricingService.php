@@ -185,20 +185,23 @@ final class FlightPricingService
             ->all();
 
         $routeDistanceKm = (float) collect($legPricings)->sum('distance_km');
-        $routeDirectHours = (float) collect($legPricings)->sum('direct_air_time_hours');
-        $routeOperationalHours = (float) collect($legPricings)->sum('real_flight_hours');
+        $routeBaseMinutes = (float) collect($legPricings)->sum('base_flight_minutes');
+        $routeDirectHours = $routeBaseMinutes / 60;
+        $routeOperationalMinutes = (float) collect($legPricings)->sum('raw_operational_minutes');
+        $routeOperationalHours = $routeOperationalMinutes / 60;
         $routeOperationalRawHours = (float) collect($legPricings)->sum('raw_operational_flight_hours');
         $routeOperationalDisplayHours = $this->resolveOperationalRouteDisplayHours($routeOperationalHours, $legPricings);
         $routeDisplayHours = $routeOperationalDisplayHours;
         $routePricingHours = $routeOperationalHours;
         $rawLegHours = collect($legPricings)
-            ->map(fn (array $legPricing): float => (float) ($legPricing['real_flight_hours'] ?? 0.0))
+            ->map(fn (array $legPricing): float => (float) ($legPricing['raw_operational_flight_hours'] ?? 0.0))
             ->values()
             ->all();
         $rawRouteHours = (float) array_sum($rawLegHours);
+        $routeBillableMinutes = (float) collect($legPricings)->sum('billable_minutes');
         $routeClimbDescentMinutes = (float) collect($legPricings)->sum('climb_descent_minutes');
         $routeClimbDescentHours = (float) collect($legPricings)->sum('climb_descent_hours');
-        $routeBillableHours = $rawRouteHours;
+        $routeBillableHours = $routeBillableMinutes / 60;
 
         $operationalContext = is_array($trustedInput['operational_context'] ?? null)
             ? $trustedInput['operational_context']
@@ -419,6 +422,7 @@ final class FlightPricingService
             'currency' => $aircraft->currency ?: 'USD',
             'hourly_rate' => $hourlyRate,
             'price_per_minute' => $pricePerMinute,
+            'route_base_minutes' => $routeBaseMinutes,
             'raw_leg_hours' => $rawLegHours,
             'raw_route_hours' => $rawRouteHours,
             'configured_minimum_hours' => $configuredMinimumHours,
@@ -427,11 +431,14 @@ final class FlightPricingService
             'minimum_hours_applied' => $minimumHoursApplied,
             'minimum_applied' => $minimumApplied,
             'minimum_hours' => $appliedMinimumHours,
+            'route_direct_minutes' => $routeBaseMinutes,
             'route_direct_hours' => $routeDirectHours,
             'direct_route_hours' => $routeDirectHours,
+            'route_operational_minutes' => $routeOperationalMinutes,
             'route_operational_hours' => $routeOperationalHours,
             'route_operational_raw_hours' => $routeOperationalRawHours,
             'route_operational_display_hours' => $routeOperationalDisplayHours,
+            'route_display_minutes' => $routeDisplayHours * 60,
             'display_route_hours' => $routeDisplayHours,
             'operational_billable_hours' => $routePricingHours,
             'route_billable_hours' => $routeBillableHours,
@@ -541,7 +548,7 @@ final class FlightPricingService
                 'display_flight_hours' => (float) $routeDisplayHours,
                 'operational_hours' => (float) $routeOperationalHours + (float) ($repositioning['operational_hours'] ?? 0) + (float) ($returnToBase['operational_hours'] ?? 0),
                 'billable_hours' => (float) $totalBilledHours,
-                'source' => 'backend_distance_and_aircraft_speed',
+                'source' => 'backend_operational_time',
             ],
             'ignored_client_pricing_fields' => $this->presentFields($rawClientPayload ?? $options),
             'debug_pricing' => $debugPricing,
@@ -627,7 +634,7 @@ final class FlightPricingService
                 'aircraft_name' => $aircraft->model,
                 'legs_count' => count($legs),
                 'total_distance_nm' => round((float) collect($legPricings)->sum('distance_nm'), 2),
-                'total_direct_minutes' => round($routeDirectHours * 60, 2),
+                'total_direct_minutes' => round($routeBaseMinutes, 2),
                 'total_cruise_minutes' => round((float) collect($legPricings)->sum('cruise_minutes'), 2),
                 'total_resolved_climb_minutes' => round((float) collect($legPricings)->sum('climb_minutes'), 2),
                 'total_resolved_descent_minutes' => round((float) collect($legPricings)->sum('descent_minutes'), 2),

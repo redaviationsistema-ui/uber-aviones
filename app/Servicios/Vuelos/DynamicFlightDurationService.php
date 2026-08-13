@@ -11,6 +11,10 @@ use Illuminate\Support\Facades\Schema;
 
 final class DynamicFlightDurationService
 {
+    private const PHASE_SPEED_SOURCE_PROFILE_DISTANCE = 'profile_distance';
+
+    private const PHASE_SPEED_SOURCE_FALLBACK_BASE_SPEED = 'base_speed_fallback';
+
     private const PROFILE_KEYS = [
         'taxi_out_minutes',
         'taxi_in_minutes',
@@ -75,20 +79,38 @@ final class DynamicFlightDurationService
         $effectiveSpeedKnots = $baseSpeedKnots;
         $effectiveSpeedKmh = $effectiveSpeedKnots * 1.852;
         $directMinutes = ($distanceNm / $baseSpeedKnots) * 60;
-        $cruiseDistanceNm = max(0.0, $distanceNm);
-        $cruiseMinutes = ($cruiseDistanceNm / $effectiveSpeedKnots) * 60;
+        $resolvedClimbMinutes = max((float) ($profile['climb_minutes'] ?? 0.0), 0.0);
+        $resolvedDescentMinutes = max((float) ($profile['descent_minutes'] ?? 0.0), 0.0);
+        $climbDescentMinutes = $resolvedClimbMinutes + $resolvedDescentMinutes;
+        $phaseBreakdown = $this->resolvePhaseBreakdown(
+            $distanceNm,
+            $effectiveSpeedKnots,
+            $resolvedClimbMinutes,
+            max((float) ($profile['climb_distance_nm'] ?? 0.0), 0.0),
+            $resolvedDescentMinutes,
+            max((float) ($profile['descent_distance_nm'] ?? 0.0), 0.0),
+        );
+        $baseFlightMinutes = (float) ($phaseBreakdown['cruise_minutes'] ?? 0.0);
+        $cruiseDistanceNm = (float) ($phaseBreakdown['cruise_distance_nm'] ?? 0.0);
+        $cruiseMinutes = $baseFlightMinutes;
+        $appliedClimbMinutes = (float) ($phaseBreakdown['applied_climb_minutes'] ?? $resolvedClimbMinutes);
+        $appliedDescentMinutes = (float) ($phaseBreakdown['applied_descent_minutes'] ?? $resolvedDescentMinutes);
+        $appliedClimbDistanceNm = (float) ($phaseBreakdown['applied_climb_distance_nm'] ?? 0.0);
+        $appliedDescentDistanceNm = (float) ($phaseBreakdown['applied_descent_distance_nm'] ?? 0.0);
+        $climbSpeedKnots = (float) ($phaseBreakdown['climb_speed_knots'] ?? $effectiveSpeedKnots);
+        $descentSpeedKnots = (float) ($phaseBreakdown['descent_speed_knots'] ?? $effectiveSpeedKnots);
         $originAirportAdjustmentMinutes = max((float) ($origin->climb_descent_adjustment_minutes ?? 0.0), 0.0);
         $destinationAirportAdjustmentMinutes = max((float) ($destination->climb_descent_adjustment_minutes ?? 0.0), 0.0);
         $airportAdjustmentMinutes = $originAirportAdjustmentMinutes + $destinationAirportAdjustmentMinutes;
-        // speed_kmh/speed_knots is the commercial block speed. Its distance/speed
-        // result already represents the complete leg, so climb/descent and the
-        // related airport adjustments remain diagnostics and are not added again.
-        $operationalMinutesRaw = $cruiseMinutes;
+        $appliedAirportAdjustmentMinutes = $airportAdjustmentMinutes;
+        $operationalMarginMinutes = $appliedClimbMinutes + $appliedDescentMinutes + $appliedAirportAdjustmentMinutes;
+        $operationalMinutesRaw = $baseFlightMinutes + $operationalMarginMinutes;
         $roundedMinutes = $operationalMinutesRaw;
         $minimumHours = 0.0;
         $billableMinutes = max($roundedMinutes, $minimumHours * 60);
         $billableHours = $billableMinutes / 60;
         $displayOperationalHours = $operationalMinutesRaw / 60;
+        $displayMinutes = $operationalMinutesRaw;
         $hourlyRate = $this->commercialHourlyRate($aircraft->hourly_rate);
         $accumulatedMinutes = max(0.0, (float) ($context['accumulated_minutes_before'] ?? 0.0)) + $billableMinutes;
         $departureDateTime = filled($context['departure_datetime'] ?? null)
@@ -110,9 +132,12 @@ final class DynamicFlightDurationService
             'direct_air_time_hours' => $directMinutes / 60,
             'air_time_hours' => $directMinutes / 60,
             'direct_minutes' => $directMinutes,
-            'climb_descent_minutes' => (float) $profile['climb_minutes'] + (float) $profile['descent_minutes'],
-            'climb_descent_hours' => ((float) $profile['climb_minutes'] + (float) $profile['descent_minutes']) / 60,
+            'base_flight_minutes' => $baseFlightMinutes,
+            'base_flight_hours' => $baseFlightMinutes / 60,
+            'climb_descent_minutes' => $climbDescentMinutes,
+            'climb_descent_hours' => $climbDescentMinutes / 60,
             'reserve_hours' => 0.0,
+            'display_minutes' => $displayMinutes,
             'display_flight_hours' => $displayOperationalHours,
             'operational_display_hours' => $displayOperationalHours,
             'operational_factor' => $effectiveSpeedFactor,
@@ -120,9 +145,11 @@ final class DynamicFlightDurationService
             'minimum_minutes_per_leg' => 0.0,
             'calculated_minutes' => (int) round($operationalMinutesRaw),
             'operational_minutes' => (int) round($operationalMinutesRaw),
-            'raw_operational_minutes' => round($operationalMinutesRaw, 2),
+            'raw_operational_minutes' => $operationalMinutesRaw,
+            'operational_margin_minutes' => $operationalMarginMinutes,
             'rounded_minutes' => $roundedMinutes,
             'billable_minutes' => $billableMinutes,
+            'display_hours' => $displayOperationalHours,
             'operational_flight_hours' => $displayOperationalHours,
             'commercial_flight_hours' => $billableHours,
             'real_flight_hours' => $displayOperationalHours,
@@ -140,25 +167,34 @@ final class DynamicFlightDurationService
             'taxi_in_minutes' => (float) $profile['taxi_in_minutes'],
             'takeoff_minutes' => (float) $profile['takeoff_minutes'],
             'landing_minutes' => (float) $profile['landing_minutes'],
-            'climb_minutes' => (float) $profile['climb_minutes'],
+            'climb_minutes' => $resolvedClimbMinutes,
             'climb_distance_nm' => (float) $profile['climb_distance_nm'],
+            'applied_climb_distance_nm' => $appliedClimbDistanceNm,
+            'climb_speed_knots' => $climbSpeedKnots,
             'cruise_minutes' => $cruiseMinutes,
             'cruise_distance_nm' => $cruiseDistanceNm,
-            'descent_minutes' => (float) $profile['descent_minutes'],
+            'descent_minutes' => $resolvedDescentMinutes,
             'descent_distance_nm' => (float) $profile['descent_distance_nm'],
+            'applied_descent_distance_nm' => $appliedDescentDistanceNm,
+            'descent_speed_knots' => $descentSpeedKnots,
+            'phase_distance_scaling_factor' => (float) ($phaseBreakdown['distance_scaling_factor'] ?? 1.0),
+            'phase_distance_overflow_nm' => (float) ($phaseBreakdown['distance_overflow_nm'] ?? 0.0),
+            'phase_scaling_applied' => (bool) ($phaseBreakdown['scaling_applied'] ?? false),
+            'climb_speed_source' => (string) ($phaseBreakdown['climb_speed_source'] ?? self::PHASE_SPEED_SOURCE_FALLBACK_BASE_SPEED),
+            'descent_speed_source' => (string) ($phaseBreakdown['descent_speed_source'] ?? self::PHASE_SPEED_SOURCE_FALLBACK_BASE_SPEED),
             'climb_descent_minutes_effective' => (float) ($climbDescentDiagnostics['effective_minutes'] ?? 0.0),
             'climb_descent_source_effective' => (string) ($climbDescentDiagnostics['effective_source'] ?? self::CLIMB_DESCENT_SOURCE_EFFECTIVE_GLOBAL_FALLBACK),
             'climb_descent_source_recorded' => (string) ($climbDescentDiagnostics['recorded_source'] ?? Aeronave::CLIMB_DESCENT_SOURCE_LEGACY_UNKNOWN),
             'origin_airport_adjustment_minutes' => $originAirportAdjustmentMinutes,
             'destination_airport_adjustment_minutes' => $destinationAirportAdjustmentMinutes,
             'airport_adjustment_minutes' => $airportAdjustmentMinutes,
-            'applied_climb_minutes' => 0.0,
-            'applied_descent_minutes' => 0.0,
-            'applied_airport_adjustment_minutes' => 0.0,
+            'applied_climb_minutes' => $appliedClimbMinutes,
+            'applied_descent_minutes' => $appliedDescentMinutes,
+            'applied_airport_adjustment_minutes' => $appliedAirportAdjustmentMinutes,
             'taxi_minutes' => 0.0,
             'buffer_minutes' => 0.0,
             'other_operational_minutes' => 0.0,
-            'operational_time_definition' => 'block_time_distance_over_speed',
+            'operational_time_definition' => 'climb_plus_cruise_plus_descent_plus_airport_adjustments',
             'fixed_operational_minutes' => 0.0,
             'rounding_increment_minutes' => 0.0,
             'stored_speed_value' => $storedSpeedValue,
@@ -186,6 +222,7 @@ final class DynamicFlightDurationService
                 'origin' => $leg['origin'],
                 'destination' => $leg['destination'],
                 'distance_nm' => $distanceNm,
+                'base_flight_minutes' => round($baseFlightMinutes, 4),
                 'speed_database_kmh' => (float) ($aircraft->speed_kmh ?? 0.0),
                 'speed_knots' => $baseSpeedKnots,
                 'cruise_speed_knots' => $baseSpeedKnots,
@@ -193,8 +230,15 @@ final class DynamicFlightDurationService
                 'taxi_out_minutes' => $leg['taxi_out_minutes'],
                 'takeoff_minutes' => $leg['takeoff_minutes'],
                 'climb_minutes' => $leg['climb_minutes'],
+                'climb_distance_nm' => $leg['climb_distance_nm'],
+                'applied_climb_distance_nm' => $leg['applied_climb_distance_nm'],
+                'climb_speed_knots' => $leg['climb_speed_knots'],
                 'cruise_minutes' => $leg['cruise_minutes'],
+                'cruise_distance_nm' => $leg['cruise_distance_nm'],
                 'descent_minutes' => $leg['descent_minutes'],
+                'descent_distance_nm' => $leg['descent_distance_nm'],
+                'applied_descent_distance_nm' => $leg['applied_descent_distance_nm'],
+                'descent_speed_knots' => $leg['descent_speed_knots'],
                 'landing_minutes' => $leg['landing_minutes'],
                 'taxi_in_minutes' => $leg['taxi_in_minutes'],
                 'airport_adjustment_minutes' => $leg['airport_adjustment_minutes'],
@@ -210,6 +254,10 @@ final class DynamicFlightDurationService
                 'climb_descent_minutes_effective' => $leg['climb_descent_minutes_effective'],
                 'climb_descent_source_recorded' => $leg['climb_descent_source_recorded'],
                 'climb_descent_source_effective' => $leg['climb_descent_source_effective'],
+                'operational_margin_minutes' => round($operationalMarginMinutes, 4),
+                'phase_scaling_applied' => $leg['phase_scaling_applied'],
+                'phase_distance_scaling_factor' => $leg['phase_distance_scaling_factor'],
+                'operational_minutes' => round($operationalMinutesRaw, 4),
                 'raw_leg_hours' => round($operationalMinutesRaw / 60, 4),
                 'operational_leg_hours' => round($displayOperationalHours, 4),
                 'billable_leg_hours' => round($billableHours, 4),
@@ -225,6 +273,85 @@ final class DynamicFlightDurationService
         }
 
         return $leg;
+    }
+
+    /**
+     * @return array<string, float|bool|string>
+     */
+    private function resolvePhaseBreakdown(
+        float $distanceNm,
+        float $cruiseSpeedKnots,
+        float $climbMinutes,
+        float $climbDistanceNm,
+        float $descentMinutes,
+        float $descentDistanceNm,
+    ): array {
+        $distanceNm = max($distanceNm, 0.0);
+        $cruiseSpeedKnots = max($cruiseSpeedKnots, 1.0);
+
+        [$resolvedClimbSpeedKnots, $climbSpeedSource] = $this->resolvePhaseSpeedKnots(
+            $climbDistanceNm,
+            $climbMinutes,
+            $cruiseSpeedKnots,
+        );
+        [$resolvedDescentSpeedKnots, $descentSpeedSource] = $this->resolvePhaseSpeedKnots(
+            $descentDistanceNm,
+            $descentMinutes,
+            $cruiseSpeedKnots,
+        );
+
+        $nominalClimbDistanceNm = $climbMinutes > 0
+            ? $resolvedClimbSpeedKnots * ($climbMinutes / 60)
+            : 0.0;
+        $nominalDescentDistanceNm = $descentMinutes > 0
+            ? $resolvedDescentSpeedKnots * ($descentMinutes / 60)
+            : 0.0;
+        $phaseDistanceTotalNm = $nominalClimbDistanceNm + $nominalDescentDistanceNm;
+        $distanceScalingFactor = $phaseDistanceTotalNm > 0.0 && $phaseDistanceTotalNm > $distanceNm
+            ? $distanceNm / $phaseDistanceTotalNm
+            : 1.0;
+
+        $appliedClimbMinutes = $climbMinutes * $distanceScalingFactor;
+        $appliedDescentMinutes = $descentMinutes * $distanceScalingFactor;
+        $appliedClimbDistanceNm = $nominalClimbDistanceNm * $distanceScalingFactor;
+        $appliedDescentDistanceNm = $nominalDescentDistanceNm * $distanceScalingFactor;
+        $cruiseDistanceNm = max($distanceNm - $appliedClimbDistanceNm - $appliedDescentDistanceNm, 0.0);
+
+        return [
+            'climb_speed_knots' => $resolvedClimbSpeedKnots,
+            'descent_speed_knots' => $resolvedDescentSpeedKnots,
+            'climb_speed_source' => $climbSpeedSource,
+            'descent_speed_source' => $descentSpeedSource,
+            'applied_climb_minutes' => $appliedClimbMinutes,
+            'applied_descent_minutes' => $appliedDescentMinutes,
+            'applied_climb_distance_nm' => $appliedClimbDistanceNm,
+            'applied_descent_distance_nm' => $appliedDescentDistanceNm,
+            'cruise_distance_nm' => $cruiseDistanceNm,
+            'cruise_minutes' => $cruiseDistanceNm > 0.0 ? ($cruiseDistanceNm / $cruiseSpeedKnots) * 60 : 0.0,
+            'distance_scaling_factor' => $distanceScalingFactor,
+            'distance_overflow_nm' => max($phaseDistanceTotalNm - $distanceNm, 0.0),
+            'scaling_applied' => $distanceScalingFactor < 1.0,
+        ];
+    }
+
+    /**
+     * @return array{0: float, 1: string}
+     */
+    private function resolvePhaseSpeedKnots(float $phaseDistanceNm, float $phaseMinutes, float $fallbackSpeedKnots): array
+    {
+        $phaseDistanceNm = max($phaseDistanceNm, 0.0);
+        $phaseMinutes = max($phaseMinutes, 0.0);
+        if ($phaseDistanceNm > 0.0 && $phaseMinutes > 0.0) {
+            return [
+                $phaseDistanceNm / ($phaseMinutes / 60),
+                self::PHASE_SPEED_SOURCE_PROFILE_DISTANCE,
+            ];
+        }
+
+        return [
+            max($fallbackSpeedKnots, 1.0),
+            self::PHASE_SPEED_SOURCE_FALLBACK_BASE_SPEED,
+        ];
     }
 
     private function resolveProfile(Aeronave $aircraft): array

@@ -156,7 +156,7 @@ class ClientCanonicalPricingSecurityTest extends TestCase
             data_get($stored, 'flight_request.pricing_context.pricing_formula_version'),
         );
         $this->assertSame(
-            'backend_distance_and_aircraft_speed',
+            'backend_operational_time',
             data_get($stored, 'flight_request.pricing_context.duration_snapshot.source'),
         );
 
