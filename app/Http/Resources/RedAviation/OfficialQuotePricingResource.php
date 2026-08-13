@@ -74,6 +74,7 @@ class OfficialQuotePricingResource extends JsonResource
             'time' => $cardTime,
             'card_time' => $cardTime,
             'display_time' => $cardTime,
+            'display_route_duration' => $cardTime,
             'ui_time' => $cardTime,
             'trip_time' => $cardTime,
             'flight_time' => $cardTime,
@@ -261,10 +262,6 @@ class OfficialQuotePricingResource extends JsonResource
 
         if ($hourPart === 0) {
             return "{$minutePart} min";
-        }
-
-        if ($minutePart === 0) {
-            return "{$hourPart} h";
         }
 
         return "{$hourPart} h ".str_pad((string) $minutePart, 2, '0', STR_PAD_LEFT).' min';

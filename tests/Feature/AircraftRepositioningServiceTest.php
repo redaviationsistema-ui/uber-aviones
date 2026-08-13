@@ -128,9 +128,10 @@ class AircraftRepositioningServiceTest extends TestCase
         $context = $contexts->first()['operational_context'];
 
         $this->assertTrue((bool) data_get($context, 'requires_repositioning'));
-        $this->assertGreaterThan(
+        $this->assertEqualsWithDelta(
             (float) data_get($context, 'repositioning.flight_hours'),
-            (float) data_get($context, 'repositioning.billable_hours')
+            (float) data_get($context, 'repositioning.billable_hours'),
+            0.0001,
         );
         $this->assertGreaterThan(0.0, (float) data_get($context, 'repositioning.billable_minutes'));
         $this->assertTrue((bool) data_get($context, 'return_to_base.required'));

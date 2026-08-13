@@ -1310,7 +1310,7 @@ class PlataformaVuelosApiTest extends TestCase
         $this->assertEquals(round($finalPrice, 2), round($total, 2));
     }
 
-    public function test_multi_leg_preview_applies_minimum_hours_once_to_total_itinerary(): void
+    public function test_multi_leg_preview_keeps_minimum_hours_informational(): void
     {
         $this->seed();
 
@@ -1340,8 +1340,15 @@ class PlataformaVuelosApiTest extends TestCase
         $this->assertNotNull($quote);
         $this->assertSame('multi_leg', $quote['pricing_breakdown']['trip_type']);
         $this->assertSame(2.0, (float) $quote['pricing_breakdown']['minimum_hours']);
-        $this->assertSame(2.0, (float) $quote['pricing_breakdown']['billable_hours']);
-        $this->assertSame(10400.0, (float) $quote['pricing_breakdown']['client_flight_cost']);
+        $this->assertEqualsWithDelta(
+            (float) $quote['pricing_breakdown']['display_route_hours'],
+            (float) $quote['pricing_breakdown']['billable_hours'],
+            0.0000001,
+        );
+        $this->assertSame(
+            round((float) $quote['pricing_breakdown']['display_route_hours'] * 5200.0, 2),
+            (float) $quote['pricing_breakdown']['client_flight_cost'],
+        );
 
         foreach ($quote['pricing_breakdown']['client_leg_pricing'] as $legPricing) {
             $this->assertSame(0.0, (float) $legPricing['minimum_hours']);

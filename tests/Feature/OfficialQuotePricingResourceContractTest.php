@@ -41,6 +41,7 @@ class OfficialQuotePricingResourceContractTest extends TestCase
         $this->assertSame((float) $payload['pricing_breakdown']['total_amount'], (float) $payload['total']);
         $this->assertSame((string) $payload['time'], (string) $payload['card_time']);
         $this->assertSame((string) $payload['time'], (string) $payload['trip_time']);
+        $this->assertSame((string) $payload['time'], (string) $payload['display_route_duration']);
         $this->assertSame('4 h 35 min', $payload['time']);
         $this->assertSame('4 h 35 min', $payload['billable_flight_time']);
     }

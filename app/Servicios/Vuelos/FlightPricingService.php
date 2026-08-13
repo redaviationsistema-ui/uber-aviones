@@ -61,17 +61,9 @@ final class FlightPricingService
         'pricing_formula_version',
     ];
 
-    private const TIME_MODE_DIRECT = 'direct';
-
-    private const TIME_MODE_DIRECT_PLUS_CLIMB = 'direct_plus_climb';
-
     private const TIME_MODE_OPERATIONAL = 'operational';
 
     private const ROUNDING_MODE_NONE = 'none';
-
-    private const ROUNDING_MODE_QUARTER_NEAREST = 'quarter_nearest';
-
-    private const ROUNDING_MODE_QUARTER_UP = 'quarter_up';
 
     private const DEFAULT_IVA_RATE = 0.16;
 
@@ -98,7 +90,6 @@ final class FlightPricingService
     private ?Collection $airportExpenseRulesCache = null;
 
     public function __construct(
-        private readonly FlightDurationService $flightDurationService,
         private readonly DynamicFlightDurationService $dynamicFlightDurationService,
         private readonly PaymentFeeCalculationServicio $paymentFeeCalculationServicio,
     ) {}
@@ -127,22 +118,17 @@ final class FlightPricingService
         ?array $rawClientPayload = null,
     ): array {
         $trustedInput = $this->sanitizeClientPayload($options);
-        $dynamicOperationalEnabled = $this->useOperationalFlightTimeModel($trustedInput);
-        $defaultTimeMode = $dynamicOperationalEnabled ? self::TIME_MODE_OPERATIONAL : self::TIME_MODE_DIRECT;
-        if (! array_key_exists('time_display_mode', $trustedInput)) {
-            $trustedInput['time_display_mode'] = $defaultTimeMode;
-        }
-        if (! array_key_exists('billing_hours_mode', $trustedInput)) {
-            $trustedInput['billing_hours_mode'] = $defaultTimeMode;
-        }
+        $dynamicOperationalEnabled = true;
+        $trustedInput['time_display_mode'] = self::TIME_MODE_OPERATIONAL;
+        $trustedInput['billing_hours_mode'] = self::TIME_MODE_OPERATIONAL;
         // Client quote flows use exact decimal hours; do not trust or require public rounding input.
         $trustedInput['rounding_mode'] = self::ROUNDING_MODE_NONE;
         $tripType = (string) ($canonicalRoute['trip_type'] ?? 'one_way');
         $legs = array_values($canonicalRoute['legs'] ?? []);
         $hourlyRate = $this->resolveCommercialHourlyRate($aircraft->hourly_rate);
         $pricePerMinute = round($hourlyRate / 60, 2);
-        $timeDisplayMode = $this->resolveTimeMode($trustedInput, 'time_display_mode', self::TIME_MODE_DIRECT);
-        $billingHoursMode = $this->resolveTimeMode($trustedInput, 'billing_hours_mode', self::TIME_MODE_DIRECT);
+        $timeDisplayMode = self::TIME_MODE_OPERATIONAL;
+        $billingHoursMode = self::TIME_MODE_OPERATIONAL;
         $roundingMode = $this->resolveRoundingMode($trustedInput, 'distance_speed');
         $marginRate = $this->shouldApplyCommercialMargin($trustedInput)
             ? $this->resolveCommercialMarginRate($aircraft, $this->resolveCategoryPricingRule($aircraft))
@@ -157,35 +143,20 @@ final class FlightPricingService
             $distanceKm = (float) ($leg['distance_km'] ?? 0);
             $distanceNm = (float) ($leg['distance_nm'] ?? 0);
 
-            $legPricing = $dynamicOperationalEnabled
-                ? $this->dynamicFlightDurationService->calculateLeg(
-                    $aircraft,
-                    $origin,
-                    $destination,
-                    $distanceKm,
-                    $distanceNm,
-                    false,
-                    [
-                        'calculation_id' => $pricingCalculationId,
-                        'leg_number' => $index + 1,
-                        'departure_datetime' => $leg['departure_datetime'] ?? null,
-                        'accumulated_minutes_before' => $accumulatedMinutes,
-                        'duration_minutes' => $leg['duration_minutes'] ?? null,
-                        'estimated_minutes' => $leg['estimated_minutes'] ?? null,
-                        'quoted_minutes' => $leg['quoted_minutes'] ?? null,
-                        'flight_minutes' => $leg['flight_minutes'] ?? null,
-                        'leg_minutes' => $leg['leg_minutes'] ?? null,
-                        'duration_hours' => $leg['duration_hours'] ?? null,
-                    ],
-                )
-                : $this->flightDurationService->calculateLeg(
-                    $aircraft,
-                    $origin,
-                    $destination,
-                    $distanceKm,
-                    $distanceNm,
-                    false,
-                );
+            $legPricing = $this->dynamicFlightDurationService->calculateLeg(
+                $aircraft,
+                $origin,
+                $destination,
+                $distanceKm,
+                $distanceNm,
+                false,
+                [
+                    'calculation_id' => $pricingCalculationId,
+                    'leg_number' => $index + 1,
+                    'departure_datetime' => $leg['departure_datetime'] ?? null,
+                    'accumulated_minutes_before' => $accumulatedMinutes,
+                ],
+            );
 
             $accumulatedMinutes += (float) ($legPricing['billable_minutes'] ?? (($legPricing['billable_hours'] ?? 0) * 60));
             $legPricings[] = $legPricing;
@@ -194,8 +165,8 @@ final class FlightPricingService
         $calculatedClientLegs = collect($legs)
             ->map(function (array $leg, int $index) use ($legPricings, $timeDisplayMode, $billingHoursMode): array {
                 $legPricing = $legPricings[$index] ?? [];
-                $flightHours = (float) $this->resolveLegHoursByMode($legPricing, $billingHoursMode);
-                $displayHours = (float) $this->resolveLegHoursByMode($legPricing, $timeDisplayMode);
+                $flightHours = (float) ($legPricing['real_flight_hours'] ?? 0.0);
+                $displayHours = $flightHours;
 
                 return [
                     ...$leg,
@@ -218,29 +189,16 @@ final class FlightPricingService
         $routeOperationalHours = (float) collect($legPricings)->sum('real_flight_hours');
         $routeOperationalRawHours = (float) collect($legPricings)->sum('raw_operational_flight_hours');
         $routeOperationalDisplayHours = $this->resolveOperationalRouteDisplayHours($routeOperationalHours, $legPricings);
-        $routeDisplayHours = $timeDisplayMode === self::TIME_MODE_OPERATIONAL
-            ? $routeOperationalDisplayHours
-            : (float) collect($legPricings)->sum(
-                fn (array $legPricing) => $this->resolveLegHoursByMode($legPricing, $timeDisplayMode)
-            );
-        $routePricingHours = (float) collect($legPricings)->sum(
-            fn (array $legPricing) => $this->resolveLegHoursByMode($legPricing, $billingHoursMode)
-        );
+        $routeDisplayHours = $routeOperationalDisplayHours;
+        $routePricingHours = $routeOperationalHours;
         $rawLegHours = collect($legPricings)
-            ->map(fn (array $legPricing): float => (float) $this->resolveLegHoursByMode($legPricing, $billingHoursMode))
+            ->map(fn (array $legPricing): float => (float) ($legPricing['real_flight_hours'] ?? 0.0))
             ->values()
             ->all();
         $rawRouteHours = (float) array_sum($rawLegHours);
         $routeClimbDescentMinutes = (float) collect($legPricings)->sum('climb_descent_minutes');
         $routeClimbDescentHours = (float) collect($legPricings)->sum('climb_descent_hours');
-        $routeBillableHours = $roundingMode === self::ROUNDING_MODE_NONE
-            ? $rawRouteHours
-            : (float) collect($legPricings)->sum(
-                fn (array $legPricing) => $this->applyRoundingMode(
-                    (float) $this->resolveLegHoursByMode($legPricing, $billingHoursMode),
-                    $roundingMode,
-                )
-            );
+        $routeBillableHours = $rawRouteHours;
 
         $operationalContext = is_array($trustedInput['operational_context'] ?? null)
             ? $trustedInput['operational_context']
@@ -266,6 +224,8 @@ final class FlightPricingService
         $appliedMinimumHours = $configuredMinimumHours > 0
             ? $configuredMinimumHours
             : $fallbackMinimumHours;
+        // The visible operational duration is also the economic base.
+        // minimum_hours remains informational and is never added or used as a floor.
         $clientPricingHours = max($routeOperationalHours, 0.0);
         $minimumHoursApplied = 0.0;
         $minimumApplied = false;
@@ -285,8 +245,8 @@ final class FlightPricingService
             ],
         );
         $minimumRoutePrice = max((float) ($minimumRoutePricing['amount'] ?? 0.0), 0.0);
-        $minimumRoutePriceApplied = $minimumRoutePrice > 0.0 && $minimumRoutePrice > $rawClientFlightCost;
-        $clientFlightCost = $minimumRoutePriceApplied ? $minimumRoutePrice : $rawClientFlightCost;
+        $minimumRoutePriceApplied = false;
+        $clientFlightCost = $rawClientFlightCost;
         $repositioningHours = (float) ($repositioning['billable_hours'] ?? 0.0);
         $returnToBaseHours = (float) ($returnToBase['billable_hours'] ?? 0.0);
         $repositioningCost = $applyRepositioningPricing ? (float) ($repositioning['cost'] ?? 0.0) : 0.0;
@@ -466,7 +426,7 @@ final class FlightPricingService
             'applied_minimum_hours' => $appliedMinimumHours,
             'minimum_hours_applied' => $minimumHoursApplied,
             'minimum_applied' => $minimumApplied,
-            'minimum_hours' => $configuredMinimumHours,
+            'minimum_hours' => $appliedMinimumHours,
             'route_direct_hours' => $routeDirectHours,
             'direct_route_hours' => $routeDirectHours,
             'route_operational_hours' => $routeOperationalHours,
@@ -668,6 +628,16 @@ final class FlightPricingService
                 'legs_count' => count($legs),
                 'total_distance_nm' => round((float) collect($legPricings)->sum('distance_nm'), 2),
                 'total_direct_minutes' => round($routeDirectHours * 60, 2),
+                'total_cruise_minutes' => round((float) collect($legPricings)->sum('cruise_minutes'), 2),
+                'total_resolved_climb_minutes' => round((float) collect($legPricings)->sum('climb_minutes'), 2),
+                'total_resolved_descent_minutes' => round((float) collect($legPricings)->sum('descent_minutes'), 2),
+                'total_resolved_airport_adjustment_minutes' => round((float) collect($legPricings)->sum('airport_adjustment_minutes'), 2),
+                'total_climb_minutes' => round((float) collect($legPricings)->sum('applied_climb_minutes'), 2),
+                'total_descent_minutes' => round((float) collect($legPricings)->sum('applied_descent_minutes'), 2),
+                'total_airport_adjustment_minutes' => round((float) collect($legPricings)->sum('applied_airport_adjustment_minutes'), 2),
+                'total_taxi_minutes' => round((float) collect($legPricings)->sum('taxi_minutes'), 2),
+                'total_buffer_minutes' => round((float) collect($legPricings)->sum('buffer_minutes'), 2),
+                'total_other_operational_minutes' => round((float) collect($legPricings)->sum('other_operational_minutes'), 2),
                 'total_operational_minutes' => round($routeOperationalHours * 60, 2),
                 'total_raw_operational_minutes' => round($routeOperationalRawHours * 60, 2),
                 'total_rounded_minutes' => round($routeOperationalDisplayHours * 60, 2),
@@ -676,6 +646,8 @@ final class FlightPricingService
                 'minimum_applied' => $minimumApplied,
                 'pricing_hours' => round($clientPricingHours, 4),
                 'final_billable_hours' => round($clientPricingHours, 4),
+                'display_route_hours' => round($routeDisplayHours, 4),
+                'display_route_duration' => $this->formatDuration($routeDisplayHours),
                 'hourly_rate' => round($hourlyRate, 2),
                 'raw_client_flight_cost' => round($rawClientFlightCost, 2),
                 'client_flight_cost' => round($clientFlightCost, 2),
@@ -715,6 +687,13 @@ final class FlightPricingService
         ]);
 
         return $pricing;
+    }
+
+    private function formatDuration(float $hours): string
+    {
+        $totalMinutes = max((int) round(max($hours, 0.0) * 60), 0);
+
+        return intdiv($totalMinutes, 60).' h '.str_pad((string) ($totalMinutes % 60), 2, '0', STR_PAD_LEFT).' min';
     }
 
     public function sanitizeClientPayload(array $payload): array
@@ -796,26 +775,6 @@ final class FlightPricingService
         ];
     }
 
-    private function resolveTimeMode(array $requestData, string $key, string $default): string
-    {
-        $mode = mb_strtolower(trim((string) ($requestData[$key] ?? '')));
-
-        return in_array($mode, [
-            self::TIME_MODE_DIRECT,
-            self::TIME_MODE_DIRECT_PLUS_CLIMB,
-            self::TIME_MODE_OPERATIONAL,
-        ], true) ? $mode : $default;
-    }
-
-    private function resolveLegHoursByMode(array $legPricing, string $mode): float
-    {
-        return match ($mode) {
-            self::TIME_MODE_OPERATIONAL => (float) ($legPricing['operational_display_hours'] ?? $legPricing['real_flight_hours'] ?? 0),
-            self::TIME_MODE_DIRECT_PLUS_CLIMB => (float) ($legPricing['direct_air_time_hours'] ?? 0) + (float) ($legPricing['climb_descent_hours'] ?? 0),
-            default => (float) ($legPricing['direct_air_time_hours'] ?? 0),
-        };
-    }
-
     private function resolveOperationalRouteDisplayHours(float $routeOperationalHours, array $legPricings): float
     {
         unset($legPricings);
@@ -825,28 +784,9 @@ final class FlightPricingService
 
     private function resolveRoundingMode(array $requestData, string $hoursSource): string
     {
-        $mode = mb_strtolower(trim((string) ($requestData['rounding_mode'] ?? '')));
+        unset($requestData, $hoursSource);
 
-        if (in_array($mode, [
-            self::ROUNDING_MODE_NONE,
-            self::ROUNDING_MODE_QUARTER_NEAREST,
-            self::ROUNDING_MODE_QUARTER_UP,
-        ], true)) {
-            return $mode;
-        }
-
-        return $hoursSource === 'distance_speed'
-            ? self::ROUNDING_MODE_QUARTER_NEAREST
-            : self::ROUNDING_MODE_NONE;
-    }
-
-    private function applyRoundingMode(float $hours, string $mode): float
-    {
-        return match ($mode) {
-            self::ROUNDING_MODE_QUARTER_UP => ceil($hours * 4) / 4,
-            self::ROUNDING_MODE_NONE => round($hours, 2),
-            default => round($hours * 4) / 4,
-        };
+        return self::ROUNDING_MODE_NONE;
     }
 
     private function shouldIncludeIva(array $data): bool
@@ -894,15 +834,6 @@ final class FlightPricingService
         }
 
         return $hourlyRate;
-    }
-
-    private function useOperationalFlightTimeModel(array $requestData = []): bool
-    {
-        $requestedMode = mb_strtolower(trim((string) ($requestData['time_display_mode'] ?? '')));
-
-        return $requestedMode === self::TIME_MODE_OPERATIONAL
-            || ((bool) config('vuelos.dynamic_flight_time_enabled', false)
-                && (string) config('vuelos.flight_time_model', 'direct') === self::TIME_MODE_OPERATIONAL);
     }
 
     private function resolveFallbackMinimumHours(mixed $category, float $distanceKm): float
