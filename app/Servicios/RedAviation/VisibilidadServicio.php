@@ -68,18 +68,16 @@ class VisibilidadServicio
             ? $solicitud->quotes->where('status', 'accepted')->sortByDesc('id')->first()
             : $solicitud->quotes()->where('status', 'accepted')->latest('id')->first();
         $visibleQuoteTotal = $this->resolveVisibleQuoteTotal(
-            $acceptedQuote?->total,
             data_get($solicitud->pricing_context, 'total_amount'),
             $solicitud->final_price,
-            $preferredMatch?->estimated_price,
             $visibilityPayload['selected_card_price'] ?? null,
+            $preferredMatch?->estimated_price,
+            $acceptedQuote?->total,
         );
         $this->warnWhenQuoteTotalsDiverge($solicitud, [
-            'accepted_quote.total' => $acceptedQuote?->total,
             'pricing_context.total_amount' => data_get($solicitud->pricing_context, 'total_amount'),
             'final_price' => $solicitud->final_price,
             'preferred_match.estimated_price' => $preferredMatch?->estimated_price,
-            'visibility_payload.selected_card_price' => $visibilityPayload['selected_card_price'] ?? null,
         ]);
 
         Log::info('Client flight request payload serialized', [
