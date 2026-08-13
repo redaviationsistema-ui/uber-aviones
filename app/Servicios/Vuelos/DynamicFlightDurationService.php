@@ -67,6 +67,7 @@ final class DynamicFlightDurationService
     ): array {
         $profile = $this->resolveProfile($aircraft);
         $climbDescentDiagnostics = $this->resolveClimbDescentDiagnostics($aircraft, $profile);
+        $manualDuration = $this->resolveManualLegDuration($context);
         $storedSpeedValue = $this->resolveStoredSpeedValue($aircraft);
         $storedSpeedUnit = $this->resolveStoredSpeedUnit($aircraft);
         $speedConversionApplied = $storedSpeedUnit === 'km/h_to_knots';
@@ -91,13 +92,16 @@ final class DynamicFlightDurationService
             + (float) $profile['taxi_in_minutes']
             + (float) $profile['fixed_operational_minutes'];
         $roundingIncrementMinutes = max((float) $profile['rounding_increment_minutes'], 1.0);
-        $roundedMinutes = $this->roundMinutes($operationalMinutesRaw, $roundingIncrementMinutes);
+        $calculatedOperationalMinutes = $manualDuration['minutes'] ?? $operationalMinutesRaw;
+        $roundedMinutes = $manualDuration !== null
+            ? round((float) $manualDuration['minutes'], 2)
+            : $this->roundMinutes($operationalMinutesRaw, $roundingIncrementMinutes);
         $minimumHours = $applyMinimumHours
             ? $this->legacyFlightDurationService->minimumHours($aircraft->category, $distanceKm)
             : 0.0;
         $billableMinutes = max($roundedMinutes, $minimumHours * 60);
         $billableHours = $billableMinutes / 60;
-        $displayOperationalHours = $operationalMinutesRaw / 60;
+        $displayOperationalHours = $roundedMinutes / 60;
         $hourlyRate = $this->commercialHourlyRate($aircraft->hourly_rate);
         $accumulatedMinutes = max(0.0, (float) ($context['accumulated_minutes_before'] ?? 0.0)) + $billableMinutes;
         $departureDateTime = filled($context['departure_datetime'] ?? null)
@@ -108,10 +112,10 @@ final class DynamicFlightDurationService
         $leg = [
             'origin' => $origin->icao ?: $origin->iata,
             'destination' => $destination->icao ?: $destination->iata,
-            'hours_source' => 'dynamic_operational_profile',
-            'manual_duration_minutes' => 0.0,
-            'manual_duration_hours' => 0.0,
-            'manual_duration_field' => null,
+            'hours_source' => $manualDuration !== null ? 'manual_operational_duration' : 'dynamic_operational_profile',
+            'manual_duration_minutes' => (float) ($manualDuration['minutes'] ?? 0.0),
+            'manual_duration_hours' => (float) ($manualDuration['hours'] ?? 0.0),
+            'manual_duration_field' => $manualDuration['field'] ?? null,
             'distance_speed_hours' => $directMinutes / 60,
             'distance_nm' => $distanceNm,
             'distance_km' => $distanceKm,
@@ -127,13 +131,15 @@ final class DynamicFlightDurationService
             'operational_factor' => $effectiveSpeedFactor,
             'fixed_minutes_per_leg' => (float) $profile['fixed_operational_minutes'],
             'minimum_minutes_per_leg' => 0.0,
-            'calculated_minutes' => (int) round($operationalMinutesRaw),
-            'operational_minutes' => (int) round($operationalMinutesRaw),
+            'calculated_minutes' => (int) round($calculatedOperationalMinutes),
+            'operational_minutes' => (int) round($roundedMinutes),
+            'raw_operational_minutes' => round($operationalMinutesRaw, 2),
             'rounded_minutes' => $roundedMinutes,
             'billable_minutes' => $billableMinutes,
-            'operational_flight_hours' => $operationalMinutesRaw / 60,
+            'operational_flight_hours' => $displayOperationalHours,
             'commercial_flight_hours' => $billableHours,
-            'real_flight_hours' => $operationalMinutesRaw / 60,
+            'real_flight_hours' => $displayOperationalHours,
+            'raw_operational_flight_hours' => $operationalMinutesRaw / 60,
             'minimum_hours' => $minimumHours,
             'buffer_hours' => 0.0,
             'billable_hours' => $billableHours,
@@ -156,6 +162,7 @@ final class DynamicFlightDurationService
             'climb_descent_minutes_effective' => (float) ($climbDescentDiagnostics['effective_minutes'] ?? 0.0),
             'climb_descent_source_effective' => (string) ($climbDescentDiagnostics['effective_source'] ?? self::CLIMB_DESCENT_SOURCE_EFFECTIVE_GLOBAL_FALLBACK),
             'climb_descent_source_recorded' => (string) ($climbDescentDiagnostics['recorded_source'] ?? Aeronave::CLIMB_DESCENT_SOURCE_LEGACY_UNKNOWN),
+            'airport_adjustment_minutes' => 0.0,
             'fixed_operational_minutes' => (float) $profile['fixed_operational_minutes'],
             'rounding_increment_minutes' => $roundingIncrementMinutes,
             'stored_speed_value' => $storedSpeedValue,
@@ -192,9 +199,13 @@ final class DynamicFlightDurationService
                 'descent_minutes' => $leg['descent_minutes'],
                 'landing_minutes' => $leg['landing_minutes'],
                 'taxi_in_minutes' => $leg['taxi_in_minutes'],
+                'airport_adjustment_minutes' => $leg['airport_adjustment_minutes'],
                 'climb_descent_minutes_effective' => $leg['climb_descent_minutes_effective'],
                 'climb_descent_source_recorded' => $leg['climb_descent_source_recorded'],
                 'climb_descent_source_effective' => $leg['climb_descent_source_effective'],
+                'raw_leg_hours' => round(($manualDuration['hours'] ?? ($operationalMinutesRaw / 60)), 4),
+                'operational_leg_hours' => round($displayOperationalHours, 4),
+                'billable_leg_hours' => round($billableHours, 4),
                 'operational_minutes_raw' => $operationalMinutesRaw,
                 'rounded_minutes' => $roundedMinutes,
                 'billable_minutes' => $billableMinutes,
@@ -427,7 +438,8 @@ final class DynamicFlightDurationService
         }
 
         $persistedMinutes = max((float) ($aircraft->climb_descent_minutes ?? 0), 0.0);
-        if ($persistedMinutes > 0) {
+        $recordedSource = $this->resolveRecordedClimbDescentSource($aircraft);
+        if ($persistedMinutes > 0 && $recordedSource === Aeronave::CLIMB_DESCENT_SOURCE_MANUAL) {
             return [
                 'profile' => $this->splitClimbDescentMinutes($persistedMinutes, $resolvedProfile),
                 'source' => 'aircraft_record',
@@ -444,6 +456,14 @@ final class DynamicFlightDurationService
                 ),
                 'source' => 'profile_db',
                 'level' => self::PROFILE_DB_LEVEL_TYPE,
+            ];
+        }
+
+        if ($this->totalProfileClimbDescentMinutes($resolvedProfile) > 0) {
+            return [
+                'profile' => [],
+                'source' => 'resolved_profile',
+                'level' => 'config_profile',
             ];
         }
 
@@ -486,6 +506,7 @@ final class DynamicFlightDurationService
             $climbDescentResolutionSource === 'aircraft_record' && $recordedSource === Aeronave::CLIMB_DESCENT_SOURCE_MANUAL => self::CLIMB_DESCENT_SOURCE_EFFECTIVE_MANUAL,
             $climbDescentResolutionSource === 'aircraft_record' && $recordedSource === Aeronave::CLIMB_DESCENT_SOURCE_LEGACY_UNKNOWN => self::CLIMB_DESCENT_SOURCE_EFFECTIVE_LEGACY_UNKNOWN,
             $climbDescentResolutionSource === 'aircraft_record' => self::CLIMB_DESCENT_SOURCE_EFFECTIVE_CATEGORY_FALLBACK,
+            $climbDescentResolutionSource === 'resolved_profile' => self::CLIMB_DESCENT_SOURCE_EFFECTIVE_CATEGORY_FALLBACK,
             $climbDescentResolutionSource === 'config_category_default' => self::CLIMB_DESCENT_SOURCE_EFFECTIVE_CATEGORY_FALLBACK,
             default => self::CLIMB_DESCENT_SOURCE_EFFECTIVE_GLOBAL_FALLBACK,
         };
@@ -508,6 +529,46 @@ final class DynamicFlightDurationService
             Aeronave::CLIMB_DESCENT_SOURCE_GLOBAL_DEFAULT,
             Aeronave::CLIMB_DESCENT_SOURCE_LEGACY_UNKNOWN,
         ], true) ? $source : Aeronave::CLIMB_DESCENT_SOURCE_LEGACY_UNKNOWN;
+    }
+
+    private function resolveManualLegDuration(array $context): ?array
+    {
+        foreach ([
+            'duration_minutes',
+            'estimated_minutes',
+            'quoted_minutes',
+            'flight_minutes',
+            'leg_minutes',
+        ] as $field) {
+            $value = $context[$field] ?? null;
+            if (! is_numeric($value)) {
+                continue;
+            }
+
+            $minutes = (float) $value;
+            if ($minutes <= 0) {
+                continue;
+            }
+
+            return [
+                'field' => $field,
+                'minutes' => round($minutes, 2),
+                'hours' => round($minutes / 60, 4),
+            ];
+        }
+
+        $durationHours = $context['duration_hours'] ?? null;
+        if (is_numeric($durationHours) && (float) $durationHours > 0) {
+            $hours = (float) $durationHours;
+
+            return [
+                'field' => 'duration_hours',
+                'minutes' => round($hours * 60, 2),
+                'hours' => round($hours, 4),
+            ];
+        }
+
+        return null;
     }
 
     /**

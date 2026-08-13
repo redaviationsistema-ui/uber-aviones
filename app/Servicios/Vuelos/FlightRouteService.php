@@ -67,6 +67,7 @@ final class FlightRouteService
                 $origin,
                 $destination,
                 $definition['departure_datetime'] ?? null,
+                $definition,
             );
         }
 
@@ -192,6 +193,7 @@ final class FlightRouteService
                     'origin' => $requirementOrigin,
                     'destination' => $requirementDestination,
                     'departure_datetime' => $requirement['departure_datetime'] ?? null,
+                    ...$this->extractTimingHints($requirement),
                 ];
 
                 continue;
@@ -213,6 +215,7 @@ final class FlightRouteService
                     'origin' => $origin,
                     'destination' => $destination,
                     'departure_datetime' => $payload['departure_datetime'] ?? null,
+                    ...$this->extractTimingHints($payload),
                 ]);
             }
 
@@ -230,6 +233,7 @@ final class FlightRouteService
                 'departure_datetime' => $index === 0
                     ? ($payload['departure_datetime'] ?? null)
                     : data_get($payload, 'requirements.'.($index - 1).'.departure_datetime'),
+                ...$this->extractTimingHints($index === 0 ? $payload : (array) data_get($payload, 'requirements.'.($index - 1), [])),
             ];
         }
 
@@ -249,6 +253,7 @@ final class FlightRouteService
                     'origin' => $this->extractAirportReference($leg, 'origin', ['origin', 'origin_code', 'from', 'from_code', 'origin_airport']),
                     'destination' => $this->extractAirportReference($leg, 'destination', ['destination', 'destination_code', 'to', 'to_code', 'destination_airport']),
                     'departure_datetime' => $leg['departure_datetime'] ?? null,
+                    ...$this->extractTimingHints($leg),
                 ];
             })
             ->filter(fn (array $leg) => filled($leg['origin']) && filled($leg['destination']))
@@ -454,7 +459,13 @@ final class FlightRouteService
             ->values();
     }
 
-    private function buildLeg(int $position, Aeropuerto $origin, Aeropuerto $destination, mixed $departure): array
+    private function buildLeg(
+        int $position,
+        Aeropuerto $origin,
+        Aeropuerto $destination,
+        mixed $departure,
+        array $context = []
+    ): array
     {
         $distanceKm = $this->distance(
             (float) $origin->latitude,
@@ -471,7 +482,7 @@ final class FlightRouteService
             3440.065,
         );
 
-        return [
+        return array_filter([
             'position' => $position,
             'origin' => $origin->icao ?: $origin->iata,
             'destination' => $destination->icao ?: $destination->iata,
@@ -481,7 +492,38 @@ final class FlightRouteService
             'distance_nm' => round($distanceNm),
             'international' => strtoupper((string) $origin->country) !== strtoupper((string) $destination->country),
             'departure_datetime' => $departure,
-        ];
+            ...$this->extractTimingHints($context),
+        ], static fn ($value) => $value !== null);
+    }
+
+    private function extractTimingHints(array $payload): array
+    {
+        $timingHints = [];
+
+        foreach ([
+            'duration_minutes',
+            'estimated_minutes',
+            'quoted_minutes',
+            'flight_minutes',
+            'leg_minutes',
+            'duration_hours',
+        ] as $field) {
+            $value = $payload[$field] ?? null;
+            if (! is_numeric($value)) {
+                continue;
+            }
+
+            $numericValue = (float) $value;
+            if ($numericValue <= 0) {
+                continue;
+            }
+
+            $timingHints[$field] = $field === 'duration_hours'
+                ? round($numericValue, 4)
+                : round($numericValue, 2);
+        }
+
+        return $timingHints;
     }
 
     private function distance(float $originLat, float $originLng, float $destinationLat, float $destinationLng, float $radius): float

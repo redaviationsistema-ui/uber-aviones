@@ -170,6 +170,12 @@ final class FlightPricingService
                         'leg_number' => $index + 1,
                         'departure_datetime' => $leg['departure_datetime'] ?? null,
                         'accumulated_minutes_before' => $accumulatedMinutes,
+                        'duration_minutes' => $leg['duration_minutes'] ?? null,
+                        'estimated_minutes' => $leg['estimated_minutes'] ?? null,
+                        'quoted_minutes' => $leg['quoted_minutes'] ?? null,
+                        'flight_minutes' => $leg['flight_minutes'] ?? null,
+                        'leg_minutes' => $leg['leg_minutes'] ?? null,
+                        'duration_hours' => $leg['duration_hours'] ?? null,
                     ],
                 )
                 : $this->flightDurationService->calculateLeg(
@@ -210,6 +216,7 @@ final class FlightPricingService
         $routeDistanceKm = (float) collect($legPricings)->sum('distance_km');
         $routeDirectHours = (float) collect($legPricings)->sum('direct_air_time_hours');
         $routeOperationalHours = (float) collect($legPricings)->sum('real_flight_hours');
+        $routeOperationalRawHours = (float) collect($legPricings)->sum('raw_operational_flight_hours');
         $routeOperationalDisplayHours = $this->resolveOperationalRouteDisplayHours($routeOperationalHours, $legPricings);
         $routeDisplayHours = $timeDisplayMode === self::TIME_MODE_OPERATIONAL
             ? $routeOperationalDisplayHours
@@ -375,6 +382,7 @@ final class FlightPricingService
             'raw_route_hours' => $rawRouteHours,
             'direct_route_hours' => $routeDirectHours,
             'operational_route_hours' => $routeOperationalHours,
+            'raw_operational_route_hours' => $routeOperationalRawHours,
             'operational_display_hours' => $routeOperationalDisplayHours,
             'configured_minimum_hours' => $configuredMinimumHours,
             'fallback_minimum_hours' => $fallbackMinimumHours,
@@ -431,6 +439,7 @@ final class FlightPricingService
                 'route_direct_hours' => round($routeDirectHours, 4),
                 'route_display_hours' => round($routeDisplayHours, 4),
                 'route_operational_hours' => round($routeOperationalHours, 4),
+                'route_operational_raw_hours' => round($routeOperationalRawHours, 4),
                 'route_billable_hours' => round($routeBillableHours, 4),
                 'repositioning_hours' => round($repositioningHours, 4),
                 'return_to_base_hours' => round($returnToBaseHours, 4),
@@ -461,6 +470,7 @@ final class FlightPricingService
             'route_direct_hours' => $routeDirectHours,
             'direct_route_hours' => $routeDirectHours,
             'route_operational_hours' => $routeOperationalHours,
+            'route_operational_raw_hours' => $routeOperationalRawHours,
             'route_operational_display_hours' => $routeOperationalDisplayHours,
             'display_route_hours' => $routeDisplayHours,
             'operational_billable_hours' => $routePricingHours,
@@ -659,6 +669,7 @@ final class FlightPricingService
                 'total_distance_nm' => round((float) collect($legPricings)->sum('distance_nm'), 2),
                 'total_direct_minutes' => round($routeDirectHours * 60, 2),
                 'total_operational_minutes' => round($routeOperationalHours * 60, 2),
+                'total_raw_operational_minutes' => round($routeOperationalRawHours * 60, 2),
                 'total_rounded_minutes' => round($routeOperationalDisplayHours * 60, 2),
                 'route_billable_hours' => round($routeBillableHours, 4),
                 'minimum_hours' => round($appliedMinimumHours, 4),
