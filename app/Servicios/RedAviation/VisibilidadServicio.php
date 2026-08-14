@@ -331,6 +331,9 @@ class VisibilidadServicio
         $assignedAircraft = $this->resolveAssignedAircraft($solicitud);
         $reservation = $this->resolveReservation($solicitud);
         $operation = $this->resolveLatestOperation($solicitud, preferCollection: false);
+        $assignment = $operation?->relationLoaded('latestCrewAssignment')
+            ? $operation->latestCrewAssignment
+            : $operation?->latestCrewAssignment()->first();
         $timeline = $operation
             ? ($operation->relationLoaded('timeline')
                 ? $operation->timeline->sortByDesc('id')->values()
@@ -417,12 +420,47 @@ class VisibilidadServicio
                 'name' => $operation->sobrecargo->name,
             ] : null,
             'crew_status' => $operation?->crew_status,
+            'crew_status_label' => $assignment?->accepted_at
+                ? 'Lista'
+                : match (\App\Dominio\Sobrecargo\CrewAssignmentStatus::normalize($assignment?->status ?? $operation?->crew_status)) {
+                    \App\Dominio\Sobrecargo\CrewAssignmentStatus::PENDING_CONFIRMATION => 'Pendiente de confirmacion',
+                    \App\Dominio\Sobrecargo\CrewAssignmentStatus::CONFIRMED => 'Lista',
+                    \App\Dominio\Sobrecargo\CrewAssignmentStatus::REJECTED => 'Rechazada',
+                    \App\Dominio\Sobrecargo\CrewAssignmentStatus::CANCELLED => 'Cancelada',
+                    default => $operation?->crew_status,
+                },
+            'assignment' => $assignment ? [
+                'id' => $assignment->id,
+                'role' => $assignment->role,
+                'status' => \App\Dominio\Sobrecargo\CrewAssignmentStatus::normalize($assignment->status),
+                'assigned_at' => optional($assignment->assigned_at)?->toISOString(),
+                'response_deadline' => optional($assignment->response_deadline)?->toISOString(),
+                'presentation_time' => optional($assignment->presentation_time)?->toISOString(),
+                'accepted_at' => optional($assignment->accepted_at)?->toISOString(),
+                'rejected_at' => optional($assignment->rejected_at)?->toISOString(),
+                'rejection_reason' => $assignment->rejection_reason,
+                'cancelled_at' => optional($assignment->cancelled_at)?->toISOString(),
+                'cancellation_reason' => $assignment->cancellation_reason,
+            ] : null,
             'operation' => $operation ? [
                 'id' => $operation->id,
                 'status' => $operation->status,
                 'sobrecargo_user_id' => $operation->sobrecargo_user_id,
                 'crew_status' => $operation->crew_status,
                 'crew_notes' => $operation->crew_notes,
+                'assignment' => $assignment ? [
+                    'id' => $assignment->id,
+                    'role' => $assignment->role,
+                    'status' => \App\Dominio\Sobrecargo\CrewAssignmentStatus::normalize($assignment->status),
+                    'assigned_at' => optional($assignment->assigned_at)?->toISOString(),
+                    'response_deadline' => optional($assignment->response_deadline)?->toISOString(),
+                    'presentation_time' => optional($assignment->presentation_time)?->toISOString(),
+                    'accepted_at' => optional($assignment->accepted_at)?->toISOString(),
+                    'rejected_at' => optional($assignment->rejected_at)?->toISOString(),
+                    'rejection_reason' => $assignment->rejection_reason,
+                    'cancelled_at' => optional($assignment->cancelled_at)?->toISOString(),
+                    'cancellation_reason' => $assignment->cancellation_reason,
+                ] : null,
                 'sobrecargo' => $operation->sobrecargo ? [
                     'id' => $operation->sobrecargo->id,
                     'name' => $operation->sobrecargo->name,

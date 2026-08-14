@@ -1062,6 +1062,155 @@ class PlataformaVuelosApiTest extends TestCase
         $this->assertSame('Reasignacion confirmada.', data_get($flightRequest->visibility_payload, 'crew_notes'));
     }
 
+    public function test_admin_assign_creates_valid_future_assignment_window(): void
+    {
+        $this->seed();
+
+        $adminToken = $this->postJson('/api/v1/auth/login', [
+            'email' => 'admin@privateflights.test',
+            'password' => 'password',
+        ])->assertOk()->json('token');
+
+        $sobrecargo = Usuario::query()->where('email', 'sobrecargo@redaviation.test')->firstOrFail();
+        $provider = Proveedor::query()->firstOrFail();
+        $aircraft = Aeronave::query()->where('provider_id', $provider->id)->firstOrFail();
+        $client = Usuario::query()->where('email', 'cliente@privateflights.test')->firstOrFail();
+
+        $departure = now()->addDay()->startOfDay()->addHours(16);
+
+        $flightRequest = SolicitudVuelo::query()->create([
+            'client_id' => $client->id,
+            'assigned_provider_id' => $provider->id,
+            'assigned_aircraft_id' => $aircraft->id,
+            'assigned_aircraft_model' => $aircraft->model,
+            'origin' => 'MMTO',
+            'destination' => 'MMMX',
+            'departure_datetime' => $departure,
+            'passengers' => 2,
+            'trip_type' => 'one_way',
+            'status' => 'confirmada',
+            'workflow_status' => 'flight_confirmed',
+            'visibility_payload' => [
+                'operational_status' => 'flight_confirmed',
+                'operational_ready' => false,
+            ],
+        ]);
+
+        $this->withToken($adminToken)
+            ->postJson("/api/v1/admin/requests/{$flightRequest->id}/assign", [
+                'provider_id' => $provider->id,
+                'aircraft_id' => $aircraft->id,
+                'sobrecargo_user_id' => $sobrecargo->id,
+                'presentation_time' => '15:00',
+            ])
+            ->assertOk();
+
+        $assignment = Operacion::query()
+            ->where('flight_request_id', $flightRequest->id)
+            ->firstOrFail()
+            ->latestCrewAssignment()
+            ->firstOrFail();
+
+        $this->assertTrue($assignment->assigned_at->lt($assignment->response_deadline));
+        $this->assertTrue($assignment->response_deadline->lt($assignment->presentation_time));
+    }
+
+    public function test_admin_assign_rejects_when_presentation_time_is_already_past(): void
+    {
+        $this->seed();
+
+        $adminToken = $this->postJson('/api/v1/auth/login', [
+            'email' => 'admin@privateflights.test',
+            'password' => 'password',
+        ])->assertOk()->json('token');
+
+        $sobrecargo = Usuario::query()->where('email', 'sobrecargo@redaviation.test')->firstOrFail();
+        $provider = Proveedor::query()->firstOrFail();
+        $aircraft = Aeronave::query()->where('provider_id', $provider->id)->firstOrFail();
+        $client = Usuario::query()->where('email', 'cliente@privateflights.test')->firstOrFail();
+
+        $pastDeparture = now()->subHour();
+
+        $flightRequest = SolicitudVuelo::query()->create([
+            'client_id' => $client->id,
+            'assigned_provider_id' => $provider->id,
+            'assigned_aircraft_id' => $aircraft->id,
+            'assigned_aircraft_model' => $aircraft->model,
+            'origin' => 'MMTO',
+            'destination' => 'MMMX',
+            'departure_datetime' => $pastDeparture,
+            'passengers' => 1,
+            'trip_type' => 'one_way',
+            'status' => 'confirmada',
+            'workflow_status' => 'flight_confirmed',
+            'visibility_payload' => [
+                'operational_status' => 'flight_confirmed',
+                'operational_ready' => false,
+            ],
+        ]);
+
+        $this->withToken($adminToken)
+            ->postJson("/api/v1/admin/requests/{$flightRequest->id}/assign", [
+                'provider_id' => $provider->id,
+                'aircraft_id' => $aircraft->id,
+                'sobrecargo_user_id' => $sobrecargo->id,
+                'presentation_time' => $pastDeparture->format('H:i'),
+            ])
+            ->assertStatus(409)
+            ->assertJsonPath('code', 'PRESENTATION_TIME_EXPIRED');
+
+        $operation = Operacion::query()->where('flight_request_id', $flightRequest->id)->first();
+        $this->assertNull($operation?->latestCrewAssignment()->first());
+    }
+
+    public function test_admin_assign_rejects_when_no_response_window_is_available(): void
+    {
+        $this->seed();
+
+        $adminToken = $this->postJson('/api/v1/auth/login', [
+            'email' => 'admin@privateflights.test',
+            'password' => 'password',
+        ])->assertOk()->json('token');
+
+        $sobrecargo = Usuario::query()->where('email', 'sobrecargo@redaviation.test')->firstOrFail();
+        $provider = Proveedor::query()->firstOrFail();
+        $aircraft = Aeronave::query()->where('provider_id', $provider->id)->firstOrFail();
+        $client = Usuario::query()->where('email', 'cliente@privateflights.test')->firstOrFail();
+
+        $departure = now()->copy()->addHours(2);
+
+        $flightRequest = SolicitudVuelo::query()->create([
+            'client_id' => $client->id,
+            'assigned_provider_id' => $provider->id,
+            'assigned_aircraft_id' => $aircraft->id,
+            'assigned_aircraft_model' => $aircraft->model,
+            'origin' => 'MMTO',
+            'destination' => 'MMMX',
+            'departure_datetime' => $departure,
+            'passengers' => 1,
+            'trip_type' => 'one_way',
+            'status' => 'confirmada',
+            'workflow_status' => 'flight_confirmed',
+            'visibility_payload' => [
+                'operational_status' => 'flight_confirmed',
+                'operational_ready' => false,
+            ],
+        ]);
+
+        $this->withToken($adminToken)
+            ->postJson("/api/v1/admin/requests/{$flightRequest->id}/assign", [
+                'provider_id' => $provider->id,
+                'aircraft_id' => $aircraft->id,
+                'sobrecargo_user_id' => $sobrecargo->id,
+                'presentation_time' => now()->copy()->addMinutes(30)->format('H:i'),
+            ])
+            ->assertStatus(409)
+            ->assertJsonPath('code', 'NO_RESPONSE_WINDOW_AVAILABLE');
+
+        $operation = Operacion::query()->where('flight_request_id', $flightRequest->id)->first();
+        $this->assertNull($operation?->latestCrewAssignment()->first());
+    }
+
     public function test_admin_workflow_endpoint_promotes_to_tracking_live_when_operation_already_has_crew(): void
     {
         $this->seed();

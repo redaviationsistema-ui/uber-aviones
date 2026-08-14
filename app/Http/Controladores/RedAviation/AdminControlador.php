@@ -1639,6 +1639,21 @@ class AdminControlador extends ControladorBase
                     'operations.crew_notes',
                 ]),
                 'latestOperation.sobrecargo:id,name',
+                'latestOperation.latestCrewAssignment' => fn ($query) => $query->select([
+                    'sobrecargo_assignments.id',
+                    'sobrecargo_assignments.operation_id',
+                    'sobrecargo_assignments.sobrecargo_user_id',
+                    'sobrecargo_assignments.role',
+                    'sobrecargo_assignments.status',
+                    'sobrecargo_assignments.assigned_at',
+                    'sobrecargo_assignments.response_deadline',
+                    'sobrecargo_assignments.presentation_time',
+                    'sobrecargo_assignments.accepted_at',
+                    'sobrecargo_assignments.rejected_at',
+                    'sobrecargo_assignments.rejection_reason',
+                    'sobrecargo_assignments.cancelled_at',
+                    'sobrecargo_assignments.cancellation_reason',
+                ]),
                 'latestOperation.timeline' => fn ($query) => $query
                     ->select([
                         'operation_timeline.id',
@@ -2244,6 +2259,7 @@ class AdminControlador extends ControladorBase
                 $resolvedPresentation = $presentationTime !== ''
                     ? Carbon::parse($flightRequest->departure_datetime->format('Y-m-d').' '.$presentationTime)
                     : Carbon::parse($flightRequest->departure_datetime)->subHour();
+                [$assignedAt, $responseDeadline] = $this->resolveCrewAssignmentWindowOrFail($resolvedPresentation);
                 $existingCrewAssignment = AsignacionSobrecargo::query()->where('operation_id', $operation->id)
                     ->where('sobrecargo_user_id', (int) $data['sobrecargo_user_id'])->lockForUpdate()->first();
                 $previousPresentation = $existingCrewAssignment?->presentation_time;
@@ -2259,8 +2275,8 @@ class AdminControlador extends ControladorBase
                     ['operation_id' => $operation->id, 'sobrecargo_user_id' => (int) $data['sobrecargo_user_id']],
                     [
                         'role' => 'sobrecargo', 'status' => CrewAssignmentStatus::PENDING_CONFIRMATION,
-                        'assigned_by' => $request->user()->id, 'assigned_at' => now(),
-                        'response_deadline' => now()->addHours(12)->min($resolvedPresentation->copy()->subHour()),
+                        'assigned_by' => $request->user()->id, 'assigned_at' => $assignedAt,
+                        'response_deadline' => $responseDeadline,
                         'presentation_time' => $resolvedPresentation, 'accepted_at' => null, 'rejected_at' => null,
                         'rejection_reason' => null, 'cancelled_at' => null, 'cancellation_reason' => null,
                     ]
@@ -3966,6 +3982,33 @@ class AdminControlador extends ControladorBase
             'fallido', 'failed' => 'failed',
             default => $normalizedValue,
         };
+    }
+
+    private function resolveCrewAssignmentWindowOrFail(Carbon $resolvedPresentation): array
+    {
+        $assignedAt = now();
+
+        if ($resolvedPresentation->lte($assignedAt)) {
+            abort(response()->json([
+                'success' => false,
+                'code' => 'PRESENTATION_TIME_EXPIRED',
+                'message' => 'No se puede asignar una sobrecargo porque la hora de presentación de esta operación ya pasó.',
+            ], 409));
+        }
+
+        $maximumResponseWindow = $assignedAt->copy()->addHours(12);
+        $presentationLimit = $resolvedPresentation->copy()->subHour();
+        $responseDeadline = $maximumResponseWindow->min($presentationLimit);
+
+        if ($responseDeadline->lte($assignedAt)) {
+            abort(response()->json([
+                'success' => false,
+                'code' => 'NO_RESPONSE_WINDOW_AVAILABLE',
+                'message' => 'No existe tiempo suficiente para solicitar confirmación a la sobrecargo antes de su presentación.',
+            ], 409));
+        }
+
+        return [$assignedAt, $responseDeadline];
     }
 
     private function resolveAircraftCalendarEventColor(string $eventStatus): string

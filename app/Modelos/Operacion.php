@@ -5,6 +5,7 @@ namespace App\Modelos;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class Operacion extends Model
 {
@@ -81,5 +82,28 @@ class Operacion extends Model
     public function checklists(): HasMany
     {
         return $this->hasMany(ChecklistOperacion::class, 'operation_id');
+    }
+
+    public function latestCrewAssignment(): HasOne
+    {
+        return $this->hasOne(AsignacionSobrecargo::class, 'operation_id')
+            ->latestOfMany()
+            ->select([
+                'sobrecargo_assignments.id',
+                'sobrecargo_assignments.operation_id',
+                'sobrecargo_assignments.sobrecargo_user_id',
+                'sobrecargo_assignments.role',
+                'sobrecargo_assignments.status',
+                'sobrecargo_assignments.assigned_at',
+                'sobrecargo_assignments.response_deadline',
+                'sobrecargo_assignments.presentation_time',
+                'sobrecargo_assignments.accepted_at',
+                'sobrecargo_assignments.rejected_at',
+                'sobrecargo_assignments.rejection_reason',
+                'sobrecargo_assignments.cancelled_at',
+                'sobrecargo_assignments.cancellation_reason',
+                'sobrecargo_assignments.created_at',
+                'sobrecargo_assignments.updated_at',
+            ]);
     }
 }
