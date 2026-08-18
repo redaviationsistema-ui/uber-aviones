@@ -899,11 +899,12 @@ class PlataformaVuelosApiTest extends TestCase
             ->assertOk();
 
         $flightRequest->refresh();
+        $expectedPresentationTime = $flightRequest->departure_datetime->copy()->subHour()->format('H:i');
 
-        $this->assertSame('08:30', data_get($flightRequest->visibility_payload, 'presentation_time'));
+        $this->assertSame($expectedPresentationTime, data_get($flightRequest->visibility_payload, 'presentation_time'));
         $this->assertSame('FBO · Toluca', data_get($flightRequest->visibility_payload, 'presentation_place'));
         $this->assertSame('FBO · Toluca', data_get($flightRequest->visibility_payload, 'presentation_location'));
-        $this->assertSame('08:30', data_get($flightRequest->visibility_payload, 'briefing.hora_presentacion'));
+        $this->assertSame($expectedPresentationTime, data_get($flightRequest->visibility_payload, 'briefing.hora_presentacion'));
         $this->assertSame('FBO · Toluca', data_get($flightRequest->visibility_payload, 'briefing.lugar_presentacion'));
         $this->assertSame('Briefing VIP confirmado.', data_get($flightRequest->visibility_payload, 'crew_notes'));
 
@@ -921,9 +922,9 @@ class PlataformaVuelosApiTest extends TestCase
         $matchedRequest = collect($requestPayload)->firstWhere('id', $flightRequest->id);
 
         $this->assertNotNull($matchedRequest);
-        $this->assertSame('08:30', data_get($matchedRequest, 'presentation_time'));
+        $this->assertSame($expectedPresentationTime, data_get($matchedRequest, 'presentation_time'));
         $this->assertSame('FBO · Toluca', data_get($matchedRequest, 'presentation_place'));
-        $this->assertSame('08:30', data_get($matchedRequest, 'briefing.hora_presentacion'));
+        $this->assertSame($expectedPresentationTime, data_get($matchedRequest, 'briefing.hora_presentacion'));
         $this->assertSame('FBO · Toluca', data_get($matchedRequest, 'briefing.lugar_presentacion'));
         $this->assertSame('Briefing VIP confirmado.', data_get($matchedRequest, 'operation.crew_notes'));
     }
@@ -1056,8 +1057,9 @@ class PlataformaVuelosApiTest extends TestCase
         ]);
 
         $flightRequest->refresh();
+        $expectedPresentationTime = $flightRequest->departure_datetime->copy()->subHour()->format('H:i');
 
-        $this->assertSame('09:00', data_get($flightRequest->visibility_payload, 'presentation_time'));
+        $this->assertSame($expectedPresentationTime, data_get($flightRequest->visibility_payload, 'presentation_time'));
         $this->assertSame('Hangar · Toluca', data_get($flightRequest->visibility_payload, 'presentation_place'));
         $this->assertSame('Reasignacion confirmada.', data_get($flightRequest->visibility_payload, 'crew_notes'));
     }
@@ -1206,6 +1208,122 @@ class PlataformaVuelosApiTest extends TestCase
             ])
             ->assertStatus(409)
             ->assertJsonPath('code', 'NO_RESPONSE_WINDOW_AVAILABLE');
+
+        $operation = Operacion::query()->where('flight_request_id', $flightRequest->id)->first();
+        $this->assertNull($operation?->latestCrewAssignment()->first());
+    }
+
+    public function test_admin_assign_uses_departure_datetime_as_truth_even_when_visibility_payload_has_stale_presentation_snapshots(): void
+    {
+        $this->seed();
+
+        $adminToken = $this->postJson('/api/v1/auth/login', [
+            'email' => 'admin@privateflights.test',
+            'password' => 'password',
+        ])->assertOk()->json('token');
+
+        $sobrecargo = Usuario::query()->where('email', 'sobrecargo@redaviation.test')->firstOrFail();
+        $provider = Proveedor::query()->firstOrFail();
+        $aircraft = Aeronave::query()->where('provider_id', $provider->id)->firstOrFail();
+        $client = Usuario::query()->where('email', 'cliente@privateflights.test')->firstOrFail();
+
+        $departure = now()->copy()->addHours(6);
+
+        $flightRequest = SolicitudVuelo::query()->create([
+            'client_id' => $client->id,
+            'assigned_provider_id' => $provider->id,
+            'assigned_aircraft_id' => $aircraft->id,
+            'assigned_aircraft_model' => $aircraft->model,
+            'origin' => 'MMGL',
+            'destination' => 'MMTO',
+            'departure_datetime' => $departure,
+            'passengers' => 2,
+            'trip_type' => 'one_way',
+            'status' => 'confirmada',
+            'workflow_status' => 'flight_confirmed',
+            'visibility_payload' => [
+                'presentation_time' => '11:00',
+                'briefing' => [
+                    'salida' => '2026-08-17T11:00:00.000000Z',
+                    'hora_presentacion' => '11:00',
+                ],
+            ],
+        ]);
+
+        $this->withToken($adminToken)
+            ->postJson("/api/v1/admin/requests/{$flightRequest->id}/assign", [
+                'provider_id' => $provider->id,
+                'aircraft_id' => $aircraft->id,
+                'sobrecargo_user_id' => $sobrecargo->id,
+                'presentation_time' => '11:00',
+                'presentation_place' => 'FBO · Guadalajara',
+                'note' => 'Snapshot viejo.',
+            ])
+            ->assertOk();
+
+        $flightRequest->refresh();
+        $assignment = Operacion::query()
+            ->where('flight_request_id', $flightRequest->id)
+            ->firstOrFail()
+            ->latestCrewAssignment()
+            ->firstOrFail();
+        $expectedPresentation = $departure->copy()->subHour()->setTimezone(config('app.timezone'));
+
+        $this->assertSame(
+            $expectedPresentation->copy()->utc()->toIso8601String(),
+            $assignment->presentation_time->copy()->utc()->toIso8601String()
+        );
+        $this->assertSame($expectedPresentation->format('H:i'), data_get($flightRequest->visibility_payload, 'presentation_time'));
+        $this->assertSame($expectedPresentation->format('H:i'), data_get($flightRequest->visibility_payload, 'briefing.hora_presentacion'));
+        $this->assertSame($departure->copy()->setTimezone(config('app.timezone'))->utc()->toIso8601String(), data_get($flightRequest->visibility_payload, 'briefing.salida'));
+    }
+
+    public function test_admin_assign_rejects_using_real_departure_even_when_visibility_payload_shows_future_snapshot(): void
+    {
+        $this->seed();
+
+        $adminToken = $this->postJson('/api/v1/auth/login', [
+            'email' => 'admin@privateflights.test',
+            'password' => 'password',
+        ])->assertOk()->json('token');
+
+        $sobrecargo = Usuario::query()->where('email', 'sobrecargo@redaviation.test')->firstOrFail();
+        $provider = Proveedor::query()->firstOrFail();
+        $aircraft = Aeronave::query()->where('provider_id', $provider->id)->firstOrFail();
+        $client = Usuario::query()->where('email', 'cliente@privateflights.test')->firstOrFail();
+
+        $pastDeparture = now()->copy()->subMinutes(30);
+
+        $flightRequest = SolicitudVuelo::query()->create([
+            'client_id' => $client->id,
+            'assigned_provider_id' => $provider->id,
+            'assigned_aircraft_id' => $aircraft->id,
+            'assigned_aircraft_model' => $aircraft->model,
+            'origin' => 'MMTO',
+            'destination' => 'MMMX',
+            'departure_datetime' => $pastDeparture,
+            'passengers' => 1,
+            'trip_type' => 'one_way',
+            'status' => 'confirmada',
+            'workflow_status' => 'flight_confirmed',
+            'visibility_payload' => [
+                'presentation_time' => now()->copy()->addHours(2)->format('H:i'),
+                'briefing' => [
+                    'salida' => now()->copy()->addHours(2)->utc()->toIso8601String(),
+                    'hora_presentacion' => now()->copy()->addHour()->format('H:i'),
+                ],
+            ],
+        ]);
+
+        $this->withToken($adminToken)
+            ->postJson("/api/v1/admin/requests/{$flightRequest->id}/assign", [
+                'provider_id' => $provider->id,
+                'aircraft_id' => $aircraft->id,
+                'sobrecargo_user_id' => $sobrecargo->id,
+                'presentation_time' => now()->copy()->addHour()->format('H:i'),
+            ])
+            ->assertStatus(409)
+            ->assertJsonPath('code', 'PRESENTATION_TIME_EXPIRED');
 
         $operation = Operacion::query()->where('flight_request_id', $flightRequest->id)->first();
         $this->assertNull($operation?->latestCrewAssignment()->first());

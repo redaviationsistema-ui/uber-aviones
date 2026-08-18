@@ -2139,7 +2139,6 @@ class AdminControlador extends ControladorBase
 
         $hasAssignedCrew = ! empty($data['sobrecargo_user_id']);
         $currentWorkflowStatus = Str::lower(trim((string) ($flightRequest->workflow_status ?? '')));
-        $presentationTime = trim((string) ($data['presentation_time'] ?? $data['briefing_time'] ?? ''));
         $presentationPlace = trim((string) ($data['presentation_place'] ?? $data['presentation_location'] ?? ''));
         $crewNote = trim((string) ($data['note'] ?? ''));
         $existingOperation = Operacion::query()
@@ -2235,8 +2234,8 @@ class AdminControlador extends ControladorBase
             : ($flightRequest->workflow_status ?: 'operador_asignado');
         $nextOperationStatus = $hasAssignedCrew ? 'tracking_live' : 'operador_asignado';
 
-        $operacion = DB::transaction(function () use ($flightRequest, $data, $hasAssignedCrew, $nextOperationStatus, $crewNote, $existingOperation, $presentationTime, $request) {
-            SolicitudVuelo::query()->whereKey($flightRequest->id)->lockForUpdate()->firstOrFail();
+        $operacion = DB::transaction(function () use ($flightRequest, $data, $hasAssignedCrew, $nextOperationStatus, $crewNote, $existingOperation, $request) {
+            $lockedFlightRequest = SolicitudVuelo::query()->whereKey($flightRequest->id)->lockForUpdate()->firstOrFail();
             $lockedExistingOperation = Operacion::query()->where('flight_request_id', $flightRequest->id)->lockForUpdate()->first();
             $previousCrewId = $lockedExistingOperation?->sobrecargo_user_id;
             $operation = Operacion::updateOrCreate(
@@ -2256,10 +2255,7 @@ class AdminControlador extends ControladorBase
             );
 
             if ($hasAssignedCrew) {
-                $resolvedPresentation = $presentationTime !== ''
-                    ? Carbon::parse($flightRequest->departure_datetime->format('Y-m-d').' '.$presentationTime)
-                    : Carbon::parse($flightRequest->departure_datetime)->subHour();
-                [$assignedAt, $responseDeadline] = $this->resolveCrewAssignmentWindowOrFail($resolvedPresentation);
+                ['presentation_at' => $resolvedPresentation, 'assigned_at' => $assignedAt, 'response_deadline' => $responseDeadline] = $this->resolveCrewAssignmentScheduleOrFail($lockedFlightRequest);
                 $existingCrewAssignment = AsignacionSobrecargo::query()->where('operation_id', $operation->id)
                     ->where('sobrecargo_user_id', (int) $data['sobrecargo_user_id'])->lockForUpdate()->first();
                 $previousPresentation = $existingCrewAssignment?->presentation_time;
@@ -2336,6 +2332,9 @@ class AdminControlador extends ControladorBase
         $aircraft = Aeronave::find($data['aircraft_id']);
         $visibilityPayload = $flightRequest->visibility_payload ?? [];
         $existingBriefing = is_array($visibilityPayload['briefing'] ?? null) ? $visibilityPayload['briefing'] : [];
+        $presentationSchedule = $hasAssignedCrew ? $this->resolveCrewAssignmentScheduleOrFail($flightRequest) : null;
+        $resolvedPresentationTime = $presentationSchedule ? $presentationSchedule['presentation_at']->format('H:i') : null;
+        $resolvedBriefingDeparture = $presentationSchedule ? $presentationSchedule['departure_at']->copy()->utc()->toIso8601String() : $flightRequest->departure_datetime;
         $reservation = Reserva::query()
             ->where('flight_request_id', $flightRequest->id)
             ->latest('id')
@@ -2375,7 +2374,7 @@ class AdminControlador extends ControladorBase
                 'aircraft_capacity' => $aircraft?->capacity,
                 'operational_status' => $nextWorkflowStatus,
                 'operational_ready' => (bool) ($visibilityPayload['operational_ready'] ?? false),
-                'presentation_time' => $presentationTime !== '' ? $presentationTime : ($visibilityPayload['presentation_time'] ?? null),
+                'presentation_time' => $hasAssignedCrew ? $resolvedPresentationTime : ($visibilityPayload['presentation_time'] ?? null),
                 'presentation_place' => $presentationPlace !== '' ? $presentationPlace : ($visibilityPayload['presentation_place'] ?? $visibilityPayload['presentation_location'] ?? null),
                 'presentation_location' => $presentationPlace !== '' ? $presentationPlace : ($visibilityPayload['presentation_location'] ?? $visibilityPayload['presentation_place'] ?? null),
                 'crew_notes' => $hasAssignedCrew
@@ -2385,9 +2384,9 @@ class AdminControlador extends ControladorBase
                     ...$existingBriefing,
                     'origen' => $flightRequest->origin,
                     'destino' => $flightRequest->destination,
-                    'salida' => $flightRequest->departure_datetime,
+                    'salida' => $hasAssignedCrew ? $resolvedBriefingDeparture : $flightRequest->departure_datetime,
                     'pasajeros_autorizados' => $flightRequest->passengers,
-                    'hora_presentacion' => $presentationTime !== '' ? $presentationTime : ($existingBriefing['hora_presentacion'] ?? null),
+                    'hora_presentacion' => $hasAssignedCrew ? $resolvedPresentationTime : ($existingBriefing['hora_presentacion'] ?? null),
                     'lugar_presentacion' => $presentationPlace !== '' ? $presentationPlace : ($existingBriefing['lugar_presentacion'] ?? null),
                 ],
             ],
@@ -3984,9 +3983,38 @@ class AdminControlador extends ControladorBase
         };
     }
 
-    private function resolveCrewAssignmentWindowOrFail(Carbon $resolvedPresentation): array
+    private function resolveCrewAssignmentScheduleOrFail(SolicitudVuelo $flightRequest): array
     {
-        $assignedAt = now();
+        abort_if(
+            ! $flightRequest->departure_datetime,
+            response()->json([
+                'success' => false,
+                'code' => 'INVALID_DEPARTURE_DATETIME',
+                'message' => 'La operación no tiene fecha de salida válida.',
+            ], 422)
+        );
+
+        $timezone = config('app.timezone', 'America/Mexico_City');
+        $presentationOffsetMinutes = max(0, (int) config('redaviation.crew.presentation_offset_minutes', 60));
+
+        $departureAt = $flightRequest->departure_datetime instanceof Carbon
+            ? $flightRequest->departure_datetime->copy()
+            : Carbon::parse($flightRequest->departure_datetime, $timezone);
+        $departureAt = $departureAt->setTimezone($timezone);
+        $resolvedPresentation = $departureAt->copy()->subMinutes($presentationOffsetMinutes);
+        [$assignedAt, $responseDeadline] = $this->resolveCrewAssignmentWindowOrFail($resolvedPresentation, $timezone);
+
+        return [
+            'departure_at' => $departureAt,
+            'presentation_at' => $resolvedPresentation,
+            'assigned_at' => $assignedAt,
+            'response_deadline' => $responseDeadline,
+        ];
+    }
+
+    private function resolveCrewAssignmentWindowOrFail(Carbon $resolvedPresentation, ?string $timezone = null): array
+    {
+        $assignedAt = now($timezone ?: config('app.timezone', 'America/Mexico_City'));
 
         if ($resolvedPresentation->lte($assignedAt)) {
             abort(response()->json([

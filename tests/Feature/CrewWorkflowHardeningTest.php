@@ -138,6 +138,118 @@ class CrewWorkflowHardeningTest extends TestCase
             ->assertJsonPath('metrics.response.acceptance_rate.percentage', null);
     }
 
+    public function test_crew_dashboard_and_assignments_only_use_real_current_assignment_records(): void
+    {
+        [$operation, $crew, $token] = $this->crewOperation();
+        AsignacionSobrecargo::create([
+            'operation_id' => $operation->id,
+            'sobrecargo_user_id' => $crew->id,
+            'status' => CrewAssignmentStatus::PENDING_CONFIRMATION,
+            'assigned_at' => now(),
+            'response_deadline' => now()->addHour(),
+        ]);
+
+        $orphanFlight = SolicitudVuelo::create([
+            'client_id' => Usuario::where('email', 'cliente@privateflights.test')->firstOrFail()->id,
+            'origin' => 'MMGL',
+            'destination' => 'MMTO',
+            'departure_datetime' => now()->addDays(3),
+            'return_datetime' => now()->addDays(4),
+            'passengers' => 2,
+            'trip_type' => 'one_way',
+            'status' => 'confirmada',
+            'workflow_status' => 'flight_confirmed',
+        ]);
+        Operacion::create([
+            'flight_request_id' => $orphanFlight->id,
+            'provider_id' => $operation->provider_id,
+            'aircraft_id' => $operation->aircraft_id,
+            'sobrecargo_user_id' => $crew->id,
+            'status' => 'confirmed',
+            'crew_status' => CrewAssignmentStatus::CONFIRMED,
+        ]);
+
+        $realAssignmentWithoutSnapshotFlight = SolicitudVuelo::create([
+            'client_id' => Usuario::where('email', 'cliente@privateflights.test')->firstOrFail()->id,
+            'origin' => 'MMTY',
+            'destination' => 'MMMX',
+            'departure_datetime' => now()->addDays(5),
+            'return_datetime' => now()->addDays(6),
+            'passengers' => 4,
+            'trip_type' => 'round_trip',
+            'status' => 'confirmada',
+            'workflow_status' => 'flight_confirmed',
+        ]);
+        $realAssignmentWithoutSnapshot = Operacion::create([
+            'flight_request_id' => $realAssignmentWithoutSnapshotFlight->id,
+            'provider_id' => $operation->provider_id,
+            'aircraft_id' => $operation->aircraft_id,
+            'sobrecargo_user_id' => null,
+            'status' => 'confirmed',
+            'crew_status' => CrewAssignmentStatus::PENDING_CONFIRMATION,
+        ]);
+        AsignacionSobrecargo::create([
+            'operation_id' => $realAssignmentWithoutSnapshot->id,
+            'sobrecargo_user_id' => $crew->id,
+            'status' => CrewAssignmentStatus::PENDING_CONFIRMATION,
+            'assigned_at' => now(),
+            'response_deadline' => now()->addHours(2),
+        ]);
+
+        $this->withToken($token)
+            ->getJson('/api/v1/sobrecargo/dashboard')
+            ->assertOk()
+            ->assertJsonPath('metrics.asignaciones', 2)
+            ->assertJsonPath('metrics.servicios_activos', 2);
+
+        $assignmentsResponse = $this->withToken($token)
+            ->getJson('/api/v1/sobrecargo/assignments')
+            ->assertOk();
+
+        $assignmentIds = collect($assignmentsResponse->json('assignments'))->pluck('id')->all();
+
+        $this->assertContains($operation->id, $assignmentIds);
+        $this->assertContains($realAssignmentWithoutSnapshot->id, $assignmentIds);
+        $this->assertCount(2, $assignmentIds);
+    }
+
+    public function test_missing_assignment_cannot_be_answered_and_is_never_autocreated(): void
+    {
+        [$operation, $crew, $token] = $this->crewOperation();
+
+        $this->assertDatabaseMissing('sobrecargo_assignments', [
+            'operation_id' => $operation->id,
+            'sobrecargo_user_id' => $crew->id,
+        ]);
+
+        $this->withToken($token)
+            ->postJson("/api/v1/sobrecargo/operations/{$operation->id}/respond", ['response' => 'confirmed'])
+            ->assertStatus(409);
+
+        $this->assertDatabaseMissing('sobrecargo_assignments', [
+            'operation_id' => $operation->id,
+            'sobrecargo_user_id' => $crew->id,
+        ]);
+    }
+
+    public function test_workflow_access_uses_latest_real_assignment_even_when_operation_snapshot_is_empty(): void
+    {
+        [$operation, $crew, $token] = $this->crewOperation(CrewAssignmentStatus::CONFIRMED);
+        AsignacionSobrecargo::create([
+            'operation_id' => $operation->id,
+            'sobrecargo_user_id' => $crew->id,
+            'status' => CrewAssignmentStatus::CONFIRMED,
+            'assigned_at' => now()->subHour(),
+            'accepted_at' => now()->subMinutes(30),
+        ]);
+        $operation->update(['sobrecargo_user_id' => null]);
+
+        $this->withToken($token)
+            ->getJson("/api/v1/sobrecargo/operations/{$operation->id}/workflow")
+            ->assertOk()
+            ->assertJsonPath('status', CrewAssignmentStatus::CONFIRMED);
+    }
+
     public function test_operational_reminders_are_idempotent(): void
     {
         [$operation, $crew] = $this->crewOperation();
