@@ -2191,42 +2191,6 @@ class AdminControlador extends ControladorBase
                 ]);
             }
 
-            [$requestedStart, $requestedEnd] = $this->aircraftAvailabilityService->resolveWindowFromPayload([
-                'departure_datetime' => $flightRequest->departure_datetime,
-                'return_datetime' => $flightRequest->return_datetime,
-                'legs' => $flightRequest->legs()->get(['departure_datetime', 'arrival_datetime'])->map(
-                    fn ($leg) => [
-                        'departure_datetime' => $leg->departure_datetime,
-                        'arrival_datetime' => $leg->arrival_datetime,
-                    ]
-                )->values()->all(),
-            ]);
-
-            $hasCrewConflict = $this->reservationLifecycleService->crewHasConflict(
-                (int) $assignedCrew->id,
-                $requestedStart,
-                $requestedEnd,
-                $existingOperation?->id,
-            );
-
-            if ($hasCrewConflict) {
-                throw ValidationException::withMessages([
-                    'sobrecargo_user_id' => 'La sobrecargo seleccionada ya tiene una operacion activa en el mismo horario.',
-                ]);
-            }
-
-            $hasBlockedAvailability = SobrecargoDisponibilidad::query()
-                ->where('sobrecargo_id', $assignedCrew->id)
-                ->whereDate('fecha', '<=', $requestedEnd->toDateString())
-                ->whereDate('fecha', '>=', $requestedStart->toDateString())
-                ->whereHas('estatus', fn ($query) => $query->where('permite_asignacion', false))
-                ->exists();
-
-            if ($hasBlockedAvailability) {
-                throw ValidationException::withMessages([
-                    'sobrecargo_user_id' => 'La sobrecargo seleccionada tiene un bloqueo de disponibilidad en el rango solicitado.',
-                ]);
-            }
         }
 
         $nextWorkflowStatus = $hasAssignedCrew
@@ -2255,10 +2219,9 @@ class AdminControlador extends ControladorBase
             );
 
             if ($hasAssignedCrew) {
-                ['presentation_at' => $resolvedPresentation, 'assigned_at' => $assignedAt, 'response_deadline' => $responseDeadline] = $this->resolveCrewAssignmentScheduleOrFail($lockedFlightRequest);
+                $assignedAt = now();
                 $existingCrewAssignment = AsignacionSobrecargo::query()->where('operation_id', $operation->id)
                     ->where('sobrecargo_user_id', (int) $data['sobrecargo_user_id'])->lockForUpdate()->first();
-                $previousPresentation = $existingCrewAssignment?->presentation_time;
                 $scheduleChanged = $lockedExistingOperation && (
                     (int) $lockedExistingOperation->provider_id !== (int) $data['provider_id']
                     || (int) $lockedExistingOperation->aircraft_id !== (int) $data['aircraft_id']
@@ -2272,8 +2235,8 @@ class AdminControlador extends ControladorBase
                     [
                         'role' => 'sobrecargo', 'status' => CrewAssignmentStatus::PENDING_CONFIRMATION,
                         'assigned_by' => $request->user()->id, 'assigned_at' => $assignedAt,
-                        'response_deadline' => $responseDeadline,
-                        'presentation_time' => $resolvedPresentation, 'accepted_at' => null, 'rejected_at' => null,
+                        'response_deadline' => null,
+                        'presentation_time' => null, 'accepted_at' => null, 'rejected_at' => null,
                         'rejection_reason' => null, 'cancelled_at' => null, 'cancellation_reason' => null,
                     ]
                 );
@@ -2293,7 +2256,7 @@ class AdminControlador extends ControladorBase
                     $isReassignment ? 'La operacion fue reasignada a tu perfil.' : 'Tienes una nueva asignacion pendiente de respuesta.',
                     'info',
                     $assignment->id,
-                    ['response_deadline' => optional($assignment->response_deadline)?->toISOString()],
+                    [],
                 ));
                 if ($isReassignment) {
                     DB::afterCommit(function () use ($previousCrewId, $operation, $assignment) {
@@ -2302,14 +2265,6 @@ class AdminControlador extends ControladorBase
                             $this->crewNotifications->send($previousCrew, $operation, 'assignment_reassigned', 'Asignacion reasignada', 'Esta operacion fue reasignada a otra sobrecargo.', 'warning', $assignment->id, ['idempotency_context' => 'previous_crew']);
                         }
                     });
-                }
-                if ($previousPresentation && ! $previousPresentation->equalTo($resolvedPresentation)) {
-                    DB::afterCommit(fn () => $this->crewNotifications->send(
-                        Usuario::query()->findOrFail((int) $data['sobrecargo_user_id']), $operation,
-                        'presentation_time_changed', 'Hora de presentacion actualizada',
-                        'Revisa la nueva hora de presentacion de la operacion.', 'warning', $assignment->id,
-                        ['presentation_time' => $resolvedPresentation->toISOString()],
-                    ));
                 }
                 if ($scheduleChanged) {
                     DB::afterCommit(fn () => $this->crewNotifications->send(
@@ -2332,9 +2287,10 @@ class AdminControlador extends ControladorBase
         $aircraft = Aeronave::find($data['aircraft_id']);
         $visibilityPayload = $flightRequest->visibility_payload ?? [];
         $existingBriefing = is_array($visibilityPayload['briefing'] ?? null) ? $visibilityPayload['briefing'] : [];
-        $presentationSchedule = $hasAssignedCrew ? $this->resolveCrewAssignmentScheduleOrFail($flightRequest) : null;
-        $resolvedPresentationTime = $presentationSchedule ? $presentationSchedule['presentation_at']->format('H:i') : null;
-        $resolvedBriefingDeparture = $presentationSchedule ? $presentationSchedule['departure_at']->copy()->utc()->toIso8601String() : $flightRequest->departure_datetime;
+        $resolvedPresentationTime = $hasAssignedCrew
+            ? (trim((string) ($data['presentation_time'] ?? $data['briefing_time'] ?? '')) ?: null)
+            : null;
+        $resolvedBriefingDeparture = $flightRequest->departure_datetime;
         $reservation = Reserva::query()
             ->where('flight_request_id', $flightRequest->id)
             ->latest('id')
@@ -3981,62 +3937,6 @@ class AdminControlador extends ControladorBase
             'fallido', 'failed' => 'failed',
             default => $normalizedValue,
         };
-    }
-
-    private function resolveCrewAssignmentScheduleOrFail(SolicitudVuelo $flightRequest): array
-    {
-        abort_if(
-            ! $flightRequest->departure_datetime,
-            response()->json([
-                'success' => false,
-                'code' => 'INVALID_DEPARTURE_DATETIME',
-                'message' => 'La operación no tiene fecha de salida válida.',
-            ], 422)
-        );
-
-        $timezone = config('app.timezone', 'America/Mexico_City');
-        $presentationOffsetMinutes = max(0, (int) config('redaviation.crew.presentation_offset_minutes', 60));
-
-        $departureAt = $flightRequest->departure_datetime instanceof Carbon
-            ? $flightRequest->departure_datetime->copy()
-            : Carbon::parse($flightRequest->departure_datetime, $timezone);
-        $departureAt = $departureAt->setTimezone($timezone);
-        $resolvedPresentation = $departureAt->copy()->subMinutes($presentationOffsetMinutes);
-        [$assignedAt, $responseDeadline] = $this->resolveCrewAssignmentWindowOrFail($resolvedPresentation, $timezone);
-
-        return [
-            'departure_at' => $departureAt,
-            'presentation_at' => $resolvedPresentation,
-            'assigned_at' => $assignedAt,
-            'response_deadline' => $responseDeadline,
-        ];
-    }
-
-    private function resolveCrewAssignmentWindowOrFail(Carbon $resolvedPresentation, ?string $timezone = null): array
-    {
-        $assignedAt = now($timezone ?: config('app.timezone', 'America/Mexico_City'));
-
-        if ($resolvedPresentation->lte($assignedAt)) {
-            abort(response()->json([
-                'success' => false,
-                'code' => 'PRESENTATION_TIME_EXPIRED',
-                'message' => 'No se puede asignar una sobrecargo porque la hora de presentación de esta operación ya pasó.',
-            ], 409));
-        }
-
-        $maximumResponseWindow = $assignedAt->copy()->addHours(12);
-        $presentationLimit = $resolvedPresentation->copy()->subHour();
-        $responseDeadline = $maximumResponseWindow->min($presentationLimit);
-
-        if ($responseDeadline->lte($assignedAt)) {
-            abort(response()->json([
-                'success' => false,
-                'code' => 'NO_RESPONSE_WINDOW_AVAILABLE',
-                'message' => 'No existe tiempo suficiente para solicitar confirmación a la sobrecargo antes de su presentación.',
-            ], 409));
-        }
-
-        return [$assignedAt, $responseDeadline];
     }
 
     private function resolveAircraftCalendarEventColor(string $eventStatus): string

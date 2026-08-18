@@ -899,7 +899,7 @@ class PlataformaVuelosApiTest extends TestCase
             ->assertOk();
 
         $flightRequest->refresh();
-        $expectedPresentationTime = $flightRequest->departure_datetime->copy()->subHour()->format('H:i');
+        $expectedPresentationTime = '08:30';
 
         $this->assertSame($expectedPresentationTime, data_get($flightRequest->visibility_payload, 'presentation_time'));
         $this->assertSame('FBO · Toluca', data_get($flightRequest->visibility_payload, 'presentation_place'));
@@ -1057,14 +1057,14 @@ class PlataformaVuelosApiTest extends TestCase
         ]);
 
         $flightRequest->refresh();
-        $expectedPresentationTime = $flightRequest->departure_datetime->copy()->subHour()->format('H:i');
+        $expectedPresentationTime = '09:00';
 
         $this->assertSame($expectedPresentationTime, data_get($flightRequest->visibility_payload, 'presentation_time'));
         $this->assertSame('Hangar · Toluca', data_get($flightRequest->visibility_payload, 'presentation_place'));
         $this->assertSame('Reasignacion confirmada.', data_get($flightRequest->visibility_payload, 'crew_notes'));
     }
 
-    public function test_admin_assign_creates_valid_future_assignment_window(): void
+    public function test_admin_assign_does_not_create_a_schedule_validation_window(): void
     {
         $this->seed();
 
@@ -1113,11 +1113,12 @@ class PlataformaVuelosApiTest extends TestCase
             ->latestCrewAssignment()
             ->firstOrFail();
 
-        $this->assertTrue($assignment->assigned_at->lt($assignment->response_deadline));
-        $this->assertTrue($assignment->response_deadline->lt($assignment->presentation_time));
+        $this->assertNotNull($assignment->assigned_at);
+        $this->assertNull($assignment->response_deadline);
+        $this->assertNull($assignment->presentation_time);
     }
 
-    public function test_admin_assign_rejects_when_presentation_time_is_already_past(): void
+    public function test_admin_assign_accepts_when_presentation_time_is_already_past(): void
     {
         $this->seed();
 
@@ -1158,14 +1159,13 @@ class PlataformaVuelosApiTest extends TestCase
                 'sobrecargo_user_id' => $sobrecargo->id,
                 'presentation_time' => $pastDeparture->format('H:i'),
             ])
-            ->assertStatus(409)
-            ->assertJsonPath('code', 'PRESENTATION_TIME_EXPIRED');
+            ->assertOk();
 
         $operation = Operacion::query()->where('flight_request_id', $flightRequest->id)->first();
-        $this->assertNull($operation?->latestCrewAssignment()->first());
+        $this->assertNotNull($operation?->latestCrewAssignment()->first());
     }
 
-    public function test_admin_assign_rejects_when_no_response_window_is_available(): void
+    public function test_admin_assign_accepts_without_a_response_window(): void
     {
         $this->seed();
 
@@ -1206,11 +1206,10 @@ class PlataformaVuelosApiTest extends TestCase
                 'sobrecargo_user_id' => $sobrecargo->id,
                 'presentation_time' => now()->copy()->addMinutes(30)->format('H:i'),
             ])
-            ->assertStatus(409)
-            ->assertJsonPath('code', 'NO_RESPONSE_WINDOW_AVAILABLE');
+            ->assertOk();
 
         $operation = Operacion::query()->where('flight_request_id', $flightRequest->id)->first();
-        $this->assertNull($operation?->latestCrewAssignment()->first());
+        $this->assertNotNull($operation?->latestCrewAssignment()->first());
     }
 
     public function test_admin_assign_uses_departure_datetime_as_truth_even_when_visibility_payload_has_stale_presentation_snapshots(): void
@@ -1267,18 +1266,12 @@ class PlataformaVuelosApiTest extends TestCase
             ->firstOrFail()
             ->latestCrewAssignment()
             ->firstOrFail();
-        $expectedPresentation = $departure->copy()->subHour()->setTimezone(config('app.timezone'));
-
-        $this->assertSame(
-            $expectedPresentation->copy()->utc()->toIso8601String(),
-            $assignment->presentation_time->copy()->utc()->toIso8601String()
-        );
-        $this->assertSame($expectedPresentation->format('H:i'), data_get($flightRequest->visibility_payload, 'presentation_time'));
-        $this->assertSame($expectedPresentation->format('H:i'), data_get($flightRequest->visibility_payload, 'briefing.hora_presentacion'));
-        $this->assertSame($departure->copy()->setTimezone(config('app.timezone'))->utc()->toIso8601String(), data_get($flightRequest->visibility_payload, 'briefing.salida'));
+        $this->assertNull($assignment->presentation_time);
+        $this->assertSame('11:00', data_get($flightRequest->visibility_payload, 'presentation_time'));
+        $this->assertSame('11:00', data_get($flightRequest->visibility_payload, 'briefing.hora_presentacion'));
     }
 
-    public function test_admin_assign_rejects_using_real_departure_even_when_visibility_payload_shows_future_snapshot(): void
+    public function test_admin_assign_accepts_past_departure_even_when_visibility_payload_has_a_future_snapshot(): void
     {
         $this->seed();
 
@@ -1322,11 +1315,10 @@ class PlataformaVuelosApiTest extends TestCase
                 'sobrecargo_user_id' => $sobrecargo->id,
                 'presentation_time' => now()->copy()->addHour()->format('H:i'),
             ])
-            ->assertStatus(409)
-            ->assertJsonPath('code', 'PRESENTATION_TIME_EXPIRED');
+            ->assertOk();
 
         $operation = Operacion::query()->where('flight_request_id', $flightRequest->id)->first();
-        $this->assertNull($operation?->latestCrewAssignment()->first());
+        $this->assertNotNull($operation?->latestCrewAssignment()->first());
     }
 
     public function test_admin_workflow_endpoint_promotes_to_tracking_live_when_operation_already_has_crew(): void
