@@ -130,24 +130,48 @@ class SobrecargoControlador extends ControladorBase
     public function assignments(Request $request)
     {
         $operations = Operacion::with([
-            'solicitudVuelo.client:id,name,company_name',
+            'solicitudVuelo.client:id,name',
             'aeronave',
             'proveedor',
             'sobrecargo:id,name',
             'latestCrewAssignment.sobrecargo:id,name',
-            'timeline' => fn ($query) => $query->latest('id'),
-            'checklists.items',
+            'timeline' => fn ($query) => $query
+                ->select(['id', 'operation_id', 'status', 'title', 'description', 'created_at'])
+                ->orderBy('id'),
+            'checklists' => fn ($query) => $query
+                ->select(['id', 'operation_id', 'sobrecargo_user_id', 'type', 'status', 'submitted_at'])
+                ->with(['items' => fn ($items) => $items->select([
+                    'id',
+                    'checklist_id',
+                    'code',
+                    'category',
+                    'label',
+                    'status',
+                    'is_required',
+                    'is_critical',
+                    'notes',
+                    'is_completed',
+                    'completed_at',
+                ])->orderBy('id')]),
         ])
             ->whereHas('latestCrewAssignment', fn ($query) => $query
                 ->where('sobrecargo_user_id', $request->user()->id)
                 ->whereNotIn('status', [CrewAssignmentStatus::REJECTED, CrewAssignmentStatus::CANCELLED]))
             ->latest()
-            ->get()
-            ->map(fn (Operacion $operation) => $this->formatAssignmentPayload($operation, $request->user()->id))
+            ->get();
+
+        $auditTimelineMap = $this->loadCrewAuditTimelineMap($operations);
+
+        $payload = $operations
+            ->map(fn (Operacion $operation) => $this->formatAssignmentPayload(
+                $operation,
+                $request->user()->id,
+                $auditTimelineMap->get((string) $operation->id, collect()),
+            ))
             ->values();
 
         return $this->ok([
-            'assignments' => $operations,
+            'assignments' => $payload,
         ]);
     }
 
@@ -440,8 +464,10 @@ class SobrecargoControlador extends ControladorBase
                 $this->crewAudit->record($request, $request->user(), $lockedOperation, 'critical_item_failed', CrewAssignmentStatus::normalize($lockedOperation->crew_status), CrewAssignmentStatus::normalize($lockedOperation->crew_status), $data['notes'] ?? null, ['assignment_id' => $assignmentId, 'checklist_item_id' => $lockedItem->id]);
                 DB::afterCommit(fn () => $this->notifyAdmins($lockedOperation, 'critical_checklist_failed', 'Falla critica en checklist', $data['notes'] ?? 'Un elemento critico fue marcado como fallido.', 'critical', $assignmentId, ['idempotency_context' => 'item_'.$lockedItem->id]));
             }
-            $items = $checklist->items()->get();
-            $hasBlockingItem = $items->contains(fn ($entry) => $entry->is_required && ! in_array($entry->status, ['completed', 'not_applicable'], true));
+            $hasBlockingItem = $checklist->items()
+                ->where('is_required', true)
+                ->whereNotIn('status', ['completed', 'not_applicable'])
+                ->exists();
             if (! $hasBlockingItem) {
                 $checklist->update(['status' => 'completed', 'submitted_at' => now()]);
                 $nextStatus = match ($type) {
@@ -458,7 +484,17 @@ class SobrecargoControlador extends ControladorBase
             }
         });
 
-        return $this->ok(['checklist' => $checklist->fresh('items'), 'operation' => $operation->fresh()]);
+        $freshOperation = Operacion::query()
+            ->select(['id', 'crew_status'])
+            ->findOrFail($operation->id);
+
+        return $this->ok([
+            'checklist' => $checklist->fresh(['items' => fn ($query) => $query->orderBy('id')]),
+            'operation' => [
+                'id' => $freshOperation->id,
+                'crew_status' => $freshOperation->crew_status,
+            ],
+        ]);
     }
 
     public function transitionOperation(Request $request, Operacion $operation)
@@ -938,14 +974,59 @@ class SobrecargoControlador extends ControladorBase
             ['operation_id' => $operation->id, 'sobrecargo_user_id' => $crewUserId, 'type' => $type],
             ['status' => 'pending']
         );
+
+        $existingCodes = $checklist->items()
+            ->pluck('code')
+            ->filter()
+            ->all();
+
+        $missingItems = [];
         foreach ($templates[$type] as [$code, $category, $label, $critical]) {
-            $checklist->items()->firstOrCreate(['code' => $code], [
-                'category' => $category, 'label' => $label, 'status' => 'pending',
-                'is_required' => true, 'is_critical' => $critical, 'is_completed' => false,
-            ]);
+            if (in_array($code, $existingCodes, true)) {
+                continue;
+            }
+
+            $missingItems[] = [
+                'checklist_id' => $checklist->id,
+                'code' => $code,
+                'category' => $category,
+                'label' => $label,
+                'status' => 'pending',
+                'is_required' => true,
+                'is_critical' => $critical,
+                'is_completed' => false,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ];
         }
 
-        return $checklist->load('items');
+        if ($missingItems !== []) {
+            ChecklistItem::query()->insert($missingItems);
+        }
+
+        return $checklist->load(['items' => fn ($query) => $query->orderBy('id')]);
+    }
+
+    private function loadCrewAuditTimelineMap($operations)
+    {
+        $operationIds = collect($operations)
+            ->pluck('id')
+            ->filter()
+            ->map(fn ($id) => (string) $id)
+            ->values();
+
+        if ($operationIds->isEmpty()) {
+            return collect();
+        }
+
+        return RegistroAuditoria::query()
+            ->with('user:id,name,role,operational_role')
+            ->where('module', 'crew_operations')
+            ->where('entity', 'operations')
+            ->whereIn('entity_id', $operationIds->all())
+            ->oldest('id')
+            ->get()
+            ->groupBy('entity_id');
     }
 
     private function notifyAdmins(Operacion $operation, string $type, string $title, string $message, string $level, ?int $assignmentId = null, array $extra = []): void
@@ -1266,7 +1347,7 @@ class SobrecargoControlador extends ControladorBase
             ->firstOrFail();
     }
 
-    private function formatAssignmentPayload(Operacion $operation, int $userId): array
+    private function formatAssignmentPayload(Operacion $operation, int $userId, $auditTimeline = null): array
     {
         $assignment = $operation->relationLoaded('latestCrewAssignment')
             && $operation->latestCrewAssignment?->sobrecargo_user_id === $userId
@@ -1303,9 +1384,13 @@ class SobrecargoControlador extends ControladorBase
 
         $latestResponse = $operation->timeline
             ->first(fn (LineaTiempoOperacion $item) => in_array($item->status, ['confirmada', 'rechazada', 'revision_solicitada'], true));
-        $auditTimeline = RegistroAuditoria::query()->with('user:id,name,role,operational_role')
-            ->where('module', 'crew_operations')->where('entity', 'operations')->where('entity_id', (string) $operation->id)
-            ->oldest('id')->get();
+        $auditTimeline = $auditTimeline ?? RegistroAuditoria::query()
+            ->with('user:id,name,role,operational_role')
+            ->where('module', 'crew_operations')
+            ->where('entity', 'operations')
+            ->where('entity_id', (string) $operation->id)
+            ->oldest('id')
+            ->get();
 
         return [
             'id' => $operation->id,
@@ -1355,10 +1440,16 @@ class SobrecargoControlador extends ControladorBase
                 'status' => $checklist->status,
                 'submitted_at' => optional($checklist->submitted_at)?->toISOString(),
                 'items' => $checklist->items->map(fn (ChecklistItem $item) => [
-                    'id' => $item->id, 'code' => $item->code, 'category' => $item->category,
-                    'description' => $item->description, 'status' => $item->status,
+                    'id' => $item->id,
+                    'code' => $item->code,
+                    'category' => $item->category,
+                    'label' => $item->label,
+                    'description' => $item->label,
+                    'status' => $item->status,
                     'is_required' => $item->is_required, 'is_critical' => $item->is_critical,
                     'notes' => $item->notes,
+                    'is_completed' => $item->is_completed,
+                    'completed_at' => optional($item->completed_at)?->toISOString(),
                 ])->values(),
             ])->values(),
             'final_report' => $operation->crew_final_report,
