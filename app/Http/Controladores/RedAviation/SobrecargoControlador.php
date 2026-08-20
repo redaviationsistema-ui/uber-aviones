@@ -1680,6 +1680,24 @@ class SobrecargoControlador extends ControladorBase
         $operation = $incident->operacion;
         $flightRequest = $operation?->solicitudVuelo;
         $status = $this->extractTaggedValue((string) $incident->description, 'Estado');
+        $files = DB::table('crew_operation_incident_files')
+            ->where('incident_id', $incident->id)
+            ->orderBy('id')
+            ->get()
+            ->map(fn ($file) => [
+                'id' => $file->id,
+                'storage_disk' => $file->storage_disk ?: 'public',
+                'file_path' => $file->file_path,
+                'file_url' => $this->resolveCrewIncidentFileUrl(
+                    (string) ($file->storage_disk ?: 'public'),
+                    (string) ($file->file_path ?? '')
+                ),
+                'file_type' => $file->file_type,
+                'original_name' => $file->original_name,
+                'created_at' => $file->created_at,
+                'updated_at' => $file->updated_at,
+            ])
+            ->values();
 
         return [
             'id' => $incident->id,
@@ -1695,6 +1713,7 @@ class SobrecargoControlador extends ControladorBase
             'comment' => $incident->description,
             'created_at' => optional($incident->created_at)?->format('H:i'),
             'operation_id' => $operation?->id,
+            'files' => $files,
             'timeline' => array_values(array_filter([
                 [
                     'id' => $incident->id.'-1',
@@ -1717,6 +1736,26 @@ class SobrecargoControlador extends ControladorBase
                     : null,
             ])),
         ];
+    }
+
+    private function resolveCrewIncidentFileUrl(string $disk, string $path): ?string
+    {
+        $disk = trim($disk) === '' ? 'public' : trim($disk);
+        $path = trim($path);
+
+        if ($disk !== 's3' || $path === '') {
+            return null;
+        }
+
+        if (! $this->canGenerateChecklistEvidenceTemporaryS3Urls()) {
+            return null;
+        }
+
+        try {
+            return Storage::disk('s3')->temporaryUrl($path, now()->addMinutes(30));
+        } catch (\Throwable) {
+            return null;
+        }
     }
 
     private function extractTaggedValue(string $description, string $label): ?string
