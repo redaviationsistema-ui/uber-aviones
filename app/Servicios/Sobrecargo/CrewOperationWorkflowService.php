@@ -44,7 +44,48 @@ class CrewOperationWorkflowService
             'tracking_events' => $loadedOperation->timeline,
             'incidents' => $incidents,
             'closure' => $loadedOperation->crew_final_report,
+            'allowed_actions' => $this->allowedActions($loadedOperation),
         ];
+    }
+
+    private function allowedActions(Operacion $operation): array
+    {
+        $status = CrewAssignmentStatus::normalize($operation->crew_status);
+        $hasCabinReadyEvent = $operation->timeline->contains(fn ($item) => $item->status === 'cabina_lista');
+
+        if ($status === CrewAssignmentStatus::READY_FOR_OPERATION) {
+            return [['type' => 'checkin', 'label' => 'Confirmar llegada']];
+        }
+        if ($status === CrewAssignmentStatus::CABIN_READY && ! $hasCabinReadyEvent) {
+            return [['type' => 'cabin_ready', 'label' => 'Confirmar cabina lista']];
+        }
+        if ($status === CrewAssignmentStatus::CABIN_READY) {
+            return [['type' => 'transition', 'status' => CrewAssignmentStatus::BOARDING, 'label' => 'Iniciar abordaje']];
+        }
+        if ($status === CrewAssignmentStatus::BOARDING) {
+            return [['type' => 'passengers_ready', 'label' => 'Confirmar pasajeros recibidos']];
+        }
+        if ($status === CrewAssignmentStatus::REPORT_PENDING) {
+            return [['type' => 'submit_report', 'label' => 'Enviar reporte final']];
+        }
+
+        $crewTransitions = [
+            CrewAssignmentStatus::PREPARATION_PENDING,
+            CrewAssignmentStatus::PREFLIGHT_IN_PROGRESS,
+            CrewAssignmentStatus::IN_FLIGHT,
+            CrewAssignmentStatus::LANDED,
+            CrewAssignmentStatus::POSTFLIGHT_PENDING,
+        ];
+
+        return collect(CrewAssignmentStatus::TRANSITIONS[$status] ?? [])
+            ->filter(fn ($target) => in_array($target, $crewTransitions, true))
+            ->map(fn ($target) => [
+                'type' => 'transition',
+                'status' => $target,
+                'label' => 'Avanzar a '.str_replace('_', ' ', $target),
+            ])
+            ->values()
+            ->all();
     }
 
     private function loadIncidents(Operacion $operation): array

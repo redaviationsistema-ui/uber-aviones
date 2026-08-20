@@ -62,9 +62,9 @@ class CrewOperationIncidentController extends ControladorBase
             abort_if((int) $data['crew_id'] !== (int) $user->id, 403);
         }
 
-        $operation = Operacion::with(['solicitudVuelo', 'proveedor', 'sobrecargo'])->findOrFail($data['crew_operation_id']);
+        $operation = Operacion::with(['solicitudVuelo', 'proveedor', 'sobrecargo', 'latestCrewAssignment'])->findOrFail($data['crew_operation_id']);
         if ($user && $user->hasRole(Usuario::ROLE_SOBRECARGO)) {
-            abort_if((int) $operation->sobrecargo_user_id !== (int) $user->id, 403);
+            abort_if((int) $operation->latestCrewAssignment?->sobrecargo_user_id !== (int) $user->id, 403);
         }
 
         $incidentId = DB::table('crew_operation_incidents')->insertGetId([
