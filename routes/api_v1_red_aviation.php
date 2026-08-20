@@ -106,6 +106,7 @@ Route::middleware(['auth.token'])->group(function () {
         Route::get('/operations/{operation}/workflow', [SobrecargoControlador::class, 'workflow']);
         Route::post('/operations/{operation}/transition', [SobrecargoControlador::class, 'transitionOperation']);
         Route::put('/operations/{operation}/checklists/{type}/items/{item}', [SobrecargoControlador::class, 'updateChecklistItem']);
+        Route::post('/operations/{operation}/checklists/{type}/items/{item}/evidence', [SobrecargoControlador::class, 'uploadChecklistEvidence']);
         Route::post('/operations/{operation}/report', [SobrecargoControlador::class, 'submitFinalReport']);
         Route::post('/operations/{operation}/respond', [SobrecargoControlador::class, 'respondAssignment']);
         Route::post('/operations/{operation}/checkin', [SobrecargoControlador::class, 'checkinOperation']);
@@ -161,6 +162,7 @@ Route::middleware(['auth.token'])->group(function () {
         Route::get('/contracts', [AdminControlador::class, 'contracts']);
         Route::post('/requests/{flightRequest}/assign', [AdminControlador::class, 'assign']);
         Route::post('/operations/{operation}/crew-transition', [AdminControlador::class, 'transitionCrewOperation']);
+        Route::get('/crew/operations/{operation}/workflow', [AdminControlador::class, 'crewOperationWorkflow']);
         Route::put('/requests/{flightRequest}/workflow', [AdminControlador::class, 'updateRequestWorkflow']);
         Route::get('/subscriptions', [AdminControlador::class, 'subscriptions']);
         Route::get('/client-access-payments', [AdminControlador::class, 'clientAccessPayments']);

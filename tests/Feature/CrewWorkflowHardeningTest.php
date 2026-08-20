@@ -5,6 +5,8 @@ namespace Tests\Feature;
 use App\Dominio\Sobrecargo\CrewAssignmentStatus;
 use App\Modelos\Aeronave;
 use App\Modelos\AsignacionSobrecargo;
+use App\Modelos\ChecklistItem;
+use App\Modelos\ChecklistOperacion;
 use App\Modelos\Notificacion;
 use App\Modelos\Operacion;
 use App\Modelos\Proveedor;
@@ -14,6 +16,7 @@ use App\Modelos\Usuario;
 use App\Servicios\Sobrecargo\CrewOperationalNotificationService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
@@ -71,6 +74,52 @@ class CrewWorkflowHardeningTest extends TestCase
             'category' => 'cabina', 'priority' => 'media', 'phase' => 'En vuelo', 'description' => 'Prueba de estado',
         ])->assertCreated();
         $this->assertSame(CrewAssignmentStatus::IN_FLIGHT, $operation->fresh()->crew_status);
+    }
+
+    public function test_crew_can_upload_checklist_evidence_to_s3_without_creating_incident(): void
+    {
+        Storage::fake('s3');
+        [$operation, $crew, $token] = $this->crewOperation(CrewAssignmentStatus::PREFLIGHT_IN_PROGRESS);
+
+        AsignacionSobrecargo::create([
+            'operation_id' => $operation->id,
+            'sobrecargo_user_id' => $crew->id,
+            'status' => CrewAssignmentStatus::CONFIRMED,
+            'assigned_at' => now()->subHour(),
+            'accepted_at' => now()->subMinutes(30),
+        ]);
+
+        $checklist = ChecklistOperacion::create([
+            'operation_id' => $operation->id,
+            'sobrecargo_user_id' => $crew->id,
+            'type' => 'preflight',
+            'status' => 'pending',
+        ]);
+        $item = ChecklistItem::create([
+            'checklist_id' => $checklist->id,
+            'code' => 'catering_received',
+            'category' => 'service',
+            'label' => 'Catering recibido',
+            'status' => 'pending',
+            'is_required' => true,
+            'is_critical' => false,
+            'is_completed' => false,
+        ]);
+
+        $response = $this->withToken($token)->post(
+            "/api/v1/sobrecargo/operations/{$operation->id}/checklists/preflight/items/{$item->id}/evidence",
+            ['file' => UploadedFile::fake()->image('catering.jpg')],
+            ['Accept' => 'application/json']
+        )->assertCreated();
+
+        $evidencePath = data_get($response->json('item'), 'evidence_files.0.file_path');
+
+        $this->assertNotNull($evidencePath);
+        Storage::disk('s3')->assertExists($evidencePath);
+        $this->assertDatabaseHas('checklist_items', [
+            'id' => $item->id,
+        ]);
+        $this->assertSame(0, DB::table('crew_operation_incidents')->count());
     }
 
     public function test_acceptance_creates_one_idempotent_notification_and_complete_audit(): void

@@ -41,6 +41,7 @@ use App\Servicios\RedAviation\VisibilidadServicio;
 use App\Servicios\Sobrecargo\CrewOperationalAuditService;
 use App\Servicios\Sobrecargo\CrewOperationalMetricsService;
 use App\Servicios\Sobrecargo\CrewOperationalNotificationService;
+use App\Servicios\Sobrecargo\CrewOperationWorkflowService;
 use Carbon\Carbon;
 use Carbon\CarbonPeriod;
 use Illuminate\Database\QueryException;
@@ -138,6 +139,7 @@ class AdminControlador extends ControladorBase
         private readonly CrewOperationalAuditService $crewAudit,
         private readonly CrewOperationalNotificationService $crewNotifications,
         private readonly CrewOperationalMetricsService $crewMetrics,
+        private readonly CrewOperationWorkflowService $crewOperationWorkflowService,
     ) {}
 
     public function dashboard(Request $request)
@@ -1690,6 +1692,24 @@ class AdminControlador extends ControladorBase
                 'has_more_pages' => $requestsPaginator->hasMorePages(),
             ],
         ]);
+    }
+
+    public function crewOperationWorkflow(Operacion $operation): JsonResponse
+    {
+        $operation->loadMissing('latestCrewAssignment');
+
+        abort_if(! $operation->latestCrewAssignment, 404, 'La operacion no tiene asignacion activa de sobrecargo.');
+        abort_if(
+            in_array(
+                CrewAssignmentStatus::normalize($operation->latestCrewAssignment->status),
+                [CrewAssignmentStatus::REJECTED, CrewAssignmentStatus::CANCELLED],
+                true
+            ),
+            409,
+            'La operacion no tiene una asignacion activa de sobrecargo.'
+        );
+
+        return $this->ok($this->crewOperationWorkflowService->buildWorkflowPayload($operation));
     }
 
     private function normalizeSobrecargoUserStatus(?string $requestedStatus, ?string $profileState, string $fallback): string

@@ -11,7 +11,7 @@ class ChecklistItem extends Model
 
     protected $fillable = [
         'checklist_id', 'code', 'category', 'label', 'status', 'is_required', 'is_critical',
-        'notes', 'is_completed', 'completed_at', 'completed_by',
+        'notes', 'evidence_files', 'is_completed', 'completed_at', 'completed_by',
     ];
 
     protected function casts(): array
@@ -21,6 +21,7 @@ class ChecklistItem extends Model
             'completed_at' => 'datetime',
             'is_required' => 'boolean',
             'is_critical' => 'boolean',
+            'evidence_files' => 'array',
         ];
     }
 

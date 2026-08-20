@@ -17,12 +17,15 @@ use App\Servicios\Operaciones\ReservationLifecycleService;
 use App\Servicios\RedAviation\VisibilidadServicio;
 use App\Servicios\Sobrecargo\CrewOperationalAuditService;
 use App\Servicios\Sobrecargo\CrewOperationalNotificationService;
+use App\Servicios\Sobrecargo\CrewOperationWorkflowService;
 use Carbon\Carbon;
 use Carbon\CarbonPeriod;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
+use Illuminate\Validation\Rules\File;
 
 class SobrecargoControlador extends ControladorBase
 {
@@ -31,6 +34,7 @@ class SobrecargoControlador extends ControladorBase
         private readonly ReservationLifecycleService $reservationLifecycleService,
         private readonly CrewOperationalAuditService $crewAudit,
         private readonly CrewOperationalNotificationService $crewNotifications,
+        private readonly CrewOperationWorkflowService $crewOperationWorkflowService,
     ) {}
 
     public function dashboard(Request $request)
@@ -316,7 +320,11 @@ class SobrecargoControlador extends ControladorBase
     public function markCabinReady(Request $request, Operacion $operation)
     {
         $this->resolveActiveCrewAssignmentForUserOrAbort($operation, $request->user()->id);
-        abort_unless(CrewAssignmentStatus::normalize($operation->crew_status) === CrewAssignmentStatus::CABIN_READY, 409, 'Completa primero el checklist prevuelo sin fallas criticas pendientes.');
+        abort_unless(
+            in_array(CrewAssignmentStatus::normalize($operation->crew_status), [CrewAssignmentStatus::CABIN_READY, CrewAssignmentStatus::BOARDING], true),
+            409,
+            'Completa primero el checklist prevuelo sin fallas criticas pendientes.'
+        );
         abort_if($operation->crew_service_started_at, 422, 'La cabina ya no puede marcarse porque el servicio ya inicio.');
 
         $data = $request->validate([
@@ -425,14 +433,8 @@ class SobrecargoControlador extends ControladorBase
     public function workflow(Request $request, Operacion $operation)
     {
         $this->resolveActiveCrewAssignmentForUserOrAbort($operation, $request->user()->id);
-        $operation->loadMissing(['checklists.items', 'timeline' => fn ($query) => $query->oldest('id')]);
 
-        return $this->ok([
-            'status' => CrewAssignmentStatus::normalize($operation->crew_status),
-            'checklists' => $operation->checklists,
-            'report' => $operation->crew_final_report,
-            'timeline' => $operation->timeline,
-        ]);
+        return $this->ok($this->crewOperationWorkflowService->buildWorkflowPayload($operation));
     }
 
     public function updateChecklistItem(Request $request, Operacion $operation, string $type, ChecklistItem $item)
@@ -489,7 +491,9 @@ class SobrecargoControlador extends ControladorBase
             ->findOrFail($operation->id);
 
         return $this->ok([
-            'checklist' => $checklist->fresh(['items' => fn ($query) => $query->orderBy('id')]),
+            'checklist' => $this->serializeChecklist(
+                $checklist->fresh(['items' => fn ($query) => $query->orderBy('id')])
+            ),
             'operation' => [
                 'id' => $freshOperation->id,
                 'crew_status' => $freshOperation->crew_status,
@@ -497,19 +501,90 @@ class SobrecargoControlador extends ControladorBase
         ]);
     }
 
+    public function uploadChecklistEvidence(Request $request, Operacion $operation, string $type, ChecklistItem $item)
+    {
+        $this->resolveActiveCrewAssignmentForUserOrAbort($operation, $request->user()->id);
+        $data = $request->validate([
+            'file' => ['required', File::image()->types(['jpg', 'jpeg', 'png', 'webp'])->max(10 * 1024)],
+        ]);
+
+        $checklist = $this->ensureOperationChecklist($operation, $request->user()->id, $type);
+        abort_if($item->checklist_id !== $checklist->id, 404);
+
+        $disk = $this->resolveChecklistEvidenceUploadDisk();
+        $file = $data['file'];
+        $directory = sprintf('crew/checklists/%s/%s/%s', $operation->id, $type, $item->id);
+        $path = $file->store($directory, $disk);
+
+        try {
+            DB::transaction(function () use ($operation, $item, $request, $disk, $path, $file) {
+                $lockedOperation = Operacion::query()->lockForUpdate()->findOrFail($operation->id);
+                $lockedItem = ChecklistItem::query()->lockForUpdate()->findOrFail($item->id);
+                abort_if(in_array(CrewAssignmentStatus::normalize($lockedOperation->crew_status), [CrewAssignmentStatus::CREW_COMPLETED, CrewAssignmentStatus::ADMINISTRATIVELY_CLOSED, CrewAssignmentStatus::CANCELLED], true), 409, 'La operacion ya no admite cambios en checklists.');
+
+                collect($lockedItem->evidence_files ?? [])->each(function ($entry) {
+                    $storageDisk = trim((string) data_get($entry, 'storage_disk'));
+                    $storagePath = trim((string) data_get($entry, 'file_path'));
+                    if ($storageDisk === 's3' && $storagePath !== '') {
+                        Storage::disk('s3')->delete($storagePath);
+                    }
+                });
+
+                $lockedItem->update([
+                    'evidence_files' => [[
+                        'storage_disk' => $disk,
+                        'file_path' => $path,
+                        'file_type' => $file->getClientMimeType(),
+                        'original_name' => $file->getClientOriginalName(),
+                        'size' => $file->getSize(),
+                        'uploaded_at' => now()->toISOString(),
+                        'uploaded_by' => $request->user()->id,
+                    ]],
+                ]);
+            });
+        } catch (\Throwable $exception) {
+            Storage::disk($disk)->delete($path);
+            throw $exception;
+        }
+
+        $freshChecklist = $checklist->fresh(['items' => fn ($query) => $query->orderBy('id')]);
+
+        return $this->ok([
+            'checklist' => $this->serializeChecklist($freshChecklist),
+            'item' => $this->serializeChecklistItem(
+                $freshChecklist->items->firstWhere('id', $item->id) ?: $item->fresh()
+            ),
+        ], 201);
+    }
+
     public function transitionOperation(Request $request, Operacion $operation)
     {
         $this->resolveActiveCrewAssignmentForUserOrAbort($operation, $request->user()->id);
         $data = $request->validate(['status' => ['required', 'string'], 'notes' => ['nullable', 'string']]);
         $target = CrewAssignmentStatus::normalize($data['status']);
-        $allowedForCrew = [CrewAssignmentStatus::PREPARATION_PENDING, CrewAssignmentStatus::PREFLIGHT_IN_PROGRESS, CrewAssignmentStatus::BOARDING, CrewAssignmentStatus::BOARDING_COMPLETED, CrewAssignmentStatus::POSTFLIGHT_PENDING];
+        $allowedForCrew = [
+            CrewAssignmentStatus::PREPARATION_PENDING,
+            CrewAssignmentStatus::PREFLIGHT_IN_PROGRESS,
+            CrewAssignmentStatus::BOARDING,
+            CrewAssignmentStatus::BOARDING_COMPLETED,
+            CrewAssignmentStatus::IN_FLIGHT,
+            CrewAssignmentStatus::LANDED,
+            CrewAssignmentStatus::POSTFLIGHT_PENDING,
+        ];
         abort_unless(in_array($target, $allowedForCrew, true), 403, 'Esta transicion corresponde a operaciones o administracion.');
 
         return DB::transaction(function () use ($operation, $target, $data, $request) {
             $locked = Operacion::query()->lockForUpdate()->findOrFail($operation->id);
             $current = CrewAssignmentStatus::normalize($locked->crew_status);
             abort_unless(CrewAssignmentStatus::canTransition($current, $target), 409, 'La transicion solicitada no corresponde al estado actual.');
-            $locked->update(['crew_status' => $target]);
+            $updates = ['crew_status' => $target];
+            if ($target === CrewAssignmentStatus::IN_FLIGHT && ! $locked->crew_service_started_at) {
+                $updates['crew_service_started_at'] = now();
+            }
+            if ($target === CrewAssignmentStatus::LANDED && ! $locked->crew_landed_at) {
+                $updates['crew_landed_at'] = now();
+            }
+            $locked->update($updates);
             if ($target === CrewAssignmentStatus::PREFLIGHT_IN_PROGRESS) {
                 $this->ensureOperationChecklist($locked, $request->user()->id, 'preflight');
             }
@@ -1029,6 +1104,124 @@ class SobrecargoControlador extends ControladorBase
             ->groupBy('entity_id');
     }
 
+    private function serializeChecklist(ChecklistOperacion $checklist): array
+    {
+        return [
+            'id' => $checklist->id,
+            'type' => $checklist->type,
+            'status' => $checklist->status,
+            'submitted_at' => optional($checklist->submitted_at)?->toISOString(),
+            'items' => $checklist->items
+                ->map(fn (ChecklistItem $item) => $this->serializeChecklistItem($item))
+                ->values(),
+        ];
+    }
+
+    private function serializeChecklistItem(ChecklistItem $item): array
+    {
+        return [
+            'id' => $item->id,
+            'code' => $item->code,
+            'category' => $item->category,
+            'label' => $item->label,
+            'description' => $item->label,
+            'status' => $item->status,
+            'is_required' => $item->is_required,
+            'is_critical' => $item->is_critical,
+            'notes' => $item->notes,
+            'is_completed' => $item->is_completed,
+            'completed_at' => optional($item->completed_at)?->toISOString(),
+            'evidence_files' => collect($item->evidence_files ?? [])
+                ->map(fn ($file) => $this->serializeChecklistEvidenceFile((array) $file))
+                ->filter(fn ($file) => filled($file['file_path'] ?? null))
+                ->values()
+                ->all(),
+        ];
+    }
+
+    private function serializeChecklistEvidenceFile(array $file): array
+    {
+        $disk = trim((string) ($file['storage_disk'] ?? 's3')) ?: 's3';
+        $path = trim((string) ($file['file_path'] ?? ''));
+
+        return [
+            'storage_disk' => $disk,
+            'file_path' => $path,
+            'file_type' => $file['file_type'] ?? null,
+            'original_name' => $file['original_name'] ?? null,
+            'size' => $file['size'] ?? null,
+            'uploaded_at' => $file['uploaded_at'] ?? null,
+            'uploaded_by' => $file['uploaded_by'] ?? null,
+            'file_url' => $this->resolveChecklistEvidenceFileUrl($disk, $path),
+        ];
+    }
+
+    private function resolveChecklistEvidenceUploadDisk(): string
+    {
+        $missingVariables = $this->missingChecklistEvidenceS3ConfigurationVariables();
+
+        abort_if(
+            $missingVariables !== [],
+            500,
+            'La evidencia del checklist solo puede guardarse en AWS S3. '
+            .'Faltan variables: '.implode(', ', $missingVariables).'.'
+        );
+
+        return 's3';
+    }
+
+    private function resolveChecklistEvidenceFileUrl(string $disk, string $path): ?string
+    {
+        if ($disk !== 's3' || $path === '') {
+            return null;
+        }
+
+        if (! $this->canGenerateChecklistEvidenceTemporaryS3Urls()) {
+            return null;
+        }
+
+        try {
+            return Storage::disk('s3')->temporaryUrl($path, now()->addMinutes(30));
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    private function canGenerateChecklistEvidenceTemporaryS3Urls(): bool
+    {
+        $key = trim((string) config('filesystems.disks.s3.key', ''));
+        $secret = trim((string) config('filesystems.disks.s3.secret', ''));
+        $bucket = trim((string) config('filesystems.disks.s3.bucket', ''));
+        $region = trim((string) config('filesystems.disks.s3.region', ''));
+
+        return $key !== '' && $secret !== '' && $bucket !== '' && $region !== '';
+    }
+
+    private function missingChecklistEvidenceS3ConfigurationVariables(): array
+    {
+        $required = [
+            'AWS_ACCESS_KEY_ID' => config('filesystems.disks.s3.key'),
+            'AWS_SECRET_ACCESS_KEY' => config('filesystems.disks.s3.secret'),
+            'AWS_BUCKET' => config('filesystems.disks.s3.bucket'),
+            'AWS_DEFAULT_REGION' => config('filesystems.disks.s3.region'),
+        ];
+
+        return array_keys(array_filter(
+            $required,
+            fn ($value) => $this->isChecklistEvidenceS3ConfigValueMissing($value)
+        ));
+    }
+
+    private function isChecklistEvidenceS3ConfigValueMissing(mixed $value): bool
+    {
+        $normalized = trim((string) $value);
+
+        return $normalized === ''
+            || str_starts_with($normalized, 'TU_NUEVA_')
+            || str_starts_with($normalized, 'your_')
+            || str_starts_with($normalized, 'YOUR_');
+    }
+
     private function notifyAdmins(Operacion $operation, string $type, string $title, string $message, string $level, ?int $assignmentId = null, array $extra = []): void
     {
         Usuario::query()->where(fn ($query) => $query->where('role', Usuario::ROLE_ADMIN)->orWhere('operational_role', Usuario::ROLE_ADMIN))
@@ -1434,24 +1627,9 @@ class SobrecargoControlador extends ControladorBase
                 'cancelled_at' => optional($assignment->cancelled_at)?->toISOString(),
                 'cancellation_reason' => $assignment->cancellation_reason,
             ] : null,
-            'checklists' => $operation->checklists->map(fn (ChecklistOperacion $checklist) => [
-                'id' => $checklist->id,
-                'type' => $checklist->type,
-                'status' => $checklist->status,
-                'submitted_at' => optional($checklist->submitted_at)?->toISOString(),
-                'items' => $checklist->items->map(fn (ChecklistItem $item) => [
-                    'id' => $item->id,
-                    'code' => $item->code,
-                    'category' => $item->category,
-                    'label' => $item->label,
-                    'description' => $item->label,
-                    'status' => $item->status,
-                    'is_required' => $item->is_required, 'is_critical' => $item->is_critical,
-                    'notes' => $item->notes,
-                    'is_completed' => $item->is_completed,
-                    'completed_at' => optional($item->completed_at)?->toISOString(),
-                ])->values(),
-            ])->values(),
+            'checklists' => $operation->checklists
+                ->map(fn (ChecklistOperacion $checklist) => $this->serializeChecklist($checklist))
+                ->values(),
             'final_report' => $operation->crew_final_report,
             'departure_datetime' => $operation->solicitudVuelo?->departure_datetime,
             'origin' => $operation->solicitudVuelo?->origin,
