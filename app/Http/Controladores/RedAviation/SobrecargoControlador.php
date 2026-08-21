@@ -433,6 +433,9 @@ class SobrecargoControlador extends ControladorBase
     public function workflow(Request $request, Operacion $operation)
     {
         $this->resolveActiveCrewAssignmentForUserOrAbort($operation, $request->user()->id);
+        foreach (['preparation', 'preflight', 'postflight'] as $type) {
+            $this->ensureOperationChecklist($operation, $request->user()->id, $type);
+        }
 
         return $this->ok($this->crewOperationWorkflowService->buildWorkflowPayload($operation));
     }
@@ -466,11 +469,12 @@ class SobrecargoControlador extends ControladorBase
                 $this->crewAudit->record($request, $request->user(), $lockedOperation, 'critical_item_failed', CrewAssignmentStatus::normalize($lockedOperation->crew_status), CrewAssignmentStatus::normalize($lockedOperation->crew_status), $data['notes'] ?? null, ['assignment_id' => $assignmentId, 'checklist_item_id' => $lockedItem->id]);
                 DB::afterCommit(fn () => $this->notifyAdmins($lockedOperation, 'critical_checklist_failed', 'Falla critica en checklist', $data['notes'] ?? 'Un elemento critico fue marcado como fallido.', 'critical', $assignmentId, ['idempotency_context' => 'item_'.$lockedItem->id]));
             }
+            $totalItems = $checklist->items()->count();
             $hasBlockingItem = $checklist->items()
                 ->where('is_required', true)
                 ->whereNotIn('status', ['completed', 'not_applicable'])
                 ->exists();
-            if (! $hasBlockingItem) {
+            if ($totalItems > 0 && ! $hasBlockingItem) {
                 $checklist->update(['status' => 'completed', 'submitted_at' => now()]);
                 $nextStatus = match ($type) {
                     'preparation' => CrewAssignmentStatus::READY_FOR_OPERATION,
@@ -1015,35 +1019,7 @@ class SobrecargoControlador extends ControladorBase
 
     private function ensureOperationChecklist(Operacion $operation, int $crewUserId, string $type): ChecklistOperacion
     {
-        $templates = [
-            'preparation' => [
-                ['personal_documents', 'personal', 'Documentacion personal revisada', true],
-                ['uniform_ready', 'personal', 'Uniforme listo', true],
-                ['transfer_confirmed', 'logistics', 'Traslado confirmado', true],
-                ['presentation_reviewed', 'logistics', 'Hora de presentacion revisada', true],
-                ['route_reviewed', 'operation', 'Ruta revisada', true],
-                ['aircraft_reviewed', 'operation', 'Aeronave revisada', true],
-                ['manifest_reviewed', 'passengers', 'Manifiesto consultado', true],
-                ['special_requirements', 'passengers', 'Requerimientos especiales revisados', true],
-                ['catering_reviewed', 'service', 'Catering revisado', false],
-                ['service_material_ready', 'service', 'Material de servicio preparado', false],
-            ],
-            'preflight' => [
-                ['cabin_cleaning', 'cabin', 'Limpieza de cabina', false], ['seatbelts', 'cabin', 'Asientos y cinturones', true],
-                ['baggage_secured', 'cabin', 'Equipaje asegurado', true], ['restroom', 'cabin', 'Baño revisado', false],
-                ['fire_extinguishers', 'safety', 'Extintores', true], ['first_aid', 'safety', 'Botiquin', true],
-                ['emergency_equipment', 'safety', 'Equipo de emergencia', true], ['emergency_exits', 'safety', 'Salidas libres', true],
-                ['oxygen', 'safety', 'Oxigeno', true], ['catering_received', 'service', 'Catering recibido', false],
-                ['special_food', 'service', 'Alimentos especiales', false], ['passenger_manifest', 'passengers', 'Manifiesto revisado', true],
-                ['special_passengers', 'passengers', 'Pasajeros especiales identificados', true], ['pets', 'passengers', 'Mascotas confirmadas', false],
-            ],
-            'postflight' => [
-                ['disembark_confirmed', 'passengers', 'Desembarque confirmado', true], ['forgotten_items', 'cabin', 'Objetos olvidados revisados', true],
-                ['damage_review', 'cabin', 'Daños revisados', true], ['cabin_condition', 'cabin', 'Condicion final de cabina', true],
-                ['leftover_catering', 'service', 'Catering sobrante registrado', false], ['missing_inventory', 'service', 'Faltantes registrados', false],
-                ['cabin_handover', 'operation', 'Entrega de cabina confirmada', true],
-            ],
-        ];
+        $templates = $this->checklistTemplates();
         abort_unless(array_key_exists($type, $templates), 422, 'Tipo de checklist no soportado.');
         $checklist = ChecklistOperacion::firstOrCreate(
             ['operation_id' => $operation->id, 'sobrecargo_user_id' => $crewUserId, 'type' => $type],
@@ -1079,7 +1055,62 @@ class SobrecargoControlador extends ControladorBase
             ChecklistItem::query()->insert($missingItems);
         }
 
-        return $checklist->load(['items' => fn ($query) => $query->orderBy('id')]);
+        $checklist->refresh()->load(['items' => fn ($query) => $query->orderBy('id')]);
+        $this->syncChecklistStatus($checklist);
+
+        return $checklist->refresh()->load(['items' => fn ($query) => $query->orderBy('id')]);
+    }
+
+    private function checklistTemplates(): array
+    {
+        return [
+            'preparation' => [
+                ['personal_documents', 'personal', 'Documentacion personal revisada', true],
+                ['uniform_ready', 'personal', 'Uniforme listo', true],
+                ['transfer_confirmed', 'logistics', 'Traslado confirmado', true],
+                ['presentation_reviewed', 'logistics', 'Hora de presentacion revisada', true],
+                ['route_reviewed', 'operation', 'Ruta revisada', true],
+                ['aircraft_reviewed', 'operation', 'Aeronave revisada', true],
+                ['manifest_reviewed', 'passengers', 'Manifiesto consultado', true],
+                ['special_requirements', 'passengers', 'Requerimientos especiales revisados', true],
+                ['catering_reviewed', 'service', 'Catering revisado', false],
+                ['service_material_ready', 'service', 'Material de servicio preparado', false],
+            ],
+            'preflight' => [
+                ['cabin_cleaning', 'cabin', 'Limpieza de cabina', false], ['seatbelts', 'cabin', 'Asientos y cinturones', true],
+                ['baggage_secured', 'cabin', 'Equipaje asegurado', true], ['restroom', 'cabin', 'Baño revisado', false],
+                ['fire_extinguishers', 'safety', 'Extintores', true], ['first_aid', 'safety', 'Botiquin', true],
+                ['emergency_equipment', 'safety', 'Equipo de emergencia', true], ['emergency_exits', 'safety', 'Salidas libres', true],
+                ['oxygen', 'safety', 'Oxigeno', true], ['catering_received', 'service', 'Catering recibido', false],
+                ['special_food', 'service', 'Alimentos especiales', false], ['passenger_manifest', 'passengers', 'Manifiesto revisado', true],
+                ['special_passengers', 'passengers', 'Pasajeros especiales identificados', true], ['pets', 'passengers', 'Mascotas confirmadas', false],
+            ],
+            'postflight' => [
+                ['disembark_confirmed', 'passengers', 'Desembarque confirmado', true], ['forgotten_items', 'cabin', 'Objetos olvidados revisados', true],
+                ['damage_review', 'cabin', 'Daños revisados', true], ['cabin_condition', 'cabin', 'Condicion final de cabina', true],
+                ['leftover_catering', 'service', 'Catering sobrante registrado', false], ['missing_inventory', 'service', 'Faltantes registrados', false],
+                ['cabin_handover', 'operation', 'Entrega de cabina confirmada', true],
+            ],
+        ];
+    }
+
+    private function syncChecklistStatus(ChecklistOperacion $checklist): void
+    {
+        $totalItems = $checklist->items->count();
+        $hasBlockingItem = $checklist->items
+            ->where('is_required', true)
+            ->contains(fn (ChecklistItem $item) => ! in_array($item->status, ['completed', 'not_applicable'], true));
+
+        $shouldBeCompleted = $totalItems > 0 && ! $hasBlockingItem;
+        $nextStatus = $shouldBeCompleted ? 'completed' : 'pending';
+        $nextSubmittedAt = $shouldBeCompleted ? ($checklist->submitted_at ?? now()) : null;
+
+        if ($checklist->status !== $nextStatus || (bool) $checklist->submitted_at !== (bool) $nextSubmittedAt) {
+            $checklist->forceFill([
+                'status' => $nextStatus,
+                'submitted_at' => $nextSubmittedAt,
+            ])->save();
+        }
     }
 
     private function loadCrewAuditTimelineMap($operations)
