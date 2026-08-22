@@ -203,6 +203,20 @@ final class AircraftEligibilityService
         $operationalReasons = array_intersect($reasonCodes, [
             'AIRCRAFT_IN_MAINTENANCE', 'DOCUMENT_EXPIRED', 'DOCUMENT_NOT_APPROVED',
         ]);
+        $checks = [
+            'aircraft_exists' => ! in_array('AIRCRAFT_NOT_FOUND', $reasonCodes, true),
+            'aircraft_active' => ! in_array('AIRCRAFT_NOT_ACTIVE', $reasonCodes, true)
+                && ! in_array('AIRCRAFT_IN_MAINTENANCE', $reasonCodes, true),
+            'provider_approved' => ! in_array('PROVIDER_NOT_FOUND', $reasonCodes, true)
+                && ! in_array('PROVIDER_NOT_APPROVED', $reasonCodes, true),
+            'capacity_valid' => ! in_array('INSUFFICIENT_CAPACITY', $reasonCodes, true)
+                && ! in_array('INVALID_AIRCRAFT_DATA', $reasonCodes, true),
+            'range_valid' => ! in_array('INSUFFICIENT_RANGE', $reasonCodes, true)
+                && ! in_array('INVALID_AIRCRAFT_DATA', $reasonCodes, true),
+            'documents_valid' => ! in_array('DOCUMENT_EXPIRED', $reasonCodes, true)
+                && ! in_array('DOCUMENT_NOT_APPROVED', $reasonCodes, true),
+            'available' => $temporallyAvailable && ! in_array('AIRCRAFT_NOT_AVAILABLE', $reasonCodes, true),
+        ];
 
         return [
             'eligible' => $reasonCodes === [],
@@ -212,6 +226,7 @@ final class AircraftEligibilityService
             'reason_code' => $reasonCodes[0] ?? null,
             'reason_codes' => $reasonCodes,
             'reasons' => array_map(fn (string $code) => $this->reason($code), $reasonCodes),
+            'checks' => $checks,
             'warnings' => array_values(array_unique($warnings)),
             'evaluated_rules' => $rules,
             'rule_version' => self::RULE_VERSION,
