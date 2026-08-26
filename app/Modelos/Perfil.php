@@ -11,13 +11,15 @@ class Perfil extends Model
 
     protected $fillable = [
         'user_id',
+        'client_type',
         'company_name',
         'business_type',
+        'tax_id',
         'birth_date',
         'nationality',
         'document_type',
         'document_number',
-        'document_expiration',
+        'document_issuing_country',
         'identity_validation_required',
         'ine_curp',
         'ine_cic',
@@ -40,7 +42,6 @@ class Perfil extends Model
     {
         return [
             'birth_date' => 'date',
-            'document_expiration' => 'date',
             'identity_validation_required' => 'boolean',
             'tax_data' => 'array',
         ];

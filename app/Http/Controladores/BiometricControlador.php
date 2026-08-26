@@ -3,14 +3,31 @@
 namespace App\Http\Controladores;
 
 use App\Modelos\IdentityVerification;
+use App\Modelos\Usuario;
 use Aws\Exception\AwsException;
 use Aws\Rekognition\RekognitionClient;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Http\Response;
 use Illuminate\Support\Facades\Storage;
 
 class BiometricControlador extends ControladorBase
 {
+    public function showStoredSelfie(Request $request, Usuario $user): Response
+    {
+        $path = $user->biometric_selfie_path;
+        $disk = $user->biometric_selfie_disk ?: 'public';
+
+        abort_unless($path, 404);
+        abort_unless(Storage::disk($disk)->exists($path), 404);
+
+        return Storage::disk($disk)->response(
+            $path,
+            basename($path),
+            ['Content-Disposition' => 'inline; filename="'.basename($path).'"']
+        );
+    }
+
     public function detectFace(Request $request): JsonResponse
     {
         $data = $request->validate([
@@ -230,6 +247,8 @@ class BiometricControlador extends ControladorBase
             'biometric_provider' => $verification->provider,
             'biometric_template_type' => $verification->template_type,
             'biometric_selfie_path' => $data['biometric_selfie_path'] ?? $verification->image_path,
+            'biometric_selfie_disk' => 'private',
+            'biometric_selfie_uploaded_at' => now(),
         ])->save();
     }
 }

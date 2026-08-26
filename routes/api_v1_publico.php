@@ -18,6 +18,9 @@ Route::prefix('public')->group(function () {
     ]));
     Route::get('/aircraft-preview', [AeronaveControlador::class, 'preview']);
     Route::post('/biometric/detect-face', [BiometricControlador::class, 'detectFace']);
+    Route::get('/biometric/selfies/{user}', [BiometricControlador::class, 'showStoredSelfie'])
+        ->middleware('signed')
+        ->name('public.biometric-selfies.show');
     Route::post('/docusign/webhook', [DocuSignWebhookControlador::class, 'handle']);
 });
 

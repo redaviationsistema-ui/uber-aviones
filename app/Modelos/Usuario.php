@@ -12,6 +12,7 @@ use Illuminate\Contracts\Auth\MustVerifyEmail;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\URL;
 
 /**
  * @property int $id
@@ -80,6 +81,8 @@ class Usuario extends Authenticatable implements MustVerifyEmail
         'biometric_provider',
         'biometric_template_type',
         'biometric_selfie_path',
+        'biometric_selfie_disk',
+        'biometric_selfie_uploaded_at',
     ];
 
     protected $hidden = [
@@ -111,6 +114,7 @@ class Usuario extends Authenticatable implements MustVerifyEmail
             'image_storage_score' => 'decimal:2',
             'biometric_image_saved' => 'boolean',
             'biometric_captured_at' => 'datetime',
+            'biometric_selfie_uploaded_at' => 'datetime',
         ];
     }
 
@@ -477,7 +481,24 @@ class Usuario extends Authenticatable implements MustVerifyEmail
             return null;
         }
 
-        return Storage::disk('public')->url($this->biometric_selfie_path);
+        $disk = $this->biometric_selfie_disk ?: 'public';
+
+        if ($disk === 'public') {
+            return Storage::disk('public')->url($this->biometric_selfie_path);
+        }
+
+        if ($disk === 's3') {
+            return Storage::disk('s3')->temporaryUrl(
+                $this->biometric_selfie_path,
+                now()->addMinutes(10)
+            );
+        }
+
+        return URL::temporarySignedRoute(
+            'public.biometric-selfies.show',
+            now()->addMinutes(10),
+            ['user' => $this->getKey()]
+        );
     }
 
     public function resolvedProviderId(): ?int

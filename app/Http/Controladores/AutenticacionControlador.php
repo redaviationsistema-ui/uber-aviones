@@ -15,6 +15,7 @@ use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Password;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
@@ -36,10 +37,13 @@ class AutenticacionControlador extends ControladorBase
             'birth_date' => ['nullable', 'date'],
             'birthDate' => ['nullable', 'date'],
             'nationality' => ['nullable', 'string', 'max:120'],
+            'client_type' => ['nullable', Rule::in(['individual', 'company'])],
             'curp' => ['nullable', 'string', 'max:32'],
+            'tax_id' => ['nullable', 'string', 'max:80'],
             'document_type' => ['nullable', 'string', 'max:50'],
             'document_number' => ['nullable', 'string', 'max:120'],
-            'document_expiration' => ['nullable', 'date'],
+            'document_issuing_country' => ['nullable', 'string', 'max:120'],
+            'issuing_country' => ['nullable', 'string', 'max:120'],
             'identification_document_id' => ['nullable', 'string', 'max:100'],
             'identity_validation_required' => ['nullable', 'boolean'],
             'ine_curp' => ['nullable', 'string', 'max:32'],
@@ -84,6 +88,12 @@ class AutenticacionControlador extends ControladorBase
             'selfie_biometric' => ['nullable', 'file', 'image', 'mimes:jpg,jpeg,png,webp', 'max:8192'],
         ]);
 
+        $data['client_type'] = $this->normalizeClientType($data['client_type'] ?? null);
+        $data['document_type'] = $this->normalizeDocumentType($data['document_type'] ?? null);
+        $data['document_issuing_country'] = $data['document_issuing_country']
+            ?? $data['issuing_country']
+            ?? null;
+
         $role = $data['role'];
         $operationalRole = $data['operational_role']
             ?? ($role === Usuario::ROLE_SOBRECARGO ? Usuario::ROLE_SOBRECARGO : null);
@@ -102,7 +112,28 @@ class AutenticacionControlador extends ControladorBase
             ], 422);
         }
 
-        $hasScannedIdentityFiles = $request->hasFile('ine_front') || $request->hasFile('ine_back');
+        $documentType = $data['document_type'] ?? null;
+        $requiresBackImage = $this->documentRequiresBackImage($documentType);
+        $requiresCurp = $this->documentRequiresCurp($documentType);
+        $hasFrontIdentityFile = $request->hasFile('ine_front');
+        $hasBackIdentityFile = $request->hasFile('ine_back');
+        $hasScannedIdentityFiles = $hasFrontIdentityFile || $hasBackIdentityFile;
+
+        if (
+            $role !== Usuario::ROLE_SOBRECARGO
+            && $request->boolean('identity_validation_required')
+            && $documentType === 'INE'
+            && $hasFrontIdentityFile
+            && ! $hasBackIdentityFile
+        ) {
+            return response()->json([
+                'success' => false,
+                'message' => 'La INE debe incluir frente y reverso para completar el registro.',
+                'errors' => [
+                    'ine_back' => ['El reverso de la INE es obligatorio.'],
+                ],
+            ], 422);
+        }
 
         if (
             $role !== Usuario::ROLE_SOBRECARGO
@@ -119,14 +150,26 @@ class AutenticacionControlador extends ControladorBase
             ], 422);
         }
 
+        if (
+            $role !== Usuario::ROLE_SOBRECARGO
+            && $request->boolean('identity_validation_required')
+            && $requiresCurp
+            && blank($data['curp'] ?? $data['ine_curp'] ?? null)
+        ) {
+            return response()->json([
+                'success' => false,
+                'message' => 'La CURP es obligatoria para registrar una INE.',
+                'errors' => [
+                    'ine_curp' => ['La CURP es obligatoria cuando el documento es INE.'],
+                ],
+            ], 422);
+        }
+
         $ineFrontPath = $request->hasFile('ine_front')
             ? $request->file('ine_front')->store('identity/ine/front', 'private')
             : null;
         $ineBackPath = $request->hasFile('ine_back')
             ? $request->file('ine_back')->store('identity/ine/back', 'private')
-            : null;
-        $selfiePath = $request->hasFile('selfie_biometric')
-            ? $request->file('selfie_biometric')->store('biometric/selfies', 'public')
             : null;
         $birthDate = $data['birth_date'] ?? $data['birthDate'] ?? null;
         $baseAirport = $data['base_airport'] ?? $data['base'] ?? null;
@@ -147,8 +190,26 @@ class AutenticacionControlador extends ControladorBase
             'biometric_captured_at' => $data['biometric_captured_at'] ?? null,
             'biometric_provider' => $data['biometric_provider'] ?? null,
             'biometric_template_type' => $data['biometric_template_type'] ?? null,
-            'biometric_selfie_path' => $selfiePath,
+            'biometric_selfie_path' => null,
+            'biometric_selfie_disk' => null,
+            'biometric_selfie_uploaded_at' => null,
         ]);
+
+        $selfiePath = null;
+        if ($request->hasFile('selfie_biometric')) {
+            [$selfiePath, $selfieDisk] = $this->storeBiometricSelfie(
+                $request->file('selfie_biometric'),
+                $user
+            );
+
+            $user->forceFill([
+                'biometric_selfie_path' => $selfiePath,
+                'biometric_selfie_disk' => $selfieDisk,
+                'biometric_selfie_uploaded_at' => now(),
+                'biometric_image_saved' => true,
+            ])->save();
+        }
+
         $user->syncRoles(
             array_values(array_filter(array_unique([$persistedRole, $operationalRole]))),
             $operationalRole ?: $role
@@ -162,12 +223,15 @@ class AutenticacionControlador extends ControladorBase
 
         $user->profile()->updateOrCreate(
             ['user_id' => $user->id],
-            [
+            $this->filterPersistableProfileAttributes([
+                'client_type' => $data['client_type'] ?? null,
+                'company_name' => $role === Usuario::ROLE_CLIENT ? ($data['company_name'] ?? null) : null,
+                'tax_id' => $data['tax_id'] ?? null,
                 'birth_date' => $birthDate,
                 'nationality' => $data['nationality'] ?? null,
                 'document_type' => $data['document_type'] ?? null,
                 'document_number' => $data['document_number'] ?? null,
-                'document_expiration' => $data['document_expiration'] ?? null,
+                'document_issuing_country' => $data['document_issuing_country'] ?? null,
                 'identity_validation_required' => $request->boolean('identity_validation_required'),
                 'ine_curp' => $data['curp'] ?? $data['ine_curp'] ?? null,
                 'ine_cic' => $data['ine_cic'] ?? null,
@@ -180,7 +244,7 @@ class AutenticacionControlador extends ControladorBase
                 'city' => $baseCity,
                 'base_airport' => $baseAirport,
                 'base_airport_id' => $resolvedBaseAirport?->id,
-            ]
+            ])
         );
 
         if (
@@ -261,11 +325,23 @@ class AutenticacionControlador extends ControladorBase
             'birth_date' => ['required', 'date'],
             'document_number' => ['required', 'string', 'max:120'],
             'nationality' => ['required', 'string', 'max:120'],
-            'curp' => ['required', 'string', 'max:32'],
+            'curp' => ['nullable', 'string', 'max:32'],
+            'document_issuing_country' => ['nullable', 'string', 'max:120'],
             'requires_identity_validation' => ['required', 'boolean'],
-            'expires_at' => ['nullable', 'date'],
             'replace_document_id' => ['nullable', 'string', 'max:100'],
         ]);
+
+        $data['document_type'] = $this->normalizeDocumentType($data['document_type'] ?? null);
+
+        if ($this->documentRequiresCurp($data['document_type'] ?? null) && blank($data['curp'] ?? null)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'La CURP es obligatoria cuando el documento es INE.',
+                'errors' => [
+                    'curp' => ['La CURP es obligatoria cuando el documento es INE.'],
+                ],
+            ], 422);
+        }
 
         $previousDocument = $this->resolveRegistrationIdentificationRecord($data['replace_document_id'] ?? null);
         if ($previousDocument) {
@@ -297,9 +373,9 @@ class AutenticacionControlador extends ControladorBase
             'birth_date' => $data['birth_date'],
             'document_number' => $data['document_number'],
             'nationality' => $data['nationality'],
-            'curp' => $data['curp'],
+            'curp' => $data['curp'] ?? null,
+            'document_issuing_country' => $data['document_issuing_country'] ?? null,
             'requires_identity_validation' => (bool) $data['requires_identity_validation'],
-            'expires_at' => $data['expires_at'] ?? null,
             'storage_disk' => 's3',
             'storage_path' => $path,
             'file_url' => $documentUrl,
@@ -577,14 +653,33 @@ class AutenticacionControlador extends ControladorBase
             'name' => ['sometimes', 'string', 'max:255'],
             'phone' => ['nullable', 'string', 'max:50'],
             'company_name' => ['nullable', 'string', 'max:255'],
+            'client_type' => ['nullable', Rule::in(['individual', 'company'])],
             'business_type' => ['nullable', 'string', 'max:255'],
+            'tax_id' => ['nullable', 'string', 'max:80'],
             'tax_data' => ['nullable', 'array'],
             'country' => ['nullable', 'string', 'max:100'],
             'city' => ['nullable', 'string', 'max:100'],
+            'birth_date' => ['nullable', 'date'],
+            'nationality' => ['nullable', 'string', 'max:120'],
+            'document_type' => ['nullable', 'string', 'max:50'],
+            'document_number' => ['nullable', 'string', 'max:120'],
+            'document_issuing_country' => ['nullable', 'string', 'max:120'],
+            'base_airport' => ['nullable', 'string', 'max:20'],
             'address' => ['nullable', 'string', 'max:255'],
             'avatar' => ['nullable', 'string', 'max:255'],
             'avatar_url' => ['nullable', 'string', 'max:255'],
         ]);
+
+        if (array_key_exists('document_type', $userData)) {
+            $userData['document_type'] = $this->normalizeDocumentType($userData['document_type']);
+        }
+        if (array_key_exists('client_type', $userData)) {
+            $userData['client_type'] = $this->normalizeClientType($userData['client_type']);
+        }
+        if (array_key_exists('base_airport', $userData)) {
+            $resolvedBaseAirport = $this->findAirportByCode($userData['base_airport']);
+            $userData['base_airport_id'] = $resolvedBaseAirport?->id;
+        }
 
         if (isset($userData['avatar_url']) && ! isset($userData['avatar'])) {
             $userData['avatar'] = $userData['avatar_url'];
@@ -593,7 +688,9 @@ class AutenticacionControlador extends ControladorBase
         $request->user()->update(collect($userData)->only(['name', 'phone'])->all());
         $request->user()->profile()->updateOrCreate(
             ['user_id' => $request->user()->id],
-            collect($userData)->except(['name', 'phone'])->all()
+            $this->filterPersistableProfileAttributes(
+                collect($userData)->except(['name', 'phone'])->all()
+            )
         );
 
         return $this->ok(['user' => $request->user()->fresh(['profile', 'provider', 'ownedProvider'])]);
@@ -671,9 +768,10 @@ class AutenticacionControlador extends ControladorBase
 
     private function loadAuthUser(Usuario $user): Usuario
     {
+        $profileRelation = $this->buildAuthProfileRelation();
         $relations = $this->usesSlimClientAuthPayload($user)
             ? [
-                'profile:id,user_id,company_name,business_type,country,city,base_airport,base_airport_id,address,avatar,avatar_url,tax_data',
+                $profileRelation,
                 'profile.baseAirport:id,icao,iata,name',
                 'roles:id,code,name',
                 'demo:id,user_id,status,started_at,expires_at',
@@ -690,7 +788,7 @@ class AutenticacionControlador extends ControladorBase
             : [
                 'provider:id,user_id,company_name,commercial_name,legal_name,rfc,company_phone,company_email,base_airport,status,representative_name,representative_phone,birth_date,curp,nationality,document_type,document_number,document_expiration,approval_status,admin_validation_status,operator_status,access_enabled,admin_review_submitted_at,changes_notes,rejection_reason,jet_a_price,margin_percent,fixed_fee,notes',
                 'ownedProvider:id,user_id,company_name,commercial_name,legal_name,rfc,company_phone,company_email,base_airport,status,representative_name,representative_phone,birth_date,curp,nationality,document_type,document_number,document_expiration,approval_status,admin_validation_status,operator_status,access_enabled,admin_review_submitted_at,changes_notes,rejection_reason,jet_a_price,margin_percent,fixed_fee,notes',
-                'profile:id,user_id,company_name,business_type,country,city,base_airport,base_airport_id,address,avatar,avatar_url,tax_data,birth_date,nationality,document_type,document_number,document_expiration,identity_validation_required,ine_curp,ine_cic,ine_ocr,ine_scan_raw,ine_scan_status,ine_front_path,ine_back_path',
+                $profileRelation,
                 'profile.baseAirport:id,icao,iata,name',
                 'roles:id,code,name',
                 'demo:id,user_id,status,started_at,expires_at',
@@ -718,6 +816,25 @@ class AutenticacionControlador extends ControladorBase
     {
         $providerId = $user->resolvedProviderId();
         $profile = $user->profile;
+        $profileColumns = array_flip($this->availableProfileColumns([
+            'client_type',
+            'company_name',
+            'business_type',
+            'tax_id',
+            'country',
+            'city',
+            'base_airport',
+            'base_airport_id',
+            'birth_date',
+            'nationality',
+            'document_type',
+            'document_number',
+            'document_issuing_country',
+            'address',
+            'avatar',
+            'avatar_url',
+            'tax_data',
+        ]));
         $basePayload = [
             'id' => $user->id,
             'name' => $user->name,
@@ -742,20 +859,27 @@ class AutenticacionControlador extends ControladorBase
             'biometric_provider' => $user->biometric_provider,
             'biometric_template_type' => $user->biometric_template_type,
             'biometric_selfie_path' => $user->biometric_selfie_path,
-            'biometric_selfie_url' => $user->biometric_selfie_path
-                ? Storage::disk('public')->url($user->biometric_selfie_path)
-                : null,
+            'biometric_selfie_disk' => $user->biometric_selfie_disk,
+            'biometric_selfie_uploaded_at' => $user->biometric_selfie_uploaded_at,
+            'biometric_selfie_url' => $user->biometric_selfie_url,
             'profile' => $profile ? [
-                'company_name' => $profile->company_name,
-                'business_type' => $profile->business_type,
-                'country' => $profile->country,
-                'city' => $profile->city,
-                'base_airport' => $profile->base_airport,
-                'base_airport_id' => $profile->base_airport_id,
-                'address' => $profile->address,
-                'avatar' => $profile->avatar,
-                'avatar_url' => $profile->avatar_url,
-                'tax_data' => $profile->tax_data,
+                'client_type' => array_key_exists('client_type', $profileColumns) ? $profile->client_type : null,
+                'company_name' => array_key_exists('company_name', $profileColumns) ? $profile->company_name : null,
+                'business_type' => array_key_exists('business_type', $profileColumns) ? $profile->business_type : null,
+                'tax_id' => array_key_exists('tax_id', $profileColumns) ? $profile->tax_id : null,
+                'country' => array_key_exists('country', $profileColumns) ? $profile->country : null,
+                'city' => array_key_exists('city', $profileColumns) ? $profile->city : null,
+                'base_airport' => array_key_exists('base_airport', $profileColumns) ? $profile->base_airport : null,
+                'base_airport_id' => array_key_exists('base_airport_id', $profileColumns) ? $profile->base_airport_id : null,
+                'birth_date' => array_key_exists('birth_date', $profileColumns) ? $profile->birth_date : null,
+                'nationality' => array_key_exists('nationality', $profileColumns) ? $profile->nationality : null,
+                'document_type' => array_key_exists('document_type', $profileColumns) ? $profile->document_type : null,
+                'document_number' => array_key_exists('document_number', $profileColumns) ? $profile->document_number : null,
+                'document_issuing_country' => array_key_exists('document_issuing_country', $profileColumns) ? $profile->document_issuing_country : null,
+                'address' => array_key_exists('address', $profileColumns) ? $profile->address : null,
+                'avatar' => array_key_exists('avatar', $profileColumns) ? $profile->avatar : null,
+                'avatar_url' => array_key_exists('avatar_url', $profileColumns) ? $profile->avatar_url : null,
+                'tax_data' => array_key_exists('tax_data', $profileColumns) ? $profile->tax_data : null,
                 'base_airport_record' => $profile->baseAirport ? [
                     'id' => $profile->baseAirport->id,
                     'icao' => $profile->baseAirport->icao,
@@ -804,6 +928,105 @@ class AutenticacionControlador extends ControladorBase
         $basePayload['paymentMethods'] = $user->paymentMethods;
 
         return $basePayload;
+    }
+
+    private function buildAuthProfileRelation(): string
+    {
+        $columns = $this->availableProfileColumns([
+            'id',
+            'user_id',
+            'client_type',
+            'company_name',
+            'business_type',
+            'tax_id',
+            'country',
+            'city',
+            'base_airport',
+            'base_airport_id',
+            'address',
+            'avatar',
+            'avatar_url',
+            'tax_data',
+            'birth_date',
+            'nationality',
+            'document_type',
+            'document_number',
+            'document_issuing_country',
+            'identity_validation_required',
+            'ine_curp',
+            'ine_cic',
+            'ine_ocr',
+            'ine_scan_raw',
+            'ine_scan_status',
+            'ine_front_path',
+            'ine_back_path',
+        ]);
+
+        return 'profile:' . implode(',', $columns);
+    }
+
+    private function filterPersistableProfileAttributes(array $attributes): array
+    {
+        $persistableColumns = $this->availableProfileColumns(array_keys($attributes));
+
+        return array_intersect_key($attributes, array_flip($persistableColumns));
+    }
+
+    private function availableProfileColumns(array $columns): array
+    {
+        static $profileColumnMap = null;
+
+        if ($profileColumnMap === null) {
+            $profileColumnMap = array_flip(Schema::getColumnListing('profiles'));
+        }
+
+        return array_values(array_filter(
+            $columns,
+            static fn (string $column): bool => array_key_exists($column, $profileColumnMap)
+        ));
+    }
+
+    private function normalizeClientType(mixed $value): ?string
+    {
+        $normalized = Str::of((string) ($value ?? ''))->trim()->lower()->value();
+
+        return match ($normalized) {
+            '', 'null' => null,
+            'company', 'empresa' => 'company',
+            default => 'individual',
+        };
+    }
+
+    private function normalizeDocumentType(mixed $value): ?string
+    {
+        $normalized = Str::of((string) ($value ?? ''))->trim()->upper()->value();
+
+        return match ($normalized) {
+            '', 'NULL' => null,
+            'PASAPORTE', 'PASSPORT' => 'PASSPORT',
+            default => 'INE',
+        };
+    }
+
+    private function documentRequiresCurp(?string $documentType): bool
+    {
+        return $this->normalizeDocumentType($documentType) === 'INE';
+    }
+
+    private function documentRequiresBackImage(?string $documentType): bool
+    {
+        return $this->normalizeDocumentType($documentType) === 'INE';
+    }
+
+    private function storeBiometricSelfie(UploadedFile $file, Usuario $user): array
+    {
+        $disk = 'private';
+        $extension = strtolower($file->getClientOriginalExtension() ?: $file->extension() ?: 'jpg');
+        $directory = sprintf('clientes/%d/biometria', $user->id);
+        $filename = sprintf('%s.%s', (string) Str::uuid(), $extension);
+        $path = $file->storeAs($directory, $filename, $disk);
+
+        return [$path, $disk];
     }
 
     private function authCookieName(): string

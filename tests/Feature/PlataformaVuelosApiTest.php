@@ -70,9 +70,12 @@ class PlataformaVuelosApiTest extends TestCase
             'role' => 'client',
             'birth_date' => '1991-04-25',
             'nationality' => 'Mexicana',
+            'client_type' => 'company',
+            'company_name' => 'Cliente Identidad SA',
+            'tax_id' => 'CID910425ABC',
             'document_type' => 'INE',
             'document_number' => 'ABC123456789',
-            'document_expiration' => '2030-12-31',
+            'document_issuing_country' => 'México',
             'identity_validation_required' => '1',
             'ine_curp' => 'TEST910425HDFXXX01',
             'ine_cic' => '123456789',
@@ -107,7 +110,8 @@ class PlataformaVuelosApiTest extends TestCase
             ->assertCreated()
             ->assertJsonPath('user.email', 'identidad@cliente.test')
             ->assertJsonPath('user.identity_verification_status', 'approved')
-            ->assertJsonPath('user.identity_verified', true);
+            ->assertJsonPath('user.identity_verified', true)
+            ->assertJsonPath('user.biometric_selfie_disk', 'private');
 
         $user = Usuario::query()
             ->where('email', 'identidad@cliente.test')
@@ -116,6 +120,10 @@ class PlataformaVuelosApiTest extends TestCase
 
         $this->assertSame('INE', $user->profile?->document_type);
         $this->assertSame('ABC123456789', $user->profile?->document_number);
+        $this->assertSame('company', $user->profile?->client_type);
+        $this->assertSame('Cliente Identidad SA', $user->profile?->company_name);
+        $this->assertSame('CID910425ABC', $user->profile?->tax_id);
+        $this->assertSame('México', $user->profile?->document_issuing_country);
         $this->assertSame('TEST910425HDFXXX01', $user->profile?->ine_curp);
         $this->assertTrue((bool) $user->profile?->identity_validation_required);
         $this->assertNotNull($user->profile?->ine_front_path);
@@ -130,12 +138,17 @@ class PlataformaVuelosApiTest extends TestCase
         $this->assertNotNull($verification);
         $this->assertSame('approved', $verification->status);
         $this->assertTrue($verification->identity_verified);
+        $this->assertSame('private', $user->biometric_selfie_disk);
+        $this->assertNotNull($user->biometric_selfie_uploaded_at);
+        $this->assertNotNull($user->biometric_selfie_url);
+        $this->assertNotNull($user->biometric_selfie_path);
+        Storage::disk('private')->assertExists($user->biometric_selfie_path);
         $this->assertNotNull($verification->image_path);
-        Storage::disk('public')->assertExists($verification->image_path);
+        Storage::disk('private')->assertExists($verification->image_path);
     }
 
 
-    public function test_client_registration_accepts_scanned_ine_front_without_pdf_or_back_image(): void
+    public function test_client_registration_requires_ine_back_when_identity_validation_is_enabled(): void
     {
         Storage::fake('public');
         Storage::fake('private');
@@ -151,7 +164,6 @@ class PlataformaVuelosApiTest extends TestCase
             'nationality' => 'Mexicana',
             'document_type' => 'INE',
             'document_number' => 'FRONTAL123456',
-            'document_expiration' => '2031-01-31',
             'identity_validation_required' => '1',
             'ine_curp' => 'FRON920814HDFXXX02',
             'ine_scan_raw' => 'LECTURA INE FRONTAL',
@@ -164,19 +176,50 @@ class PlataformaVuelosApiTest extends TestCase
         ]);
 
         $response
+            ->assertStatus(422)
+            ->assertJsonPath('errors.ine_back.0', 'El reverso de la INE es obligatorio.');
+    }
+
+    public function test_passport_registration_accepts_front_image_without_curp(): void
+    {
+        Storage::fake('public');
+        Storage::fake('private');
+
+        $response = $this->post('/api/v1/auth/register', [
+            'name' => 'Cliente Pasaporte',
+            'email' => 'pasaporte@cliente.test',
+            'phone' => '+52 555 010 3000',
+            'password' => 'password123',
+            'password_confirmation' => 'password123',
+            'role' => 'client',
+            'birth_date' => '1990-05-11',
+            'nationality' => 'Mexicana',
+            'document_type' => 'PASSPORT',
+            'document_number' => 'X12345678',
+            'document_issuing_country' => 'México',
+            'identity_validation_required' => '1',
+            'identity_verification_status' => 'approved',
+            'identity_verified' => '1',
+            'face_detected' => '1',
+            'ine_front' => UploadedFile::fake()->image('passport.jpg'),
+            'selfie_biometric' => UploadedFile::fake()->image('selfie.jpg'),
+        ]);
+
+        $response
             ->assertCreated()
-            ->assertJsonPath('user.email', 'ine.frontal@cliente.test');
+            ->assertJsonPath('user.email', 'pasaporte@cliente.test');
 
         $user = Usuario::query()
-            ->where('email', 'ine.frontal@cliente.test')
+            ->where('email', 'pasaporte@cliente.test')
             ->with('profile')
             ->firstOrFail();
 
-        $this->assertSame('INE', $user->profile?->document_type);
-        $this->assertTrue((bool) $user->profile?->identity_validation_required);
+        $this->assertSame('PASSPORT', $user->profile?->document_type);
+        $this->assertSame('X12345678', $user->profile?->document_number);
+        $this->assertSame('México', $user->profile?->document_issuing_country);
+        $this->assertNull($user->profile?->ine_curp);
         $this->assertNotNull($user->profile?->ine_front_path);
         $this->assertNull($user->profile?->ine_back_path);
-        Storage::disk('private')->assertExists($user->profile->ine_front_path);
     }
 
     public function test_registration_identification_upload_can_be_saved_before_register_and_attached_on_signup(): void
@@ -186,7 +229,7 @@ class PlataformaVuelosApiTest extends TestCase
         $uploadResponse = $this->post('/api/v1/auth/registration/identification', [
             'file' => UploadedFile::fake()->create('identificacion.pdf', 150, 'application/pdf'),
             'document_name' => 'Identificación oficial',
-            'document_type' => 'ine',
+            'document_type' => 'PASSPORT',
             'document_category' => 'user_identification',
             'document_slot' => 'official_identification',
             'full_name' => 'Cliente PDF',
@@ -194,9 +237,8 @@ class PlataformaVuelosApiTest extends TestCase
             'birth_date' => '1990-01-10',
             'document_number' => 'ABC123456',
             'nationality' => 'Mexicana',
-            'curp' => 'PEPJ900110HDFRRN09',
             'requires_identity_validation' => '1',
-            'expires_at' => '2030-10-10',
+            'document_issuing_country' => 'México',
         ])->assertCreated();
 
         $documentId = $uploadResponse->json('document.id');
@@ -211,11 +253,10 @@ class PlataformaVuelosApiTest extends TestCase
             'role' => 'client',
             'birth_date' => '1990-01-10',
             'nationality' => 'Mexicana',
-            'document_type' => 'INE',
+            'document_type' => 'PASSPORT',
             'document_number' => 'ABC123456',
-            'document_expiration' => '2030-10-10',
+            'document_issuing_country' => 'México',
             'identity_validation_required' => '1',
-            'ine_curp' => 'PEPJ900110HDFRRN09',
             'identification_document_id' => $documentId,
             'identity_verification_status' => 'approved',
             'identity_verified' => '1',
