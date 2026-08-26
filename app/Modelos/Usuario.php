@@ -497,7 +497,8 @@ class Usuario extends Authenticatable implements MustVerifyEmail
         return URL::temporarySignedRoute(
             'public.biometric-selfies.show',
             now()->addMinutes(10),
-            ['user' => $this->getKey()]
+            ['user' => $this->getKey()],
+            absolute: false,
         );
     }
 

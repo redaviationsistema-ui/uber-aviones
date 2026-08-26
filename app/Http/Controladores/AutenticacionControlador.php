@@ -25,7 +25,17 @@ class AutenticacionControlador extends ControladorBase
     public function register(Request $request)
     {
         $data = $request->validate([
-            'name' => ['required', 'string', 'max:255'],
+            'name' => ['nullable', 'string', 'max:255'],
+            'full_name' => ['nullable', 'string', 'max:255'],
+            'first_name' => ['nullable', 'string', 'max:120'],
+            'middle_name' => ['nullable', 'string', 'max:120'],
+            'last_name' => ['nullable', 'string', 'max:120'],
+            'second_last_name' => ['nullable', 'string', 'max:120'],
+            'surname' => ['nullable', 'string', 'max:120'],
+            'paternal_surname' => ['nullable', 'string', 'max:120'],
+            'maternal_surname' => ['nullable', 'string', 'max:120'],
+            'nombre' => ['nullable', 'string', 'max:255'],
+            'apellidos' => ['nullable', 'string', 'max:255'],
             'email' => ['required', 'email', 'max:255', 'unique:users,email'],
             'password' => ['required', 'string', 'min:8', 'confirmed'],
             'phone' => ['nullable', 'string', 'max:50'],
@@ -87,6 +97,18 @@ class AutenticacionControlador extends ControladorBase
             'ine_back' => ['nullable', 'file', 'image', 'mimes:jpg,jpeg,png,webp', 'max:8192'],
             'selfie_biometric' => ['nullable', 'file', 'image', 'mimes:jpg,jpeg,png,webp', 'max:8192'],
         ]);
+
+        $data['name'] = $this->resolveRegistrationUserName($data);
+
+        if (blank($data['name'])) {
+            return response()->json([
+                'success' => false,
+                'message' => 'El nombre completo es obligatorio para crear la cuenta.',
+                'errors' => [
+                    'name' => ['El nombre completo es obligatorio.'],
+                ],
+            ], 422);
+        }
 
         $data['client_type'] = $this->normalizeClientType($data['client_type'] ?? null);
         $data['document_type'] = $this->normalizeDocumentType($data['document_type'] ?? null);
@@ -331,6 +353,8 @@ class AutenticacionControlador extends ControladorBase
             'replace_document_id' => ['nullable', 'string', 'max:100'],
         ]);
 
+        $data['full_name'] = $this->normalizePersonName($data['full_name'] ?? null) ?? '';
+
         $data['document_type'] = $this->normalizeDocumentType($data['document_type'] ?? null);
 
         if ($this->documentRequiresCurp($data['document_type'] ?? null) && blank($data['curp'] ?? null)) {
@@ -527,6 +551,152 @@ class AutenticacionControlador extends ControladorBase
         }
 
         return in_array($scanStatus, ['scanned', 'partial'], true);
+    }
+
+    private function resolveRegistrationUserName(array $data): ?string
+    {
+        $fullName = $this->normalizePersonName($data['full_name'] ?? null);
+        if ($fullName) {
+            return $fullName;
+        }
+
+        $primaryLastName = $this->normalizePersonName(
+            $data['last_name']
+                ?? $data['surname']
+                ?? $data['paternal_surname']
+                ?? null
+        );
+        $secondaryLastName = $this->normalizePersonName(
+            $data['second_last_name']
+                ?? $data['maternal_surname']
+                ?? null
+        );
+        $combinedLastName = $this->joinPersonNameParts([
+            $primaryLastName,
+            $secondaryLastName,
+            $data['apellidos'] ?? null,
+        ]);
+
+        $givenNames = $this->joinPersonNameParts([
+            $data['first_name'] ?? null,
+            $data['middle_name'] ?? null,
+        ]);
+
+        if (! $givenNames) {
+            $nameLike = $this->normalizePersonName(
+                $data['name']
+                    ?? $data['nombre']
+                    ?? null
+            );
+            $givenNames = $this->stripDuplicatedSurnameFromName(
+                $nameLike,
+                $combinedLastName
+            ) ?? $nameLike;
+        }
+
+        $composed = $this->joinPersonNameParts([
+            $givenNames,
+            $combinedLastName,
+        ]);
+
+        if ($composed) {
+            return $composed;
+        }
+
+        return $this->normalizePersonName(
+            $data['name']
+                ?? $data['nombre']
+                ?? null
+        );
+    }
+
+    private function normalizePersonName(?string $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        $normalized = preg_replace('/\s+/u', ' ', trim($value));
+        if (! is_string($normalized)) {
+            return null;
+        }
+
+        $normalized = trim($normalized);
+
+        return $normalized === '' ? null : $normalized;
+    }
+
+    private function joinPersonNameParts(array $parts): ?string
+    {
+        $normalizedParts = array_values(array_filter(array_map(
+            fn ($part) => $this->normalizePersonName(is_string($part) ? $part : null),
+            $parts
+        )));
+
+        if ($normalizedParts === []) {
+            return null;
+        }
+
+        return $this->normalizePersonName(implode(' ', $normalizedParts));
+    }
+
+    private function stripDuplicatedSurnameFromName(?string $value, ?string $surname): ?string
+    {
+        $normalizedValue = $this->normalizePersonName($value);
+        $normalizedSurname = $this->normalizePersonName($surname);
+
+        if (! $normalizedValue || ! $normalizedSurname) {
+            return $normalizedValue;
+        }
+
+        $valueTokens = preg_split('/\s+/u', $normalizedValue) ?: [];
+        $surnameTokens = preg_split('/\s+/u', $normalizedSurname) ?: [];
+
+        if ($this->matchesTokenSequenceAtStart($valueTokens, $surnameTokens)) {
+            $valueTokens = array_slice($valueTokens, count($surnameTokens));
+        }
+
+        if ($this->matchesTokenSequenceAtEnd($valueTokens, $surnameTokens)) {
+            $valueTokens = array_slice($valueTokens, 0, count($valueTokens) - count($surnameTokens));
+        }
+
+        $cleaned = $this->normalizePersonName(implode(' ', $valueTokens));
+        if (! $cleaned) {
+            return null;
+        }
+
+        return strcasecmp($cleaned, $normalizedSurname) === 0 ? null : $cleaned;
+    }
+
+    private function matchesTokenSequenceAtStart(array $tokens, array $sequence): bool
+    {
+        if ($tokens === [] || $sequence === [] || count($sequence) > count($tokens)) {
+            return false;
+        }
+
+        foreach ($sequence as $index => $token) {
+            if (strcasecmp($tokens[$index] ?? '', $token) !== 0) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private function matchesTokenSequenceAtEnd(array $tokens, array $sequence): bool
+    {
+        if ($tokens === [] || $sequence === [] || count($sequence) > count($tokens)) {
+            return false;
+        }
+
+        $offset = count($tokens) - count($sequence);
+        foreach ($sequence as $index => $token) {
+            if (strcasecmp($tokens[$offset + $index] ?? '', $token) !== 0) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     public function redirectDashboard(Request $request)

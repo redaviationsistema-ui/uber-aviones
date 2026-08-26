@@ -4,6 +4,7 @@ namespace App\Modelos;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Support\Facades\URL;
 
 class Perfil extends Model
 {
@@ -38,6 +39,11 @@ class Perfil extends Model
         'avatar_url',
     ];
 
+    protected $appends = [
+        'ine_front_url',
+        'ine_back_url',
+    ];
+
     protected function casts(): array
     {
         return [
@@ -55,5 +61,32 @@ class Perfil extends Model
     public function baseAirport(): BelongsTo
     {
         return $this->belongsTo(Aeropuerto::class, 'base_airport_id');
+    }
+
+
+    public function getIneFrontUrlAttribute(): ?string
+    {
+        return $this->resolveIdentityImageUrl('front');
+    }
+
+    public function getIneBackUrlAttribute(): ?string
+    {
+        return $this->resolveIdentityImageUrl('back');
+    }
+
+    private function resolveIdentityImageUrl(string $side): ?string
+    {
+        $path = $side === 'back' ? $this->ine_back_path : $this->ine_front_path;
+
+        if (! $path || ! $this->user_id) {
+            return null;
+        }
+
+        return URL::temporarySignedRoute(
+            'public.identity-documents.show',
+            now()->addMinutes(10),
+            ['user' => $this->user_id, 'side' => $side],
+            absolute: false,
+        );
     }
 }

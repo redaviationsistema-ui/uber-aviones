@@ -3773,6 +3773,8 @@ class AdminControlador extends ControladorBase
             'ine_scan_status' => $user->profile->ine_scan_status,
             'ine_front_path' => $user->profile->ine_front_path,
             'ine_back_path' => $user->profile->ine_back_path,
+            'ine_front_url' => $user->profile->ine_front_url,
+            'ine_back_url' => $user->profile->ine_back_url,
         ] : null;
         $summary['identity_verification_status'] = $user->identity_verification_status;
         $summary['identity_verification_message'] = $user->identity_verification_message;
@@ -3780,6 +3782,9 @@ class AdminControlador extends ControladorBase
         $summary['face_detected'] = $user->face_detected;
         $summary['face_match_score'] = $user->face_match_score;
         $summary['liveness_score'] = $user->liveness_score;
+        $summary['biometric_selfie_path'] = $user->biometric_selfie_path;
+        $summary['biometric_selfie_disk'] = $user->biometric_selfie_disk;
+        $summary['biometric_selfie_uploaded_at'] = $user->biometric_selfie_uploaded_at;
         $summary['biometric_selfie_url'] = $user->biometric_selfie_url;
         $summary['identityVerifications'] = $user->identityVerifications->map(fn ($verification) => [
             'id' => $verification->id,

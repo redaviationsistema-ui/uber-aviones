@@ -37,6 +37,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
+use RuntimeException;
 
 class ClienteControlador extends ControladorBase
 {
@@ -240,7 +241,7 @@ class ClienteControlador extends ControladorBase
             $routePricingAvailable = true;
         }
 
-        [$requestedStart, $requestedEnd] = $this->aircraftAvailabilityService->resolveWindowFromPayload($data);
+        [$requestedStart, $requestedEnd] = $this->resolveAvailabilityWindowOrAbort($data);
 
         $aircraft = Aeronave::query()
             ->select([
@@ -434,7 +435,7 @@ class ClienteControlador extends ControladorBase
             ]);
         }
 
-        [$requestedStart, $requestedEnd] = $this->aircraftAvailabilityService->resolveWindowFromPayload([
+        [$requestedStart, $requestedEnd] = $this->resolveAvailabilityWindowOrAbort([
             ...$data,
             'legs' => $legs,
         ]);
@@ -1482,7 +1483,7 @@ class ClienteControlador extends ControladorBase
 
     private function ensureAircraftIsAvailableForFlightRequest(int $aircraftId, SolicitudVuelo $solicitud, array $requestData = []): void
     {
-        [$requestedStart, $requestedEnd] = $this->aircraftAvailabilityService->resolveWindowFromPayload([
+        [$requestedStart, $requestedEnd] = $this->resolveAvailabilityWindowOrAbort([
             'departure_datetime' => optional($solicitud->departure_datetime)->toDateTimeString() ?? ($requestData['departure_datetime'] ?? null),
             'return_datetime' => optional($solicitud->return_datetime)->toDateTimeString() ?? ($requestData['return_datetime'] ?? null),
             'legs' => $solicitud->legs->map(fn ($leg) => [
@@ -1519,7 +1520,7 @@ class ClienteControlador extends ControladorBase
             'requirements' => is_array($solicitud->requirements) ? $solicitud->requirements : [],
         ];
         $route = $this->flightRouteService->buildCanonicalRoute($pricingRequestData);
-        [$start, $end] = $this->aircraftAvailabilityService->resolveWindowFromPayload([
+        [$start, $end] = $this->resolveAvailabilityWindowOrAbort([
             ...$pricingRequestData,
             'legs' => $route['legs'],
         ]);
@@ -3943,5 +3944,28 @@ class ClienteControlador extends ControladorBase
         $minimumRoutePrice = (float) ($categoryPricingRule['minimum_route_price'] ?? 0);
 
         return $minimumRoutePrice > 0 ? $minimumRoutePrice : 3000.0;
+    }
+
+    private function resolveAvailabilityWindowOrAbort(array $payload): array
+    {
+        try {
+            return $this->aircraftAvailabilityService->resolveWindowFromPayload($payload);
+        } catch (RuntimeException $exception) {
+            $message = $exception->getMessage();
+
+            if (str_contains($message, 'No se pudo resolver la fecha de inicio')) {
+                throw new HttpResponseException(response()->json([
+                    'success' => false,
+                    'message' => $message,
+                    'errors' => [
+                        'departure' => [
+                            'Debes indicar una fecha de salida válida antes de consultar disponibilidad.',
+                        ],
+                    ],
+                ], 422));
+            }
+
+            throw $exception;
+        }
     }
 }

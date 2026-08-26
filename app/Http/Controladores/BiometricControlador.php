@@ -28,6 +28,23 @@ class BiometricControlador extends ControladorBase
         );
     }
 
+    public function showStoredIdentityDocument(Request $request, Usuario $user, string $side): Response
+    {
+        $profile = $user->profile;
+        abort_unless($profile, 404);
+
+        $path = $side === 'back' ? $profile->ine_back_path : $profile->ine_front_path;
+
+        abort_unless($path, 404);
+        abort_unless(Storage::disk('private')->exists($path), 404);
+
+        return Storage::disk('private')->response(
+            $path,
+            basename($path),
+            ['Content-Disposition' => 'inline; filename="'.basename($path).'"']
+        );
+    }
+
     public function detectFace(Request $request): JsonResponse
     {
         $data = $request->validate([
