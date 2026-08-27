@@ -53,6 +53,8 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\URL;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
@@ -777,6 +779,8 @@ class AdminControlador extends ControladorBase
 
     public function showUser(Usuario $user)
     {
+        $user = Usuario::query()->findOrFail($user->id);
+
         $user->load([
             'roles:id,code,name',
             'profile:id,user_id,company_name,business_type,country,city,base_airport,base_airport_id,address,avatar,avatar_url,tax_data,birth_date,nationality,document_type,document_number,document_expiration,identity_validation_required,ine_curp,ine_cic,ine_ocr,ine_scan_raw,ine_scan_status,ine_front_path,ine_back_path',
@@ -3746,9 +3750,41 @@ class AdminControlador extends ControladorBase
         ];
     }
 
+
+    private function resolveAdminBiometricSelfieUrl(?string $path, ?string $disk, int $userId): ?string
+    {
+        $normalizedPath = trim((string) $path);
+
+        if ($normalizedPath === '') {
+            return null;
+        }
+
+        $resolvedDisk = trim((string) ($disk ?: 'public'));
+
+        if ($resolvedDisk === 'public') {
+            return Storage::disk('public')->url($normalizedPath);
+        }
+
+        if ($resolvedDisk === 's3') {
+            return Storage::disk('s3')->temporaryUrl($normalizedPath, now()->addMinutes(10));
+        }
+
+        return URL::temporarySignedRoute(
+            'public.biometric-selfies.show',
+            now()->addMinutes(10),
+            ['user' => $userId],
+            absolute: false,
+        );
+    }
+
     private function serializeAdminUserDetail(Usuario $user): array
     {
         $summary = $this->serializeAdminUserSummary($user);
+        $biometricRow = DB::table('users')->select([
+            'biometric_selfie_path',
+            'biometric_selfie_disk',
+            'biometric_selfie_uploaded_at',
+        ])->where('id', $user->id)->first();
         $summary['profile'] = $user->profile ? [
             'company_name' => $user->profile->company_name,
             'business_type' => $user->profile->business_type,
@@ -3782,10 +3818,16 @@ class AdminControlador extends ControladorBase
         $summary['face_detected'] = $user->face_detected;
         $summary['face_match_score'] = $user->face_match_score;
         $summary['liveness_score'] = $user->liveness_score;
-        $summary['biometric_selfie_path'] = $user->biometric_selfie_path;
-        $summary['biometric_selfie_disk'] = $user->biometric_selfie_disk;
-        $summary['biometric_selfie_uploaded_at'] = $user->biometric_selfie_uploaded_at;
-        $summary['biometric_selfie_url'] = $user->biometric_selfie_url;
+        $latestVerification = $user->identityVerifications->sortByDesc('created_at')->first();
+        $summary['biometric_selfie_path'] = trim((string) ($biometricRow?->biometric_selfie_path ?? '')) ?: $latestVerification?->image_path;
+        $summary['biometric_selfie_disk'] = trim((string) ($biometricRow?->biometric_selfie_disk ?? '')) ?: ($summary['biometric_selfie_path'] ? 'private' : null);
+        $summary['biometric_selfie_uploaded_at'] = $biometricRow?->biometric_selfie_uploaded_at
+            ?? $latestVerification?->created_at;
+        $summary['biometric_selfie_url'] = $this->resolveAdminBiometricSelfieUrl(
+            $summary['biometric_selfie_path'],
+            $summary['biometric_selfie_disk'],
+            $user->id,
+        );
         $summary['identityVerifications'] = $user->identityVerifications->map(fn ($verification) => [
             'id' => $verification->id,
             'provider' => $verification->provider,

@@ -180,6 +180,26 @@ class PlataformaVuelosApiTest extends TestCase
             ->assertJsonPath('errors.ine_back.0', 'El reverso de la INE es obligatorio.');
     }
 
+
+    public function test_client_registration_does_not_duplicate_accented_surname_when_full_name_and_last_name_overlap(): void
+    {
+        $response = $this->postJson('/api/v1/auth/register', [
+            'name' => 'DE JESUS KEVIN LAEL',
+            'full_name' => '',
+            'last_name' => 'de jesús',
+            'email' => 'kevin.dejesus@test.com',
+            'password' => 'password123',
+            'password_confirmation' => 'password123',
+            'role' => 'client',
+        ])->assertCreated();
+
+        $response->assertJsonPath('user.name', 'KEVIN LAEL de jesús');
+
+        $user = Usuario::query()->where('email', 'kevin.dejesus@test.com')->firstOrFail();
+
+        $this->assertSame('KEVIN LAEL de jesús', $user->name);
+    }
+
     public function test_passport_registration_accepts_front_image_without_curp(): void
     {
         Storage::fake('public');
@@ -667,6 +687,59 @@ class PlataformaVuelosApiTest extends TestCase
                     'identity_verifications',
                 ],
             ]);
+    }
+
+
+    public function test_admin_user_detail_exposes_signed_identity_asset_urls_when_files_exist(): void
+    {
+        Storage::fake('private');
+        $this->seed();
+
+        $adminLogin = $this->postJson('/api/v1/auth/login', [
+            'email' => 'admin@privateflights.test',
+            'password' => 'password',
+        ])->assertOk();
+
+        $adminToken = $adminLogin->json('token');
+
+        $register = $this->post('/api/v1/auth/register', [
+            'name' => 'Cliente Evidencia',
+            'email' => 'cliente.evidencia@test.com',
+            'phone' => '+52 555 010 1010',
+            'password' => 'password123',
+            'password_confirmation' => 'password123',
+            'role' => 'client',
+            'document_type' => 'INE',
+            'document_number' => 'ABC123456789',
+            'identity_validation_required' => '1',
+            'ine_curp' => 'TEST910425HDFXXX01',
+            'ine_scan_status' => 'scanned',
+            'identity_verification_status' => 'approved',
+            'identity_verified' => '1',
+            'face_detected' => '1',
+            'ine_front' => UploadedFile::fake()->image('ine-front.jpg'),
+            'ine_back' => UploadedFile::fake()->image('ine-back.jpg'),
+            'selfie_biometric' => UploadedFile::fake()->image('selfie.jpg'),
+        ])->assertCreated();
+
+        $clientId = $register->json('user.id');
+
+        $user = Usuario::query()->with('profile')->findOrFail($clientId);
+        $this->assertTrue(Storage::disk('private')->exists($user->profile->ine_front_path));
+        $this->assertTrue(Storage::disk('private')->exists($user->profile->ine_back_path));
+        $this->assertTrue(Storage::disk('private')->exists($user->biometric_selfie_path));
+
+        $detail = $this->withToken($adminToken)
+            ->getJson("/api/v1/admin/users/{$clientId}")
+            ->assertOk();
+
+        $detail
+            ->assertJsonPath('user.profile.ine_front_path', $user->profile->ine_front_path)
+            ->assertJsonPath('user.profile.ine_back_path', $user->profile->ine_back_path);
+
+        $this->assertNotEmpty((string) $detail->json('user.profile.ine_front_url'));
+        $this->assertNotEmpty((string) $detail->json('user.profile.ine_back_url'));
+        $this->assertNotEmpty((string) $detail->json('user.biometric_selfie_url'));
     }
 
     public function test_selected_provider_receives_request_in_provider_queue(): void

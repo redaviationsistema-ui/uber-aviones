@@ -477,19 +477,21 @@ class Usuario extends Authenticatable implements MustVerifyEmail
 
     public function getBiometricSelfieUrlAttribute(): ?string
     {
-        if (! $this->biometric_selfie_path) {
+        $path = $this->resolvedBiometricSelfiePath();
+
+        if (! $path) {
             return null;
         }
 
-        $disk = $this->biometric_selfie_disk ?: 'public';
+        $disk = $this->resolvedBiometricSelfieDisk();
 
         if ($disk === 'public') {
-            return Storage::disk('public')->url($this->biometric_selfie_path);
+            return Storage::disk('public')->url($path);
         }
 
         if ($disk === 's3') {
             return Storage::disk('s3')->temporaryUrl(
-                $this->biometric_selfie_path,
+                $path,
                 now()->addMinutes(10)
             );
         }
@@ -500,6 +502,34 @@ class Usuario extends Authenticatable implements MustVerifyEmail
             ['user' => $this->getKey()],
             absolute: false,
         );
+    }
+
+    public function resolvedBiometricSelfiePath(): ?string
+    {
+        $path = trim((string) ($this->getRawOriginal('biometric_selfie_path') ?? $this->biometric_selfie_path ?? ''));
+
+        if ($path !== '') {
+            return $path;
+        }
+
+        $latestVerification = $this->relationLoaded('identityVerifications')
+            ? $this->identityVerifications->sortByDesc('created_at')->first()
+            : $this->identityVerifications()->latest()->first();
+
+        $fallbackPath = trim((string) ($latestVerification?->image_path ?? ''));
+
+        return $fallbackPath !== '' ? $fallbackPath : null;
+    }
+
+    public function resolvedBiometricSelfieDisk(): string
+    {
+        $disk = trim((string) ($this->getRawOriginal('biometric_selfie_disk') ?? $this->biometric_selfie_disk ?? ''));
+
+        if ($disk !== '') {
+            return $disk;
+        }
+
+        return $this->resolvedBiometricSelfiePath() ? 'private' : 'public';
     }
 
     public function resolvedProviderId(): ?int

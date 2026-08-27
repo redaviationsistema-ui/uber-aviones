@@ -651,12 +651,15 @@ class AutenticacionControlador extends ControladorBase
 
         $valueTokens = preg_split('/\s+/u', $normalizedValue) ?: [];
         $surnameTokens = preg_split('/\s+/u', $normalizedSurname) ?: [];
+        $comparisonValueTokens = array_map([$this, 'normalizePersonNameComparisonValue'], $valueTokens);
+        $comparisonSurnameTokens = array_map([$this, 'normalizePersonNameComparisonValue'], $surnameTokens);
 
-        if ($this->matchesTokenSequenceAtStart($valueTokens, $surnameTokens)) {
+        if ($this->matchesTokenSequenceAtStart($comparisonValueTokens, $comparisonSurnameTokens)) {
             $valueTokens = array_slice($valueTokens, count($surnameTokens));
+            $comparisonValueTokens = array_slice($comparisonValueTokens, count($comparisonSurnameTokens));
         }
 
-        if ($this->matchesTokenSequenceAtEnd($valueTokens, $surnameTokens)) {
+        if ($this->matchesTokenSequenceAtEnd($comparisonValueTokens, $comparisonSurnameTokens)) {
             $valueTokens = array_slice($valueTokens, 0, count($valueTokens) - count($surnameTokens));
         }
 
@@ -665,7 +668,20 @@ class AutenticacionControlador extends ControladorBase
             return null;
         }
 
-        return strcasecmp($cleaned, $normalizedSurname) === 0 ? null : $cleaned;
+        return $this->normalizePersonNameComparisonValue($cleaned) === $this->normalizePersonNameComparisonValue($normalizedSurname)
+            ? null
+            : $cleaned;
+    }
+
+    private function normalizePersonNameComparisonValue(?string $value): string
+    {
+        $normalized = $this->normalizePersonName($value);
+
+        if (! $normalized) {
+            return '';
+        }
+
+        return Str::upper(Str::ascii($normalized));
     }
 
     private function matchesTokenSequenceAtStart(array $tokens, array $sequence): bool

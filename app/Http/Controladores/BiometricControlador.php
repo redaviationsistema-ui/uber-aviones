@@ -15,8 +15,8 @@ class BiometricControlador extends ControladorBase
 {
     public function showStoredSelfie(Request $request, Usuario $user): Response
     {
-        $path = $user->biometric_selfie_path;
-        $disk = $user->biometric_selfie_disk ?: 'public';
+        $path = $user->resolvedBiometricSelfiePath();
+        $disk = $user->resolvedBiometricSelfieDisk();
 
         abort_unless($path, 404);
         abort_unless(Storage::disk($disk)->exists($path), 404);
