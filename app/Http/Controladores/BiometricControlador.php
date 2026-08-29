@@ -8,17 +8,17 @@ use Aws\Exception\AwsException;
 use Aws\Rekognition\RekognitionClient;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Http\Response;
 use Illuminate\Support\Facades\Storage;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class BiometricControlador extends ControladorBase
 {
-    public function showStoredSelfie(Request $request, Usuario $user): Response
+    public function showStoredSelfie(Request $request, Usuario $user): StreamedResponse
     {
         $path = $user->resolvedBiometricSelfiePath();
         $disk = $user->resolvedBiometricSelfieDisk();
 
-        abort_unless($path, 404);
+        abort_unless($path !== '', 404);
         abort_unless(Storage::disk($disk)->exists($path), 404);
 
         return Storage::disk($disk)->response(
@@ -28,12 +28,13 @@ class BiometricControlador extends ControladorBase
         );
     }
 
-    public function showStoredIdentityDocument(Request $request, Usuario $user, string $side): Response
+    public function showStoredIdentityDocument(Request $request, Usuario $user, string $side): StreamedResponse
     {
         $profile = $user->profile;
         abort_unless($profile, 404);
 
-        $path = $side === 'back' ? $profile->ine_back_path : $profile->ine_front_path;
+        $rawPath = $side === 'back' ? $profile->ine_back_path : $profile->ine_front_path;
+        $path = $this->normalizePrivateStoragePath((string) $rawPath);
 
         abort_unless($path, 404);
         abort_unless(Storage::disk('private')->exists($path), 404);
@@ -43,6 +44,27 @@ class BiometricControlador extends ControladorBase
             basename($path),
             ['Content-Disposition' => 'inline; filename="'.basename($path).'"']
         );
+    }
+
+
+    private function normalizePrivateStoragePath(string $path): string
+    {
+        $normalized = trim($path);
+
+        if ($normalized === '') {
+            return '';
+        }
+
+        if (filter_var($normalized, FILTER_VALIDATE_URL)) {
+            $urlPath = parse_url($normalized, PHP_URL_PATH);
+            $normalized = is_string($urlPath) ? $urlPath : $normalized;
+        }
+
+        $normalized = ltrim($normalized, '/');
+        $normalized = preg_replace('#^storage/#', '', $normalized) ?? $normalized;
+        $normalized = preg_replace('#^private/#', '', $normalized) ?? $normalized;
+
+        return $normalized;
     }
 
     public function detectFace(Request $request): JsonResponse

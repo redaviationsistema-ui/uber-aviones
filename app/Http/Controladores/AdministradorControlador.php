@@ -1163,6 +1163,10 @@ class AdministradorControlador extends ControladorBase
                 'base_airport' => $user->profile->base_airport,
                 'tax_data' => $user->profile->tax_data,
             ] : null,
+            'identity_verification_status' => $user->identity_verification_status,
+            'identity_verified' => (bool) $user->identity_verified,
+            'biometric_image_saved' => (bool) $user->biometric_image_saved,
+            'has_biometric_selfie' => (bool) ($user->resolvedBiometricSelfiePath() || $user->biometric_image_saved),
             'provider' => $user->provider ? [
                 'id' => $user->provider->id,
                 'company_name' => $user->provider->company_name,
@@ -1210,6 +1214,10 @@ class AdministradorControlador extends ControladorBase
                 'city' => $user->profile->city,
                 'base_airport' => $user->profile->base_airport,
             ] : null,
+            'identity_verification_status' => $user->identity_verification_status,
+            'identity_verified' => (bool) $user->identity_verified,
+            'biometric_image_saved' => (bool) $user->biometric_image_saved,
+            'has_biometric_selfie' => (bool) ($user->resolvedBiometricSelfiePath() || $user->biometric_image_saved),
             'demo' => $user->demo ? [
                 'status' => $user->demo->status,
                 'started_at' => $user->demo->started_at,
@@ -1225,6 +1233,14 @@ class AdministradorControlador extends ControladorBase
         $summary['provider'] = $user->provider;
         $summary['ownedProvider'] = $user->ownedProvider;
         $summary['subscriptions'] = $user->subscriptions;
+        $summary['identity_verification_status'] = $user->identity_verification_status;
+        $summary['identity_verification_message'] = $user->identity_verification_message;
+        $summary['identity_verified'] = (bool) $user->identity_verified;
+        $summary['biometric_image_saved'] = (bool) $user->biometric_image_saved;
+        $summary['biometric_selfie_path'] = $user->resolvedBiometricSelfiePath();
+        $summary['biometric_selfie_disk'] = $user->resolvedBiometricSelfieDisk();
+        $summary['biometric_selfie_uploaded_at'] = $user->biometric_selfie_uploaded_at;
+        $summary['biometric_selfie_url'] = $user->biometric_selfie_url;
         $summary['identityVerifications'] = $user->identityVerifications;
         $summary['identity_verifications'] = $user->identityVerifications;
 
