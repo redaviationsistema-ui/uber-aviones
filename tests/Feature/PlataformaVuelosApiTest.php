@@ -689,6 +689,48 @@ class PlataformaVuelosApiTest extends TestCase
             ]);
     }
 
+    public function test_admin_user_lists_expose_consistent_biometric_selfie_state(): void
+    {
+        Storage::fake('private');
+        $this->seed();
+
+        $adminToken = $this->postJson('/api/v1/auth/login', [
+            'email' => 'admin@privateflights.test',
+            'password' => 'password',
+        ])->assertOk()->json('token');
+
+        $register = $this->post('/api/v1/auth/register', [
+            'name' => 'Cliente Selfie Admin',
+            'email' => 'cliente.selfie.admin@test.com',
+            'password' => 'password123',
+            'password_confirmation' => 'password123',
+            'role' => 'client',
+            'identity_verification_status' => 'approved',
+            'identity_verified' => '1',
+            'face_detected' => '1',
+            'biometric_image_saved' => '1',
+            'selfie_biometric' => UploadedFile::fake()->image('selfie.jpg'),
+        ])->assertCreated();
+
+        $clientId = $register->json('user.id');
+
+        foreach ([
+            ['/api/v1/admin/users', 'users.data'],
+            ['/api/v1/admin/clientes', 'clients.data'],
+        ] as [$endpoint, $collectionPath]) {
+            $response = $this->withToken($adminToken)->getJson($endpoint)->assertOk();
+            $record = collect($response->json($collectionPath))->firstWhere('id', $clientId);
+
+            $this->assertNotNull($record, "El usuario biometrico no fue devuelto por {$endpoint}.");
+            $this->assertSame('approved', $record['identity_verification_status']);
+            $this->assertTrue($record['identity_verified']);
+            $this->assertTrue($record['biometric_image_saved']);
+            $this->assertTrue($record['has_biometric_selfie']);
+            $this->assertNotEmpty($record['biometric_selfie_path']);
+            $this->assertNotEmpty($record['biometric_selfie_url']);
+        }
+    }
+
 
     public function test_admin_user_detail_exposes_signed_identity_asset_urls_when_files_exist(): void
     {

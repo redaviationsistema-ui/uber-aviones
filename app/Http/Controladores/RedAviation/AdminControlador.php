@@ -710,6 +710,12 @@ class AdminControlador extends ControladorBase
                 'paid_access_at',
                 'access_payment_id',
                 'access_expires_at',
+                'identity_verification_status',
+                'identity_verified',
+                'biometric_image_saved',
+                'biometric_selfie_path',
+                'biometric_selfie_disk',
+                'biometric_selfie_uploaded_at',
                 'updated_at',
             ])
             ->with([
@@ -758,6 +764,12 @@ class AdminControlador extends ControladorBase
                 'paid_access_at',
                 'access_payment_id',
                 'access_expires_at',
+                'identity_verification_status',
+                'identity_verified',
+                'biometric_image_saved',
+                'biometric_selfie_path',
+                'biometric_selfie_disk',
+                'biometric_selfie_uploaded_at',
                 'updated_at',
             ])
             ->where(function ($query) {
@@ -3583,6 +3595,7 @@ class AdminControlador extends ControladorBase
     private function serializeAdminUserSummary(Usuario $user): array
     {
         $commercialAccess = $this->serializeAdminCommercialAccess($user);
+        $biometricSelfiePath = $user->resolvedBiometricSelfiePath();
 
         return [
             'id' => $user->id,
@@ -3623,7 +3636,9 @@ class AdminControlador extends ControladorBase
             'identity_verification_status' => $user->identity_verification_status,
             'identity_verified' => (bool) $user->identity_verified,
             'biometric_image_saved' => (bool) $user->biometric_image_saved,
-            'has_biometric_selfie' => (bool) ($user->resolvedBiometricSelfiePath() || $user->biometric_image_saved),
+            'has_biometric_selfie' => filled($biometricSelfiePath),
+            'biometric_selfie_path' => $biometricSelfiePath,
+            'biometric_selfie_url' => filled($biometricSelfiePath) ? $user->biometric_selfie_url : null,
             'provider' => $user->provider ? [
                 'id' => $user->provider->id,
                 'company_name' => $user->provider->company_name,
@@ -3678,6 +3693,8 @@ class AdminControlador extends ControladorBase
 
     private function serializeAdminClientSummary(Usuario $user): array
     {
+        $biometricSelfiePath = $user->resolvedBiometricSelfiePath();
+
         return [
             'id' => $user->id,
             'name' => $user->name,
@@ -3709,7 +3726,9 @@ class AdminControlador extends ControladorBase
             'identity_verification_status' => $user->identity_verification_status,
             'identity_verified' => (bool) $user->identity_verified,
             'biometric_image_saved' => (bool) $user->biometric_image_saved,
-            'has_biometric_selfie' => (bool) ($user->resolvedBiometricSelfiePath() || $user->biometric_image_saved),
+            'has_biometric_selfie' => filled($biometricSelfiePath),
+            'biometric_selfie_path' => $biometricSelfiePath,
+            'biometric_selfie_url' => filled($biometricSelfiePath) ? $user->biometric_selfie_url : null,
             'demo' => $user->demo ? [
                 'status' => $user->demo->status,
                 'started_at' => $user->demo->started_at,
