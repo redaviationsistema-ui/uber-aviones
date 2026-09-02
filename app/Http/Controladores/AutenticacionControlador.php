@@ -4,8 +4,8 @@ namespace App\Http\Controladores;
 
 use App\Modelos\Aeropuerto;
 use App\Modelos\IdentityVerification;
-use App\Modelos\TokenApi;
 use App\Modelos\Proveedor;
+use App\Modelos\TokenApi;
 use App\Modelos\Usuario;
 use App\Servicios\Identidad\IdentityStorageServicio;
 use Illuminate\Auth\Events\PasswordReset;
@@ -14,12 +14,15 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Password;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
+use Throwable;
 
 class AutenticacionControlador extends ControladorBase
 {
@@ -188,150 +191,206 @@ class AutenticacionControlador extends ControladorBase
             ], 422);
         }
 
-        $identityStorage = app(IdentityStorageServicio::class);
-        $ineFrontPath = $request->hasFile('ine_front')
-            ? $identityStorage->store($request->file('ine_front'), 'identity/ine/front')
-            : null;
-        $ineBackPath = $request->hasFile('ine_back')
-            ? $identityStorage->store($request->file('ine_back'), 'identity/ine/back')
-            : null;
         $birthDate = $data['birth_date'] ?? $data['birthDate'] ?? null;
         $baseAirport = $data['base_airport'] ?? $data['base'] ?? null;
         $baseCity = $data['city'] ?? $data['base'] ?? null;
         $resolvedBaseAirport = $this->findAirportByCode($baseAirport);
+        $identityStorage = app(IdentityStorageServicio::class);
+        $uploadedIdentityPaths = [];
+        $this->logRegistrationIdentityStorageConfig($request, $identityStorage);
 
-        $user = Usuario::create($data + [
-            'role' => $persistedRole,
-            'operational_role' => $operationalRole,
-            'identity_verification_status' => $data['identity_verification_status'] ?? null,
-            'identity_verification_message' => $data['identity_verification_message'] ?? null,
-            'identity_verified' => (bool) ($data['identity_verified'] ?? false),
-            'face_detected' => (bool) ($data['face_detected'] ?? false),
-            'face_match_score' => $data['face_match_score'] ?? null,
-            'liveness_score' => $data['liveness_score'] ?? null,
-            'image_storage_score' => $data['image_storage_score'] ?? null,
-            'biometric_image_saved' => (bool) ($data['biometric_image_saved'] ?? false),
-            'biometric_captured_at' => $data['biometric_captured_at'] ?? null,
-            'biometric_provider' => $data['biometric_provider'] ?? null,
-            'biometric_template_type' => $data['biometric_template_type'] ?? null,
-            'biometric_selfie_path' => null,
-            'biometric_selfie_disk' => null,
-            'biometric_selfie_uploaded_at' => null,
-        ]);
+        try {
+            [$user, $responseExtras] = DB::transaction(function () use (
+                $request,
+                $data,
+                $role,
+                $persistedRole,
+                $operationalRole,
+                $birthDate,
+                $baseAirport,
+                $baseCity,
+                $resolvedBaseAirport,
+                $registrationIdentification,
+                $identityStorage,
+                &$uploadedIdentityPaths,
+            ) {
+                $ineFrontPath = $request->hasFile('ine_front')
+                    ? $this->storeRegistrationIdentityFile(
+                        $identityStorage,
+                        $request->file('ine_front'),
+                        'identity/ine/front',
+                        $uploadedIdentityPaths,
+                    )
+                    : null;
+                $this->logRegistrationIdentityStorageState('after_ine_front_store', $identityStorage, $uploadedIdentityPaths);
+                $ineBackPath = $request->hasFile('ine_back')
+                    ? $this->storeRegistrationIdentityFile(
+                        $identityStorage,
+                        $request->file('ine_back'),
+                        'identity/ine/back',
+                        $uploadedIdentityPaths,
+                    )
+                    : null;
+                $this->logRegistrationIdentityStorageState('after_ine_back_store', $identityStorage, $uploadedIdentityPaths);
 
-        $selfiePath = null;
-        if ($request->hasFile('selfie_biometric')) {
-            [$selfiePath, $selfieDisk] = $this->storeBiometricSelfie(
-                $request->file('selfie_biometric'),
-                $user
-            );
+                $user = Usuario::create($data + [
+                    'role' => $persistedRole,
+                    'operational_role' => $operationalRole,
+                    'identity_verification_status' => $data['identity_verification_status'] ?? null,
+                    'identity_verification_message' => $data['identity_verification_message'] ?? null,
+                    'identity_verified' => (bool) ($data['identity_verified'] ?? false),
+                    'face_detected' => (bool) ($data['face_detected'] ?? false),
+                    'face_match_score' => $data['face_match_score'] ?? null,
+                    'liveness_score' => $data['liveness_score'] ?? null,
+                    'image_storage_score' => $data['image_storage_score'] ?? null,
+                    'biometric_image_saved' => (bool) ($data['biometric_image_saved'] ?? false),
+                    'biometric_captured_at' => $data['biometric_captured_at'] ?? null,
+                    'biometric_provider' => $data['biometric_provider'] ?? null,
+                    'biometric_template_type' => $data['biometric_template_type'] ?? null,
+                    'biometric_selfie_path' => null,
+                    'biometric_selfie_disk' => null,
+                    'biometric_selfie_uploaded_at' => null,
+                ]);
 
-            $user->forceFill([
-                'biometric_selfie_path' => $selfiePath,
-                'biometric_selfie_disk' => $selfieDisk,
-                'biometric_selfie_uploaded_at' => now(),
-                'biometric_image_saved' => true,
-            ])->save();
+                $selfiePath = null;
+                if ($request->hasFile('selfie_biometric')) {
+                    [$selfiePath, $selfieDisk] = $this->storeBiometricSelfie(
+                        $request->file('selfie_biometric'),
+                        $user,
+                        $uploadedIdentityPaths,
+                    );
+
+                    $user->forceFill([
+                        'biometric_selfie_path' => $selfiePath,
+                        'biometric_selfie_disk' => $selfieDisk,
+                        'biometric_selfie_uploaded_at' => now(),
+                        'biometric_image_saved' => true,
+                    ])->save();
+                }
+                $this->logRegistrationIdentityStorageState('after_selfie_store', $identityStorage, $uploadedIdentityPaths, $user);
+
+                $user->syncRoles(
+                    array_values(array_filter(array_unique([$persistedRole, $operationalRole]))),
+                    $operationalRole ?: $role
+                );
+
+                $profileTaxData = [];
+
+                if ($registrationIdentification) {
+                    $profileTaxData['official_identification'] = $registrationIdentification;
+                }
+
+                $user->profile()->updateOrCreate(
+                    ['user_id' => $user->id],
+                    $this->filterPersistableProfileAttributes([
+                        'client_type' => $data['client_type'] ?? null,
+                        'company_name' => $role === Usuario::ROLE_CLIENT ? ($data['company_name'] ?? null) : null,
+                        'tax_id' => $data['tax_id'] ?? null,
+                        'birth_date' => $birthDate,
+                        'nationality' => $data['nationality'] ?? null,
+                        'document_type' => $data['document_type'] ?? null,
+                        'document_number' => $data['document_number'] ?? null,
+                        'document_issuing_country' => $data['document_issuing_country'] ?? null,
+                        'identity_validation_required' => $request->boolean('identity_validation_required'),
+                        'ine_curp' => $data['curp'] ?? $data['ine_curp'] ?? null,
+                        'ine_cic' => $data['ine_cic'] ?? null,
+                        'ine_ocr' => $data['ine_ocr'] ?? null,
+                        'ine_scan_raw' => $data['ine_scan_raw'] ?? null,
+                        'ine_scan_status' => $data['ine_scan_status'] ?? null,
+                        'ine_front_path' => $ineFrontPath,
+                        'ine_back_path' => $ineBackPath,
+                        'tax_data' => $profileTaxData ?: null,
+                        'city' => $baseCity,
+                        'base_airport' => $baseAirport,
+                        'base_airport_id' => $resolvedBaseAirport?->id,
+                    ])
+                );
+
+                if (
+                    $selfiePath
+                    || ! empty($data['identity_verification_status'])
+                    || array_key_exists('face_confidence', $data)
+                ) {
+                    IdentityVerification::create([
+                        'user_id' => $user->id,
+                        'provider' => $data['biometric_provider'] ?? 'camera_capture',
+                        'template_type' => $data['biometric_template_type'] ?? 'selfie-photo',
+                        'identity_verified' => (bool) ($data['identity_verified'] ?? false),
+                        'status' => $data['identity_verification_status']
+                            ?? ((bool) ($data['identity_verified'] ?? false) ? 'approved' : 'pending'),
+                        'face_confidence' => $data['face_confidence'] ?? null,
+                        'face_match_score' => $data['face_match_score'] ?? null,
+                        'liveness_score' => $data['liveness_score'] ?? null,
+                        'brightness' => $data['quality_brightness'] ?? null,
+                        'sharpness' => $data['quality_sharpness'] ?? null,
+                        'yaw' => $data['pose_yaw'] ?? null,
+                        'pitch' => $data['pose_pitch'] ?? null,
+                        'roll' => $data['pose_roll'] ?? null,
+                        'face_occluded' => (bool) ($data['face_occluded'] ?? false),
+                        'image_path' => $selfiePath,
+                    ]);
+                }
+
+                $responseExtras = [];
+
+                if ($user->role === Usuario::ROLE_PROVIDER && $user->operational_role !== Usuario::ROLE_SOBRECARGO) {
+                    $provider = Proveedor::create([
+                        'user_id' => $user->id,
+                        'company_name' => $data['company_name'],
+                        'commercial_name' => $data['commercial_name'] ?? $data['company_name'],
+                        'legal_name' => $data['legal_name'] ?? null,
+                        'rfc' => $data['rfc'] ?? null,
+                        'company_phone' => $data['company_phone'] ?? $data['phone'] ?? null,
+                        'company_email' => $data['company_email'] ?? $data['email'] ?? null,
+                        'base_airport' => $baseAirport,
+                        'status' => 'pending',
+                        'representative_name' => $data['representative_name'] ?? $data['name'],
+                        'representative_phone' => $data['representative_phone'] ?? $data['phone'] ?? null,
+                        'birth_date' => $birthDate,
+                        'curp' => $data['curp'] ?? $data['ine_curp'] ?? null,
+                        'nationality' => $data['nationality'] ?? null,
+                        'document_type' => $data['document_type'] ?? null,
+                        'document_number' => $data['document_number'] ?? null,
+                        'document_expiration' => $data['document_expiration'] ?? null,
+                        'approval_status' => 'pending',
+                    ]);
+
+                    $user->forceFill(['provider_id' => $provider->id])->save();
+
+                    $responseExtras = [
+                        'message' => 'Proveedor registrado. Pendiente de validacion por Admin.',
+                        'provider_status' => 'pending_validation',
+                        'approval_status' => 'pending',
+                    ];
+                }
+
+                foreach ($uploadedIdentityPaths as $path) {
+                    if (! $identityStorage->exists($path)) {
+                        throw new \RuntimeException('No fue posible confirmar el almacenamiento de los documentos de identidad.');
+                    }
+                }
+                $this->logRegistrationIdentityStorageState('before_commit', $identityStorage, $uploadedIdentityPaths, $user);
+
+                return [$user, $responseExtras];
+            });
+        } catch (Throwable $exception) {
+            $this->cleanupRegistrationIdentityFiles($identityStorage, $uploadedIdentityPaths, $exception);
+
+            report($exception);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'No fue posible completar el registro de identidad. Intenta nuevamente.',
+            ], 500);
         }
 
-        $user->syncRoles(
-            array_values(array_filter(array_unique([$persistedRole, $operationalRole]))),
-            $operationalRole ?: $role
-        );
-
-        $profileTaxData = [];
-
-        if ($registrationIdentification) {
-            $profileTaxData['official_identification'] = $registrationIdentification;
-        }
-
-        $user->profile()->updateOrCreate(
-            ['user_id' => $user->id],
-            $this->filterPersistableProfileAttributes([
-                'client_type' => $data['client_type'] ?? null,
-                'company_name' => $role === Usuario::ROLE_CLIENT ? ($data['company_name'] ?? null) : null,
-                'tax_id' => $data['tax_id'] ?? null,
-                'birth_date' => $birthDate,
-                'nationality' => $data['nationality'] ?? null,
-                'document_type' => $data['document_type'] ?? null,
-                'document_number' => $data['document_number'] ?? null,
-                'document_issuing_country' => $data['document_issuing_country'] ?? null,
-                'identity_validation_required' => $request->boolean('identity_validation_required'),
-                'ine_curp' => $data['curp'] ?? $data['ine_curp'] ?? null,
-                'ine_cic' => $data['ine_cic'] ?? null,
-                'ine_ocr' => $data['ine_ocr'] ?? null,
-                'ine_scan_raw' => $data['ine_scan_raw'] ?? null,
-                'ine_scan_status' => $data['ine_scan_status'] ?? null,
-                'ine_front_path' => $ineFrontPath,
-                'ine_back_path' => $ineBackPath,
-                'tax_data' => $profileTaxData ?: null,
-                'city' => $baseCity,
-                'base_airport' => $baseAirport,
-                'base_airport_id' => $resolvedBaseAirport?->id,
-            ])
-        );
-
-        if (
-            $selfiePath
-            || ! empty($data['identity_verification_status'])
-            || array_key_exists('face_confidence', $data)
-        ) {
-            IdentityVerification::create([
-                'user_id' => $user->id,
-                'provider' => $data['biometric_provider'] ?? 'camera_capture',
-                'template_type' => $data['biometric_template_type'] ?? 'selfie-photo',
-                'identity_verified' => (bool) ($data['identity_verified'] ?? false),
-                'status' => $data['identity_verification_status']
-                    ?? ((bool) ($data['identity_verified'] ?? false) ? 'approved' : 'pending'),
-                'face_confidence' => $data['face_confidence'] ?? null,
-                'face_match_score' => $data['face_match_score'] ?? null,
-                'liveness_score' => $data['liveness_score'] ?? null,
-                'brightness' => $data['quality_brightness'] ?? null,
-                'sharpness' => $data['quality_sharpness'] ?? null,
-                'yaw' => $data['pose_yaw'] ?? null,
-                'pitch' => $data['pose_pitch'] ?? null,
-                'roll' => $data['pose_roll'] ?? null,
-                'face_occluded' => (bool) ($data['face_occluded'] ?? false),
-                'image_path' => $selfiePath,
-            ]);
-        }
-
-        $responseExtras = [];
-
-        if ($user->role === Usuario::ROLE_PROVIDER && $user->operational_role !== Usuario::ROLE_SOBRECARGO) {
-            $provider = Proveedor::create([
-                'user_id' => $user->id,
-                'company_name' => $data['company_name'],
-                'commercial_name' => $data['commercial_name'] ?? $data['company_name'],
-                'legal_name' => $data['legal_name'] ?? null,
-                'rfc' => $data['rfc'] ?? null,
-                'company_phone' => $data['company_phone'] ?? $data['phone'] ?? null,
-                'company_email' => $data['company_email'] ?? $data['email'] ?? null,
-                'base_airport' => $baseAirport,
-                'status' => 'pending',
-                'representative_name' => $data['representative_name'] ?? $data['name'],
-                'representative_phone' => $data['representative_phone'] ?? $data['phone'] ?? null,
-                'birth_date' => $birthDate,
-                'curp' => $data['curp'] ?? $data['ine_curp'] ?? null,
-                'nationality' => $data['nationality'] ?? null,
-                'document_type' => $data['document_type'] ?? null,
-                'document_number' => $data['document_number'] ?? null,
-                'document_expiration' => $data['document_expiration'] ?? null,
-                'approval_status' => 'pending',
-            ]);
-
-            $user->forceFill(['provider_id' => $provider->id])->save();
-
-            $responseExtras = [
-                'message' => 'Proveedor registrado. Pendiente de validacion por Admin.',
-                'provider_status' => 'pending_validation',
-                'approval_status' => 'pending',
-            ];
-        }
+        $this->logRegistrationIdentityStorageState('after_commit', $identityStorage, $uploadedIdentityPaths, $user);
 
         if ($registrationIdentification) {
             $this->forgetRegistrationIdentificationRecord($registrationIdentification['id'] ?? null);
         }
+
+        $this->logRegistrationIdentityStorageState('before_201', $identityStorage, $uploadedIdentityPaths, $user);
 
         return $this->authenticatedResponse($request, $user->fresh(), 201, $responseExtras);
     }
@@ -1150,7 +1209,7 @@ class AutenticacionControlador extends ControladorBase
             'ine_back_path',
         ]);
 
-        return 'profile:' . implode(',', $columns);
+        return 'profile:'.implode(',', $columns);
     }
 
     private function filterPersistableProfileAttributes(array $attributes): array
@@ -1206,20 +1265,94 @@ class AutenticacionControlador extends ControladorBase
         return $this->normalizeDocumentType($documentType) === 'INE';
     }
 
-    private function storeBiometricSelfie(UploadedFile $file, Usuario $user): array
+    private function storeBiometricSelfie(UploadedFile $file, Usuario $user, array &$uploadedIdentityPaths): array
     {
         $storage = app(IdentityStorageServicio::class);
         $disk = $storage->diskName();
         $extension = strtolower($file->getClientOriginalExtension() ?: $file->extension() ?: 'jpg');
         $directory = sprintf('clientes/%d/biometria', $user->id);
         $filename = sprintf('%s.%s', (string) Str::uuid(), $extension);
-        $path = $file->storeAs($directory, $filename, $disk);
-
-        if (! is_string($path) || $path === '' || ! $storage->disk()->exists($path)) {
-            throw new \RuntimeException('No fue posible guardar la selfie biometrica.');
-        }
+        $path = $storage->storeAs($file, $directory, $filename);
+        $uploadedIdentityPaths[] = $path;
 
         return [$path, $disk];
+    }
+
+    private function storeRegistrationIdentityFile(
+        IdentityStorageServicio $storage,
+        UploadedFile $file,
+        string $directory,
+        array &$uploadedIdentityPaths,
+    ): string {
+        $path = $storage->store($file, $directory);
+        $uploadedIdentityPaths[] = $path;
+
+        return $path;
+    }
+
+    private function cleanupRegistrationIdentityFiles(
+        IdentityStorageServicio $storage,
+        array $uploadedIdentityPaths,
+        Throwable $originalException,
+    ): void {
+        foreach (array_unique($uploadedIdentityPaths) as $path) {
+            try {
+                if (! $storage->delete($path)) {
+                    Log::warning('[IDENTITY_STORAGE_CLEANUP_FAILED]', [
+                        'disk' => $storage->diskName(),
+                        'path' => $path,
+                        'reason' => 'delete_returned_false',
+                        'original_exception' => $originalException::class,
+                    ]);
+                }
+            } catch (Throwable $cleanupException) {
+                Log::warning('[IDENTITY_STORAGE_CLEANUP_FAILED]', [
+                    'disk' => $storage->diskName(),
+                    'path' => $path,
+                    'message' => $cleanupException->getMessage(),
+                    'original_exception' => $originalException::class,
+                ]);
+            }
+        }
+    }
+
+    private function logRegistrationIdentityStorageConfig(Request $request, IdentityStorageServicio $storage): void
+    {
+        $s3 = config('filesystems.disks.s3', []);
+        $endpoint = trim((string) ($s3['endpoint'] ?? ''));
+
+        Log::info('[IDENTITY_REGISTRATION_STORAGE_CONFIG]', [
+            'request_id' => $request->headers->get('X-Request-Id') ?? $request->attributes->get('request_id'),
+            'identity_disk' => $storage->diskName(),
+            'bucket' => $s3['bucket'] ?? null,
+            'region' => $s3['region'] ?? null,
+            'endpoint_host' => $endpoint === '' ? null : parse_url($endpoint, PHP_URL_HOST),
+            'path_style' => (bool) ($s3['use_path_style_endpoint'] ?? false),
+        ]);
+    }
+
+    private function logRegistrationIdentityStorageState(
+        string $stage,
+        IdentityStorageServicio $storage,
+        array $paths,
+        ?Usuario $user = null,
+    ): void {
+        $objects = [];
+
+        foreach ($paths as $path) {
+            try {
+                $objects[$path] = $storage->exists($path);
+            } catch (Throwable $exception) {
+                $objects[$path] = 'check_failed';
+            }
+        }
+
+        Log::info('[IDENTITY_REGISTRATION_STORAGE_CHECK]', [
+            'stage' => $stage,
+            'user_id' => $user?->id,
+            'disk' => $storage->diskName(),
+            'objects' => $objects,
+        ]);
     }
 
     private function authCookieName(): string

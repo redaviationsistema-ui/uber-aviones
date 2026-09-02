@@ -13,6 +13,33 @@ class IdentityStorageFlowTest extends TestCase
 {
     use RefreshDatabase;
 
+    public function test_registration_rolls_back_database_and_uploaded_identity_files_when_a_database_step_fails(): void
+    {
+        Storage::fake('s3');
+        config(['filesystems.identity_disk' => 's3']);
+
+        Usuario::creating(static function (): void {
+            throw new \RuntimeException('Forced database failure after identity uploads.');
+        });
+
+        $this->post('/api/v1/auth/register', [
+            'name' => 'Registro Fallido',
+            'email' => 'identity.rollback@test.com',
+            'password' => 'password123',
+            'password_confirmation' => 'password123',
+            'role' => 'client',
+            'document_type' => 'INE',
+            'identity_validation_required' => true,
+            'curp' => 'TEST900101HDFXXX01',
+            'ine_front' => UploadedFile::fake()->image('ine-front.png'),
+            'ine_back' => UploadedFile::fake()->image('ine-back.png'),
+            'selfie_biometric' => UploadedFile::fake()->image('selfie.png'),
+        ])->assertStatus(500);
+
+        $this->assertDatabaseMissing('users', ['email' => 'identity.rollback@test.com']);
+        $this->assertSame([], Storage::disk('s3')->allFiles());
+    }
+
     public function test_registration_and_signed_identity_endpoints_use_the_configured_identity_disk(): void
     {
         Storage::fake('s3');

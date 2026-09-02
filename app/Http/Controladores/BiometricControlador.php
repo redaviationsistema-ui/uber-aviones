@@ -2,7 +2,6 @@
 
 namespace App\Http\Controladores;
 
-use App\Modelos\IdentityVerification;
 use App\Modelos\Usuario;
 use App\Servicios\Identidad\IdentityStorageServicio;
 use Aws\Exception\AwsException;
@@ -56,7 +55,6 @@ class BiometricControlador extends ControladorBase
         );
     }
 
-
     private function normalizePrivateStoragePath(string $path): string
     {
         $normalized = trim($path);
@@ -93,9 +91,6 @@ class BiometricControlador extends ControladorBase
             ], 422);
         }
 
-        $identityStorage = app(IdentityStorageServicio::class);
-        $imagePath = $identityStorage->store($file, 'biometrics/selfies');
-
         try {
             $result = $this->rekognition()->detectFaces([
                 'Image' => [
@@ -119,60 +114,28 @@ class BiometricControlador extends ControladorBase
             ?? null;
 
         if (count($faces) === 0) {
-            $verification = $this->storeVerification(
-                $request,
-                imagePath: $imagePath,
-                requestId: $requestId,
-                payload: [
-                    'identity_verified' => false,
-                    'status' => 'rejected',
-                    'face_occluded' => false,
-                ],
-            );
-
-            $this->syncUserBiometricState($request, $verification, [
-                'message' => 'No se detecto ningun rostro.',
-                'face_detected' => false,
-                'biometric_selfie_path' => $imagePath,
-            ]);
-
             return response()->json([
                 'success' => false,
                 'message' => 'No se detecto ningun rostro.',
                 'identityVerified' => false,
                 'faceDetected' => false,
                 'facesCount' => 0,
-                'biometricImageSaved' => true,
-                'imagePath' => $imagePath,
+                'identityVerificationStatus' => 'rejected',
+                'biometricProvider' => 'aws_rekognition',
+                'biometricTemplateType' => 'selfie-photo',
             ], 422);
         }
 
         if (count($faces) > 1) {
-            $verification = $this->storeVerification(
-                $request,
-                imagePath: $imagePath,
-                requestId: $requestId,
-                payload: [
-                    'identity_verified' => false,
-                    'status' => 'rejected',
-                    'face_occluded' => false,
-                ],
-            );
-
-            $this->syncUserBiometricState($request, $verification, [
-                'message' => 'Se detecto mas de un rostro. Solo debe aparecer una persona.',
-                'face_detected' => true,
-                'biometric_selfie_path' => $imagePath,
-            ]);
-
             return response()->json([
                 'success' => false,
                 'message' => 'Se detecto mas de un rostro. Solo debe aparecer una persona.',
                 'identityVerified' => false,
                 'faceDetected' => true,
                 'facesCount' => count($faces),
-                'biometricImageSaved' => true,
-                'imagePath' => $imagePath,
+                'identityVerificationStatus' => 'rejected',
+                'biometricProvider' => 'aws_rekognition',
+                'biometricTemplateType' => 'selfie-photo',
             ], 422);
         }
 
@@ -193,33 +156,6 @@ class BiometricControlador extends ControladorBase
             && $roll <= 25
             && $occluded === false;
 
-        $verification = $this->storeVerification(
-            $request,
-            imagePath: $imagePath,
-            requestId: $requestId,
-            payload: [
-                'identity_verified' => $approved,
-                'status' => $approved ? 'approved' : 'rejected',
-                'face_confidence' => $confidence,
-                'brightness' => $brightness,
-                'sharpness' => $sharpness,
-                'yaw' => $yaw,
-                'pitch' => $pitch,
-                'roll' => $roll,
-                'face_occluded' => $occluded,
-            ],
-        );
-
-        $this->syncUserBiometricState($request, $verification, [
-            'message' => $approved
-                ? 'Rostro validado correctamente.'
-                : 'Rostro detectado, pero no cumple la calidad requerida.',
-            'face_detected' => true,
-            'face_match_score' => $confidence,
-            'image_storage_score' => $sharpness,
-            'biometric_selfie_path' => $imagePath,
-        ]);
-
         return response()->json([
             'success' => true,
             'message' => $approved
@@ -229,8 +165,6 @@ class BiometricControlador extends ControladorBase
             'identityVerificationStatus' => $approved ? 'approved' : 'rejected',
             'biometricProvider' => 'aws_rekognition',
             'biometricTemplateType' => 'selfie-photo',
-            'biometricImageSaved' => true,
-            'imagePath' => $imagePath,
             'faceDetected' => true,
             'facesCount' => 1,
             'faceConfidence' => $confidence,
@@ -245,7 +179,6 @@ class BiometricControlador extends ControladorBase
             ],
             'faceOccluded' => $occluded,
             'awsRequestId' => $requestId,
-            'verificationId' => $verification->id,
         ]);
     }
 
@@ -259,46 +192,5 @@ class BiometricControlador extends ControladorBase
                 'secret' => env('AWS_SECRET_ACCESS_KEY'),
             ],
         ]);
-    }
-
-    private function storeVerification(
-        Request $request,
-        string $imagePath,
-        ?string $requestId,
-        array $payload,
-    ): IdentityVerification {
-        return IdentityVerification::create($payload + [
-            'user_id' => $request->user()?->id,
-            'provider' => 'aws_rekognition',
-            'template_type' => 'selfie-photo',
-            'image_path' => $imagePath,
-            'aws_request_id' => $requestId,
-        ]);
-    }
-
-    private function syncUserBiometricState(Request $request, IdentityVerification $verification, array $data): void
-    {
-        $user = $request->user();
-
-        if (! $user) {
-            return;
-        }
-
-        $user->forceFill([
-            'identity_verification_status' => $verification->status,
-            'identity_verification_message' => $data['message'],
-            'identity_verified' => $verification->identity_verified,
-            'face_detected' => $data['face_detected'] ?? false,
-            'face_match_score' => $data['face_match_score'] ?? $verification->face_confidence,
-            'liveness_score' => null,
-            'image_storage_score' => $data['image_storage_score'] ?? null,
-            'biometric_image_saved' => app(IdentityStorageServicio::class)->disk()->exists($verification->image_path),
-            'biometric_captured_at' => now(),
-            'biometric_provider' => $verification->provider,
-            'biometric_template_type' => $verification->template_type,
-            'biometric_selfie_path' => $data['biometric_selfie_path'] ?? $verification->image_path,
-            'biometric_selfie_disk' => app(IdentityStorageServicio::class)->diskName(),
-            'biometric_selfie_uploaded_at' => now(),
-        ])->save();
     }
 }
