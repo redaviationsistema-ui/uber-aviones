@@ -7,6 +7,7 @@ use App\Modelos\IdentityVerification;
 use App\Modelos\TokenApi;
 use App\Modelos\Proveedor;
 use App\Modelos\Usuario;
+use App\Servicios\Identidad\IdentityStorageServicio;
 use Illuminate\Auth\Events\PasswordReset;
 use Illuminate\Auth\Events\Verified;
 use Illuminate\Http\JsonResponse;
@@ -187,11 +188,12 @@ class AutenticacionControlador extends ControladorBase
             ], 422);
         }
 
+        $identityStorage = app(IdentityStorageServicio::class);
         $ineFrontPath = $request->hasFile('ine_front')
-            ? $request->file('ine_front')->store('identity/ine/front', 'private')
+            ? $identityStorage->store($request->file('ine_front'), 'identity/ine/front')
             : null;
         $ineBackPath = $request->hasFile('ine_back')
-            ? $request->file('ine_back')->store('identity/ine/back', 'private')
+            ? $identityStorage->store($request->file('ine_back'), 'identity/ine/back')
             : null;
         $birthDate = $data['birth_date'] ?? $data['birthDate'] ?? null;
         $baseAirport = $data['base_airport'] ?? $data['base'] ?? null;
@@ -1206,11 +1208,16 @@ class AutenticacionControlador extends ControladorBase
 
     private function storeBiometricSelfie(UploadedFile $file, Usuario $user): array
     {
-        $disk = 'private';
+        $storage = app(IdentityStorageServicio::class);
+        $disk = $storage->diskName();
         $extension = strtolower($file->getClientOriginalExtension() ?: $file->extension() ?: 'jpg');
         $directory = sprintf('clientes/%d/biometria', $user->id);
         $filename = sprintf('%s.%s', (string) Str::uuid(), $extension);
         $path = $file->storeAs($directory, $filename, $disk);
+
+        if (! is_string($path) || $path === '' || ! $storage->disk()->exists($path)) {
+            throw new \RuntimeException('No fue posible guardar la selfie biometrica.');
+        }
 
         return [$path, $disk];
     }

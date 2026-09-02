@@ -4,10 +4,12 @@ namespace App\Http\Controladores;
 
 use App\Modelos\IdentityVerification;
 use App\Modelos\Usuario;
+use App\Servicios\Identidad\IdentityStorageServicio;
 use Aws\Exception\AwsException;
 use Aws\Rekognition\RekognitionClient;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
@@ -19,12 +21,15 @@ class BiometricControlador extends ControladorBase
         $disk = $user->resolvedBiometricSelfieDisk();
 
         abort_unless($path !== '', 404);
-        abort_unless(Storage::disk($disk)->exists($path), 404);
+        if (! Storage::disk($disk)->exists($path)) {
+            Log::warning('[BIOMETRIC_STORAGE_MISSING]', ['user_id' => $user->id, 'disk' => $disk, 'path' => $path]);
+            abort(404);
+        }
 
         return Storage::disk($disk)->response(
             $path,
             basename($path),
-            ['Content-Disposition' => 'inline; filename="'.basename($path).'"']
+            ['Content-Disposition' => $request->boolean('download') ? 'attachment' : 'inline; filename="'.basename($path).'"']
         );
     }
 
@@ -36,13 +41,18 @@ class BiometricControlador extends ControladorBase
         $rawPath = $side === 'back' ? $profile->ine_back_path : $profile->ine_front_path;
         $path = $this->normalizePrivateStoragePath((string) $rawPath);
 
+        $storage = app(IdentityStorageServicio::class);
+        $disk = $storage->diskName();
         abort_unless($path, 404);
-        abort_unless(Storage::disk('private')->exists($path), 404);
+        if (! $storage->disk()->exists($path)) {
+            Log::warning('[IDENTITY_STORAGE_MISSING]', ['user_id' => $user->id, 'side' => $side, 'disk' => $disk, 'path' => $path]);
+            abort(404);
+        }
 
-        return Storage::disk('private')->response(
+        return $storage->disk()->response(
             $path,
             basename($path),
-            ['Content-Disposition' => 'inline; filename="'.basename($path).'"']
+            ['Content-Disposition' => $request->boolean('download') ? 'attachment' : 'inline; filename="'.basename($path).'"']
         );
     }
 
@@ -83,7 +93,8 @@ class BiometricControlador extends ControladorBase
             ], 422);
         }
 
-        $imagePath = $file->store('biometrics/selfies', 'private');
+        $identityStorage = app(IdentityStorageServicio::class);
+        $imagePath = $identityStorage->store($file, 'biometrics/selfies');
 
         try {
             $result = $this->rekognition()->detectFaces([
@@ -281,12 +292,12 @@ class BiometricControlador extends ControladorBase
             'face_match_score' => $data['face_match_score'] ?? $verification->face_confidence,
             'liveness_score' => null,
             'image_storage_score' => $data['image_storage_score'] ?? null,
-            'biometric_image_saved' => Storage::disk('private')->exists($verification->image_path),
+            'biometric_image_saved' => app(IdentityStorageServicio::class)->disk()->exists($verification->image_path),
             'biometric_captured_at' => now(),
             'biometric_provider' => $verification->provider,
             'biometric_template_type' => $verification->template_type,
             'biometric_selfie_path' => $data['biometric_selfie_path'] ?? $verification->image_path,
-            'biometric_selfie_disk' => 'private',
+            'biometric_selfie_disk' => app(IdentityStorageServicio::class)->diskName(),
             'biometric_selfie_uploaded_at' => now(),
         ])->save();
     }

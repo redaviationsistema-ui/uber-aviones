@@ -42,6 +42,8 @@ class Perfil extends Model
     protected $appends = [
         'ine_front_url',
         'ine_back_url',
+        'ine_front_download_url',
+        'ine_back_download_url',
     ];
 
     protected function casts(): array
@@ -74,7 +76,17 @@ class Perfil extends Model
         return $this->resolveIdentityImageUrl('back');
     }
 
-    private function resolveIdentityImageUrl(string $side): ?string
+    public function getIneFrontDownloadUrlAttribute(): ?string
+    {
+        return $this->resolveIdentityImageUrl('front', true);
+    }
+
+    public function getIneBackDownloadUrlAttribute(): ?string
+    {
+        return $this->resolveIdentityImageUrl('back', true);
+    }
+
+    private function resolveIdentityImageUrl(string $side, bool $download = false): ?string
     {
         $path = $side === 'back' ? $this->ine_back_path : $this->ine_front_path;
 
@@ -85,7 +97,7 @@ class Perfil extends Model
         return URL::temporarySignedRoute(
             'public.identity-documents.show',
             now()->addMinutes(10),
-            ['user' => $this->user_id, 'side' => $side],
+            ['user' => $this->user_id, 'side' => $side, 'download' => $download ? 1 : null],
             absolute: false,
         );
     }

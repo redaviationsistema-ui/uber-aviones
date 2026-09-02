@@ -15,6 +15,9 @@ return [
 
     'default' => env('FILESYSTEM_DISK', 'local'),
 
+    // INE and biometric captures must be read from the same private disk used to write them.
+    'identity_disk' => env('IDENTITY_FILESYSTEM_DISK', 'private'),
+
     /*
     |--------------------------------------------------------------------------
     | Filesystem Disks
@@ -64,6 +67,7 @@ return [
             'url' => env('AWS_URL'),
             'endpoint' => env('AWS_ENDPOINT'),
             'use_path_style_endpoint' => env('AWS_USE_PATH_STYLE_ENDPOINT', false),
+            'visibility' => 'private',
             'throw' => true,
             'report' => true,
         ],

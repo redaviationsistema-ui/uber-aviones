@@ -489,13 +489,6 @@ class Usuario extends Authenticatable implements MustVerifyEmail
             return Storage::disk('public')->url($path);
         }
 
-        if ($disk === 's3') {
-            return Storage::disk('s3')->temporaryUrl(
-                $path,
-                now()->addMinutes(10)
-            );
-        }
-
         return URL::temporarySignedRoute(
             'public.biometric-selfies.show',
             now()->addMinutes(10),
@@ -523,13 +516,9 @@ class Usuario extends Authenticatable implements MustVerifyEmail
 
     public function resolvedBiometricSelfieDisk(): string
     {
-        $disk = trim((string) ($this->getRawOriginal('biometric_selfie_disk') ?? $this->biometric_selfie_disk ?? ''));
-
-        if ($disk !== '') {
-            return $disk;
-        }
-
-        return $this->resolvedBiometricSelfiePath() ? 'private' : 'public';
+        return $this->resolvedBiometricSelfiePath()
+            ? (string) config('filesystems.identity_disk', 'private')
+            : 'public';
     }
 
     public function resolvedProviderId(): ?int

@@ -30,6 +30,8 @@ services:
         value: red-aviation
       - key: FILESYSTEM_DISK
         value: s3
+      - key: IDENTITY_FILESYSTEM_DISK
+        value: s3
       - key: AWS_ACCESS_KEY_ID
         sync: false
       - key: AWS_SECRET_ACCESS_KEY

@@ -58,8 +58,11 @@ class PlataformaVuelosApiTest extends TestCase
 
     public function test_client_registration_persists_identity_documents_and_biometric_data(): void
     {
+        config(['filesystems.identity_disk' => 's3']);
+        $identityDisk = config('filesystems.identity_disk');
+
         Storage::fake('public');
-        Storage::fake('private');
+        Storage::fake($identityDisk);
 
         $response = $this->post('/api/v1/auth/register', [
             'name' => 'Cliente Identidad',
@@ -111,7 +114,7 @@ class PlataformaVuelosApiTest extends TestCase
             ->assertJsonPath('user.email', 'identidad@cliente.test')
             ->assertJsonPath('user.identity_verification_status', 'approved')
             ->assertJsonPath('user.identity_verified', true)
-            ->assertJsonPath('user.biometric_selfie_disk', 'private');
+            ->assertJsonPath('user.biometric_selfie_disk', $identityDisk);
 
         $user = Usuario::query()
             ->where('email', 'identidad@cliente.test')
@@ -128,8 +131,8 @@ class PlataformaVuelosApiTest extends TestCase
         $this->assertTrue((bool) $user->profile?->identity_validation_required);
         $this->assertNotNull($user->profile?->ine_front_path);
         $this->assertNotNull($user->profile?->ine_back_path);
-        Storage::disk('private')->assertExists($user->profile->ine_front_path);
-        Storage::disk('private')->assertExists($user->profile->ine_back_path);
+        Storage::disk($identityDisk)->assertExists($user->profile->ine_front_path);
+        Storage::disk($identityDisk)->assertExists($user->profile->ine_back_path);
 
         $verification = IdentityVerification::query()
             ->where('user_id', $user->id)
@@ -138,13 +141,13 @@ class PlataformaVuelosApiTest extends TestCase
         $this->assertNotNull($verification);
         $this->assertSame('approved', $verification->status);
         $this->assertTrue($verification->identity_verified);
-        $this->assertSame('private', $user->biometric_selfie_disk);
+        $this->assertSame($identityDisk, $user->biometric_selfie_disk);
         $this->assertNotNull($user->biometric_selfie_uploaded_at);
         $this->assertNotNull($user->biometric_selfie_url);
         $this->assertNotNull($user->biometric_selfie_path);
-        Storage::disk('private')->assertExists($user->biometric_selfie_path);
+        Storage::disk($identityDisk)->assertExists($user->biometric_selfie_path);
         $this->assertNotNull($verification->image_path);
-        Storage::disk('private')->assertExists($verification->image_path);
+        Storage::disk($identityDisk)->assertExists($verification->image_path);
     }
 
 
@@ -691,7 +694,8 @@ class PlataformaVuelosApiTest extends TestCase
 
     public function test_admin_user_lists_expose_consistent_biometric_selfie_state(): void
     {
-        Storage::fake('private');
+        config(['filesystems.identity_disk' => 's3']);
+        Storage::fake(config('filesystems.identity_disk'));
         $this->seed();
 
         $adminToken = $this->postJson('/api/v1/auth/login', [
@@ -734,7 +738,10 @@ class PlataformaVuelosApiTest extends TestCase
 
     public function test_admin_user_detail_exposes_signed_identity_asset_urls_when_files_exist(): void
     {
-        Storage::fake('private');
+        config(['filesystems.identity_disk' => 's3']);
+        $identityDisk = config('filesystems.identity_disk');
+
+        Storage::fake($identityDisk);
         $this->seed();
 
         $adminLogin = $this->postJson('/api/v1/auth/login', [
@@ -767,9 +774,9 @@ class PlataformaVuelosApiTest extends TestCase
         $clientId = $register->json('user.id');
 
         $user = Usuario::query()->with('profile')->findOrFail($clientId);
-        $this->assertTrue(Storage::disk('private')->exists($user->profile->ine_front_path));
-        $this->assertTrue(Storage::disk('private')->exists($user->profile->ine_back_path));
-        $this->assertTrue(Storage::disk('private')->exists($user->biometric_selfie_path));
+        $this->assertTrue(Storage::disk($identityDisk)->exists($user->profile->ine_front_path));
+        $this->assertTrue(Storage::disk($identityDisk)->exists($user->profile->ine_back_path));
+        $this->assertTrue(Storage::disk($identityDisk)->exists($user->biometric_selfie_path));
 
         $detail = $this->withToken($adminToken)
             ->getJson("/api/v1/admin/users/{$clientId}")

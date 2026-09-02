@@ -10,6 +10,7 @@ use App\Consola\Comandos\ExpirarSuscripcionesAeronavesComando;
 use App\Consola\Comandos\ExpirarSuscripcionesComando;
 use App\Consola\Comandos\LiberarPagosProveedorComando;
 use App\Consola\Comandos\NormalizarDatosLegacySobrecargoComando;
+use App\Consola\Comandos\MigrarAlmacenamientoIdentidadComando;
 use App\Consola\Comandos\PerfilarFlotaAeronavesAdminComando;
 use App\Http\Intermediarios\AsegurarAccesoPremium;
 use App\Http\Intermediarios\AuditoriaIntermediario;
@@ -111,6 +112,7 @@ return Application::configure(basePath: dirname(__DIR__))
         LiberarPagosProveedorComando::class,
         PerfilarFlotaAeronavesAdminComando::class,
         NormalizarDatosLegacySobrecargoComando::class,
+        MigrarAlmacenamientoIdentidadComando::class,
         CrearOperacionSmokeSobrecargoComando::class,
         EliminarOperacionSmokeSobrecargoComando::class,
         EnviarRecordatoriosOperativosSobrecargoComando::class,
