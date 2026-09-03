@@ -241,7 +241,10 @@ class ClienteControlador extends ControladorBase
             $routePricingAvailable = true;
         }
 
-        [$requestedStart, $requestedEnd] = $this->resolveAvailabilityWindowOrAbort($data);
+        $hasAvailabilityWindow = ! empty($data['departure_datetime']) || ! empty($data['legs']);
+        [$requestedStart, $requestedEnd] = $hasAvailabilityWindow
+            ? $this->resolveAvailabilityWindowOrAbort($data)
+            : [null, null];
 
         $aircraft = Aeronave::query()
             ->select([
@@ -270,7 +273,10 @@ class ClienteControlador extends ControladorBase
             ])
             ->whereIn('status', ['active', 'trial_active', 'aprobada', 'available', 'disponible'])
             ->when($passengers > 0, fn ($query) => $query->where('capacity', '>=', $passengers))
-            ->tap(fn ($query) => $this->aircraftAvailabilityService->applyAvailabilityConstraints($query, $requestedStart, $requestedEnd))
+            ->when(
+                $requestedStart !== null,
+                fn ($query) => $this->aircraftAvailabilityService->applyAvailabilityConstraints($query, $requestedStart, $requestedEnd),
+            )
             ->when($origin !== '', function ($query) use ($origin) {
                 $query->orderByRaw(
                     'case when upper(coalesce(base_airport, \'\')) = ? then 0 else 1 end',
