@@ -21,6 +21,7 @@ use App\Servicios\Aeronaves\AircraftRepositioningService;
 use App\Servicios\Billing\BillingPlanServicio;
 use App\Servicios\Pagos\PaymentFeeCalculationServicio;
 use App\Servicios\RedAviation\MatchingRedAviationServicio;
+use App\Servicios\RedAviation\FlightBriefService;
 use App\Servicios\RedAviation\ProviderFlightRequestNotificationService;
 use App\Servicios\RedAviation\VisibilidadServicio;
 use App\Servicios\Vuelos\ClimbDescentCategoryResolver;
@@ -159,6 +160,7 @@ class ClienteControlador extends ControladorBase
         private readonly AircraftRepositioningService $aircraftRepositioningService,
         private readonly BillingPlanServicio $billingPlanServicio,
         private readonly MatchingRedAviationServicio $matchingServicio,
+        private readonly FlightBriefService $flightBriefService,
         private readonly VisibilidadServicio $visibilidadServicio,
         private readonly PaymentFeeCalculationServicio $paymentFeeCalculationServicio,
         private readonly ProviderFlightRequestNotificationService $providerFlightRequestNotificationService,
@@ -1757,6 +1759,15 @@ class ClienteControlador extends ControladorBase
 
         return $this->ok([
             'flight_request' => $this->visibilidadServicio->solicitudParaCliente($flightRequest),
+        ]);
+    }
+
+    public function flightBrief(Request $request, SolicitudVuelo $flightRequest)
+    {
+        abort_if($flightRequest->client_id !== $request->user()->id, 403);
+
+        return $this->ok([
+            'flight_brief' => $this->flightBriefService->buildForFlightRequest($flightRequest),
         ]);
     }
 

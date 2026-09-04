@@ -45,6 +45,7 @@ Route::middleware(['auth.token'])->group(function () {
         Route::get('/access-payment/cancel', [ClientAccessBillingControlador::class, 'cancel']);
         Route::post('/flight-requests', [ClienteControlador::class, 'storeFlightRequest']);
         Route::get('/flight-requests', [ClienteControlador::class, 'indexFlightRequests']);
+        Route::get('/flight-requests/{flightRequest}/flight-brief', [ClienteControlador::class, 'flightBrief']);
         Route::get('/flight-requests/{flightRequest}', [ClienteControlador::class, 'showFlightRequest']);
         Route::get('/flight-requests/{reservation}/contract', [ReservaControlador::class, 'showContract']);
         Route::get('/flight-requests/{reservation}/contract/pdf', [ReservaControlador::class, 'downloadContractPdf']);

@@ -1353,7 +1353,7 @@ class AutenticacionControlador extends ControladorBase
             'disk' => $storage->diskName(),
             'objects' => $objects,
         ]);
-    }
+        }
 
     private function authCookieName(): string
     {

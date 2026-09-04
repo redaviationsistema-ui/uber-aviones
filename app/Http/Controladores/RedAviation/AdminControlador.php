@@ -2171,6 +2171,9 @@ class AdminControlador extends ControladorBase
             'presentation_time' => ['nullable', 'string', 'max:120'],
             'presentation_place' => ['nullable', 'string', 'max:255'],
             'presentation_location' => ['nullable', 'string', 'max:255'],
+            'presentation_address' => ['nullable', 'string', 'max:500'],
+            'presentation_instructions' => ['nullable', 'string', 'max:2000'],
+            'presentation_maps_url' => ['nullable', 'url', 'max:2048'],
         ]);
 
         $hasAssignedCrew = ! empty($data['sobrecargo_user_id']);
@@ -2369,6 +2372,9 @@ class AdminControlador extends ControladorBase
                 'presentation_time' => $hasAssignedCrew ? $resolvedPresentationTime : ($visibilityPayload['presentation_time'] ?? null),
                 'presentation_place' => $presentationPlace !== '' ? $presentationPlace : ($visibilityPayload['presentation_place'] ?? $visibilityPayload['presentation_location'] ?? null),
                 'presentation_location' => $presentationPlace !== '' ? $presentationPlace : ($visibilityPayload['presentation_location'] ?? $visibilityPayload['presentation_place'] ?? null),
+                'presentation_address' => trim((string) ($data['presentation_address'] ?? '')) ?: ($visibilityPayload['presentation_address'] ?? null),
+                'presentation_instructions' => trim((string) ($data['presentation_instructions'] ?? '')) ?: ($visibilityPayload['presentation_instructions'] ?? null),
+                'presentation_maps_url' => trim((string) ($data['presentation_maps_url'] ?? '')) ?: ($visibilityPayload['presentation_maps_url'] ?? null),
                 'crew_notes' => $hasAssignedCrew
                     ? ($crewNote !== '' ? $crewNote : ($visibilityPayload['crew_notes'] ?? $existingOperation?->crew_notes))
                     : null,
