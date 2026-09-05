@@ -72,6 +72,7 @@ class StripeWebhookClientAuditTest extends TestCase
 
         $this->assertSame('paid', $payment->status);
         $this->assertSame('paid', $flightRequest->payment_status);
+        $this->assertSame(1, \App\Modelos\Notificacion::where('type', 'flight.confirmed')->where('provider_id', $flightRequest->assigned_provider_id)->count());
         $this->assertSame('confirmed', $reservation->status);
         $this->assertSame(1, Pago::query()->where('flight_request_id', $flightRequest->id)->count());
         $this->assertDatabaseHas('webhook_events', [
@@ -81,6 +82,50 @@ class StripeWebhookClientAuditTest extends TestCase
         ]);
         $this->assertSame(1, RegistroAuditoria::query()->where('action', 'stripe_webhook_payment_confirmed')->count());
         $this->assertSame(1, RegistroAuditoria::query()->where('action', 'stripe_webhook_duplicate_ignored')->count());
+    }
+
+    public function test_completed_checkout_without_settled_payment_does_not_confirm_or_notify(): void
+    {
+        [$flight] = $this->createPendingReservationContext('pi_unsettled', 'cs_unsettled');
+        config()->set('services.stripe.webhook_secret', 'whsec_test');
+        $event = (object) ['id' => 'evt_unsettled', 'type' => 'checkout.session.completed',
+            'created' => now()->timestamp, 'data' => (object) ['object' => (object) [
+                'id' => 'cs_unsettled', 'payment_intent' => 'pi_unsettled', 'payment_status' => 'unpaid',
+                'amount_total' => 1599000, 'currency' => 'usd',
+                'metadata' => (object) ['flight_request_id' => (string) $flight->id],
+            ]]];
+        Mockery::mock('alias:Stripe\\Webhook')->shouldReceive('constructEvent')->once()->andReturn($event);
+        $this->postJson('/api/v1/stripe/webhook', [], ['Stripe-Signature' => 'test'])->assertOk();
+        $this->assertNotSame('paid', $flight->fresh()->payment_status);
+        $this->assertSame(0, \App\Modelos\Notificacion::where('type', 'flight.confirmed')->count());
+    }
+
+    public function test_checkout_payment_intent_and_manual_finalization_share_one_confirmation(): void
+    {
+        [$flight, $reservation] = $this->createPendingReservationContext('pi_converged', 'cs_converged');
+        config()->set('services.stripe.webhook_secret', 'whsec_test');
+        $metadata = (object) ['flight_request_id' => (string) $flight->id];
+        $session = (object) ['id' => 'cs_converged', 'payment_intent' => 'pi_converged',
+            'payment_status' => 'paid', 'amount_total' => 1599000, 'currency' => 'usd', 'metadata' => $metadata];
+        $intent = new \Stripe\PaymentIntent('pi_converged');
+        $values = new \ReflectionProperty(\Stripe\StripeObject::class, '_values');
+        $values->setValue($intent, ['id' => 'pi_converged', 'status' => 'succeeded',
+            'amount' => 1599000, 'currency' => 'usd', 'metadata' => $metadata]);
+        $checkoutEvent = (object) ['id' => 'evt_converged_checkout', 'type' => 'checkout.session.completed',
+            'created' => now()->timestamp, 'data' => (object) ['object' => $session]];
+        $intentEvent = (object) ['id' => 'evt_converged_intent', 'type' => 'payment_intent.succeeded',
+            'created' => now()->timestamp, 'data' => (object) ['object' => $intent]];
+        Mockery::mock('alias:Stripe\\Webhook')->shouldReceive('constructEvent')->times(4)
+            ->andReturn($checkoutEvent, $checkoutEvent, $intentEvent, $intentEvent);
+        for ($index = 0; $index < 4; $index++) {
+            $this->postJson('/api/v1/stripe/webhook', [], ['Stripe-Signature' => 'test'])->assertOk();
+            $this->assertSame(1, \App\Modelos\Notificacion::where('type', 'flight.confirmed')->count());
+        }
+        $finalize = new \ReflectionMethod(\App\Http\Controladores\StripePagoControlador::class, 'finalizeSuccessfulPayment');
+        $finalize->invoke(app(\App\Http\Controladores\StripePagoControlador::class),
+            $flight->fresh(), $reservation->fresh(), 'pi_converged', null, 'card', $intent);
+        $this->assertSame(1, \App\Modelos\Notificacion::where('type', 'flight.confirmed')->count());
+        $this->assertSame('vuelo confirmado', $flight->fresh()->workflow_status);
     }
 
     public function test_out_of_order_payment_failed_webhook_does_not_revert_paid_reservation(): void

@@ -427,6 +427,8 @@ class StripeFlightCheckoutFlowTest extends TestCase
             'id' => $context['reservation']->id,
             'status' => 'confirmed',
         ]);
+        $this->assertSame(1, \App\Modelos\Notificacion::where('type', 'flight.confirmed')->where('provider_id', $context['provider']->id)->count());
+
         $this->assertDatabaseHas('flight_requests', [
             'id' => $context['flightRequest']->id,
             'payment_status' => 'paid',

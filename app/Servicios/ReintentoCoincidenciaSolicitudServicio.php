@@ -88,6 +88,8 @@ class ReintentoCoincidenciaSolicitudServicio
                 ],
             ]);
 
+            \App\Jobs\DispatchProviderFlightRequestNotificationsJob::dispatch($flightRequest->id)->afterCommit();
+
             return [
                 'status' => 'rematched',
                 'created_matches' => $newMatches,
@@ -131,7 +133,10 @@ class ReintentoCoincidenciaSolicitudServicio
             ->filter()
             ->values();
 
+        $existingProviderIds = $flightRequest->matches()->pluck('provider_id')->filter();
+
         $query = Aeronave::with('provider')
+            ->whereNotIn('provider_id', $existingProviderIds)
             ->where('status', EstadoAeronave::Active->value)
             ->where('capacity', '>=', $flightRequest->passengers)
             ->whereHas('provider', fn ($scope) => $scope->where('approval_status', EstadoProveedor::Approved->value))

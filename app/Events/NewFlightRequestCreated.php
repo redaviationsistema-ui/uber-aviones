@@ -15,9 +15,11 @@ class NewFlightRequestCreated implements ShouldBroadcastNow
 
     public int $providerId;
 
-    public function __construct(public SolicitudVuelo $request, ?int $providerId = null)
+    public function __construct(public SolicitudVuelo $request, ?int $providerId = null, public ?array $persistedPayload = null)
     {
-        $this->request->loadMissing(['assignedAircraft', 'matches.aircraft']);
+        if ($persistedPayload === null) {
+            $this->request->loadMissing(['assignedAircraft', 'matches.aircraft']);
+        }
         $this->providerId = (int) ($providerId ?: $this->resolveProviderId());
     }
 
@@ -35,6 +37,9 @@ class NewFlightRequestCreated implements ShouldBroadcastNow
 
     public function broadcastWith(): array
     {
+        if ($this->persistedPayload !== null) {
+            return $this->persistedPayload;
+        }
         $preferredMatch = $this->request->matches
             ->firstWhere('provider_id', $this->providerId)
             ?: $this->request->matches->first();

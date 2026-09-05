@@ -116,7 +116,7 @@ class SolicitudVueloControlador extends ControladorBase
 
     private function dispatchProviderFlightRequestNotifications(int $flightRequestId): void
     {
-        DispatchProviderFlightRequestNotificationsJob::dispatch($flightRequestId);
+        DispatchProviderFlightRequestNotificationsJob::dispatch($flightRequestId)->afterCommit();
     }
     private function matchAeronave(SolicitudVuelo $flightRequest): void
     {

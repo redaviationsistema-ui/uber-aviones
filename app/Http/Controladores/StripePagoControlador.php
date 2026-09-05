@@ -1323,7 +1323,8 @@ class StripePagoControlador extends ControladorBase
         $flightRequestStatus = $this->resolveConfirmedFlightRequestStatus($flightRequest);
 
         DB::transaction(function () use ($flightRequest, $reservation, $paymentIntent, $brand, $pricingBreakdown, $paymentMethod, $flightRequestStatus) {
-            $flightRequest->update([
+            app(\App\Servicios\RedAviation\ProviderFlightNotificationService::class)
+                ->updateConfirmedPayment($flightRequest, [
                 'payment_method' => $paymentMethod,
                 'payment_status' => 'paid',
                 'stripe_checkout_session_id' => $paymentMethod === 'stripe_checkout'
@@ -1334,7 +1335,7 @@ class StripePagoControlador extends ControladorBase
                 'status' => $flightRequestStatus,
                 'final_price' => (float) $pricingBreakdown['total_amount'],
                 'pricing_context' => $this->mergeFlightRequestPricingContext($flightRequest, $pricingBreakdown),
-            ]);
+            ], $reservation);
 
             $reservation->update([
                 'status' => 'confirmed',

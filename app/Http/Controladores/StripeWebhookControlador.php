@@ -222,6 +222,11 @@ class StripeWebhookControlador extends ControladorBase
             return;
         }
 
+        // Checkout completion can precede settlement for asynchronous payment methods.
+        if (($session->payment_status ?? '') !== 'paid') {
+            return;
+        }
+
         $flightRequestId = (int) ($session->metadata->flight_request_id ?? 0);
         Log::info('Stripe checkout.session.completed recibido.', [
             'checkout_session_id' => (string) ($session->id ?? ''),
@@ -309,14 +314,15 @@ class StripeWebhookControlador extends ControladorBase
 
         DB::transaction(function () use ($flightRequest, $reservation, $session) {
 
-            $flightRequest->update([
+            app(\App\Servicios\RedAviation\ProviderFlightNotificationService::class)
+                ->updateConfirmedPayment($flightRequest, [
                 'payment_method' => 'stripe_checkout',
                 'payment_status' => 'paid',
                 'stripe_checkout_session_id' => $session->id,
                 'stripe_payment_intent_id' => $session->payment_intent ?? null,
                 'workflow_status' => 'vuelo confirmado',
                 'status' => 'reserved',
-            ]);
+            ], $reservation);
 
             if ($reservation) {
                 $reservation->update([
@@ -556,14 +562,15 @@ class StripeWebhookControlador extends ControladorBase
                 $reservation,
             );
 
-            $flightRequest->update([
+            app(\App\Servicios\RedAviation\ProviderFlightNotificationService::class)
+                ->updateConfirmedPayment($flightRequest, [
                 'payment_method' => 'card',
                 'payment_status' => 'paid',
                 'stripe_checkout_session_id' => $checkoutSessionId ?: $flightRequest->stripe_checkout_session_id,
                 'stripe_payment_intent_id' => $paymentIntent->id,
                 'workflow_status' => 'vuelo confirmado',
                 'status' => 'reserved',
-            ]);
+            ], $reservation);
 
             if ($reservation) {
                 $reservation->update([

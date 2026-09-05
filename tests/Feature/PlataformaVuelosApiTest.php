@@ -392,7 +392,7 @@ class PlataformaVuelosApiTest extends TestCase
             ->where('type', 'flight.request.created')
             ->get();
 
-        $this->assertCount($initialNotificationCount + $expectedRecipients, $notifications);
+        $this->assertCount($initialNotificationCount + 1, $notifications);
         $this->assertSame(
             $flightRequestId,
             data_get($notifications->sortByDesc('id')->first()?->payload, 'request_id')
@@ -465,7 +465,7 @@ class PlataformaVuelosApiTest extends TestCase
             ->where('type', 'flight.request.created')
             ->get();
 
-        $this->assertCount($initialNotificationCount + $expectedRecipients, $notifications);
+        $this->assertCount($initialNotificationCount + 1, $notifications);
         $this->assertSame(
             $flightRequestId,
             data_get($notifications->sortByDesc('id')->first()?->payload, 'request_id')

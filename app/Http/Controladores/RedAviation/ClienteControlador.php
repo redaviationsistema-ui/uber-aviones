@@ -1059,7 +1059,7 @@ class ClienteControlador extends ControladorBase
 
     private function dispatchProviderFlightRequestNotifications(int $flightRequestId): void
     {
-        DispatchProviderFlightRequestNotificationsJob::dispatch($flightRequestId);
+        DispatchProviderFlightRequestNotificationsJob::dispatch($flightRequestId)->afterCommit();
     }
 
     private function resolveFlightRequestIdempotencyKey(Request $request, array $validatedData): ?string

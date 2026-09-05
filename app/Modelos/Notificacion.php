@@ -20,6 +20,26 @@ class Notificacion extends Model
         ];
     }
 
+    public function scopeVisibleTo(\Illuminate\Database\Eloquent\Builder $query, Usuario $user): void
+    {
+        $providerId = $user->resolvedProviderId();
+        $query->where(function ($visible) use ($user, $providerId) {
+            $visible->where(function ($personal) use ($user) {
+                $personal->where('user_id', $user->id)
+                    ->where(function ($legacy) {
+                        $legacy->whereNull('idempotency_key')->orWhere('idempotency_key', 'not like', 'provider:%');
+                    });
+            });
+            if ($providerId) {
+                $visible->orWhere(function ($shared) use ($providerId) {
+                    $shared->where('provider_id', $providerId)
+                        ->where('idempotency_key', 'like', 'provider:'.$providerId.':flight:%')
+                        ->whereIn('type', \App\Servicios\RedAviation\ProviderFlightNotificationService::TYPES);
+                });
+            }
+        });
+    }
+
     public function user(): BelongsTo
     {
         return $this->belongsTo(Usuario::class, 'user_id');

@@ -499,6 +499,12 @@ class ProveedorControlador extends ControladorBase
     {
         $providerId = $this->resolvedProviderIdOrAbort($request, 404);
         $this->ensureOperationalAccess($request);
+        abort_unless(
+            (int) $flightRequest->assigned_provider_id === (int) $providerId
+            || $flightRequest->matches()->where('provider_id', $providerId)
+                ->whereIn('status', ['pending', 'sent_to_provider', 'accepted'])->exists(),
+            403, 'No puedes responder esta solicitud.'
+        );
 
         $match = $flightRequest->matches()->where('provider_id', $providerId)->first();
         $match?->loadMissing('aircraft');
@@ -532,6 +538,12 @@ class ProveedorControlador extends ControladorBase
     {
         $providerId = $this->resolvedProviderIdOrAbort($request, 404);
         $this->ensureOperationalAccess($request);
+        abort_unless(
+            (int) $flightRequest->assigned_provider_id === (int) $providerId
+            || $flightRequest->matches()->where('provider_id', $providerId)
+                ->whereIn('status', ['pending', 'sent_to_provider', 'accepted'])->exists(),
+            403, 'No puedes responder esta solicitud.'
+        );
 
         $flightRequest->matches()->where('provider_id', $providerId)->update([
             'status' => 'rejected',
