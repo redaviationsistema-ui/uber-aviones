@@ -111,6 +111,18 @@ class CrewCanonicalWorkflowTest extends TestCase
         $this->assertSame('postflight', $postflight['current_step']);
         $this->assertSame('postflight', $postflight['current_phase']);
         $this->assertNull($postflight['next_action']);
+        \Illuminate\Support\Facades\Storage::fake('s3');
+        config(['filesystems.disks.s3.key' => 'test', 'filesystems.disks.s3.secret' => 'test',
+            'filesystems.disks.s3.bucket' => 'test', 'filesystems.disks.s3.region' => 'us-east-1']);
+        foreach (['preflight' => ['catering_received', 'baggage_secured'], 'postflight' => ['cabin_condition']] as $type => $codes) {
+            $group = collect($this->workflow($op)['checklists'])->firstWhere('type', $type);
+            foreach ($codes as $code) {
+                $item = collect($group['items'])->firstWhere('code', $code);
+                $this->post("/api/v1/sobrecargo/operations/{$op->id}/checklists/$type/items/{$item['id']}/evidence",
+                    ['file' => \Illuminate\Http\UploadedFile::fake()->image("$code.jpg")],
+                    ['Accept' => 'application/json'])->assertCreated();
+            }
+        }
         $this->complete($op, 'postflight');
         $closure = $this->workflow($op);
         $this->assertSame('closure', $closure['current_step']);

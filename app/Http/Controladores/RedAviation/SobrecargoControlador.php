@@ -490,6 +490,10 @@ class SobrecargoControlador extends ControladorBase
                 ->whereNotIn('status', ['completed', 'not_applicable'])
                 ->exists();
             if ($totalItems > 0 && ! $hasBlockingItem) {
+                if ($type === 'postflight') {
+                    $lockedOperation->unsetRelation('checklists');
+                    $this->crewOperationWorkflowService->assertRequiredEvidence($lockedOperation);
+                }
                 $checklist->update(['status' => 'completed', 'submitted_at' => now()]);
                 $nextStatus = match ($type) {
                     'preparation' => CrewAssignmentStatus::READY_FOR_OPERATION,
@@ -536,19 +540,13 @@ class SobrecargoControlador extends ControladorBase
         $path = $file->store($directory, $disk);
 
         try {
+            abort_unless(is_string($path) && $path !== '' && Storage::disk($disk)->exists($path),
+                500, 'No se pudo verificar el almacenamiento de la evidencia.');
             DB::transaction(function () use ($operation, $item, $request, $disk, $path, $file, $type) {
                 $lockedOperation = Operacion::query()->lockForUpdate()->findOrFail($operation->id);
-                $this->crewOperationWorkflowService->assertChecklistEditable($lockedOperation, $type);
+                $this->crewOperationWorkflowService->assertEvidenceEditable($lockedOperation, $type, $item->code);
                 $lockedItem = ChecklistItem::query()->lockForUpdate()->findOrFail($item->id);
-                abort_if(in_array(CrewAssignmentStatus::normalize($lockedOperation->crew_status), [CrewAssignmentStatus::CREW_COMPLETED, CrewAssignmentStatus::ADMINISTRATIVELY_CLOSED, CrewAssignmentStatus::CANCELLED], true), 409, 'La operacion ya no admite cambios en checklists.');
-
-                collect($lockedItem->evidence_files ?? [])->each(function ($entry) {
-                    $storageDisk = trim((string) data_get($entry, 'storage_disk'));
-                    $storagePath = trim((string) data_get($entry, 'file_path'));
-                    if ($storageDisk === 's3' && $storagePath !== '') {
-                        Storage::disk('s3')->delete($storagePath);
-                    }
-                });
+                $previousFiles = $lockedItem->evidence_files ?? [];
 
                 $lockedItem->update([
                     'evidence_files' => [[
@@ -561,9 +559,34 @@ class SobrecargoControlador extends ControladorBase
                         'uploaded_by' => $request->user()->id,
                     ]],
                 ]);
+                // Runs only after the outermost transaction commits. A cleanup failure
+                // must never roll back metadata or delete the newly referenced file.
+                DB::afterCommit(function () use ($previousFiles, $path) {
+                    foreach ($previousFiles as $entry) {
+                        $oldDisk = trim((string) data_get($entry, 'storage_disk'));
+                        $oldPath = trim((string) data_get($entry, 'file_path'));
+                        if ($oldDisk === 's3' && $oldPath !== '' && $oldPath !== $path) {
+                            try {
+                                if (! Storage::disk($oldDisk)->delete($oldPath)) {
+                                    report(new \RuntimeException('No se pudo eliminar la evidencia anterior.'));
+                                }
+                            } catch (\Throwable $cleanupException) {
+                                report($cleanupException);
+                            }
+                        }
+                    }
+                });
             });
         } catch (\Throwable $exception) {
-            Storage::disk($disk)->delete($path);
+            if (is_string($path) && $path !== '') {
+                try {
+                    if (! Storage::disk($disk)->delete($path)) {
+                        report(new \RuntimeException('No se pudo limpiar la nueva evidencia tras el fallo.'));
+                    }
+                } catch (\Throwable $cleanupException) {
+                    report($cleanupException);
+                }
+            }
             throw $exception;
         }
 
@@ -636,6 +659,7 @@ class SobrecargoControlador extends ControladorBase
         return DB::transaction(function () use ($operation, $data, $request) {
             $locked = Operacion::query()->lockForUpdate()->findOrFail($operation->id);
             abort_if($locked->crew_report_submitted_at, 409, 'El reporte final ya fue enviado.');
+            $this->crewOperationWorkflowService->assertRequiredEvidence($locked);
             $this->crewOperationWorkflowService->assertActionAllowed($locked, 'submit_report');
             abort_unless(CrewAssignmentStatus::normalize($locked->crew_status) === CrewAssignmentStatus::REPORT_PENDING, 409, 'Completa primero el checklist posterior al vuelo.');
             $locked->update(['crew_final_report' => $data, 'crew_report_submitted_at' => now(), 'crew_service_completed_at' => now(), 'crew_status' => CrewAssignmentStatus::CREW_COMPLETED]);

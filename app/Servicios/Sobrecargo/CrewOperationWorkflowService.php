@@ -58,6 +58,8 @@ class CrewOperationWorkflowService
             'blocking_reason' => $this->blockingReason($loadedOperation),
             'crew_checkin_at' => optional($loadedOperation->crew_checkin_at)?->toISOString(),
             'editable_checklists' => $this->editableChecklists($loadedOperation),
+            'editable_evidence' => $this->editableEvidence($loadedOperation),
+            'missing_required_evidence' => $this->missingRequiredEvidence($loadedOperation),
             'checkin' => $this->checkinEvidence($loadedOperation),
         ];
     }
@@ -122,6 +124,55 @@ class CrewOperationWorkflowService
             CrewAssignmentStatus::POSTFLIGHT_PENDING => $this->hasCheckin($operation) ? ['postflight'] : [],
             default => [],
         };
+    }
+
+    private const REQUIRED_EVIDENCE = [
+        'preflight' => ['catering_received', 'baggage_secured'],
+        'postflight' => ['cabin_condition'],
+    ];
+
+    public function missingRequiredEvidence(Operacion $operation): array
+    {
+        $this->loadOperationWorkflow($operation);
+        $missing = [];
+        foreach (self::REQUIRED_EVIDENCE as $type => $codes) {
+            $checklist = $operation->checklists->where('type', $type)
+                ->where('sobrecargo_user_id', $operation->latestCrewAssignment?->sobrecargo_user_id)
+                ->sortByDesc('id')->first();
+            foreach ($codes as $code) {
+                $item = $checklist?->items->firstWhere('code', $code);
+                $hasFile = collect($item?->evidence_files ?? [])->contains(fn ($file) =>
+                    is_array($file) && filled($file['file_path'] ?? null) && filled($file['storage_disk'] ?? null)
+                );
+                if (! $hasFile) $missing[] = $code;
+            }
+        }
+        return $missing;
+    }
+
+    public function assertRequiredEvidence(Operacion $operation): void
+    {
+        abort_if($this->missingRequiredEvidence($operation) !== [], 409,
+            'Debes subir las 3 evidencias (Catering, Equipaje y Cabina final) antes de completar el post-vuelo.');
+    }
+
+    private function editableEvidence(Operacion $operation): array
+    {
+        if (! $this->hasCheckin($operation) || $this->blockingReason($operation)) return [];
+        return match (CrewAssignmentStatus::normalize($operation->crew_status)) {
+            CrewAssignmentStatus::PREFLIGHT_IN_PROGRESS => self::REQUIRED_EVIDENCE['preflight'],
+            CrewAssignmentStatus::POSTFLIGHT_PENDING, CrewAssignmentStatus::REPORT_PENDING =>
+                array_merge(...array_values(self::REQUIRED_EVIDENCE)),
+            default => [],
+        };
+    }
+
+    public function assertEvidenceEditable(Operacion $operation, string $type, string $code): void
+    {
+        // Late uploads only reopen the three evidence slots, never checklist answers.
+        if (in_array($code, self::REQUIRED_EVIDENCE[$type] ?? [], true)
+            && in_array($code, $this->editableEvidence($operation), true)) return;
+        $this->assertChecklistEditable($operation, $type);
     }
 
     public function hasCheckin(Operacion $operation): bool
@@ -230,7 +281,7 @@ class CrewOperationWorkflowService
             return $action('passengers_ready', 'Confirmar pasajeros a bordo');
         }
         if ($status === CrewAssignmentStatus::REPORT_PENDING && ! $operation->crew_report_submitted_at
-            && $this->checklistComplete($operation, 'postflight')) {
+            && $this->checklistComplete($operation, 'postflight') && $this->missingRequiredEvidence($operation) === []) {
             return $action('submit_report', 'Enviar reporte final');
         }
 
