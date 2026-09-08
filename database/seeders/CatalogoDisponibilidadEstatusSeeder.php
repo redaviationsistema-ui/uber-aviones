@@ -17,6 +17,16 @@ class CatalogoDisponibilidadEstatusSeeder extends Seeder
         }
     }
 
+    public function seedMissing(): void
+    {
+        foreach ($this->statuses() as $status) {
+            CatalogoDisponibilidadEstatus::firstOrCreate(
+                ['clave' => $status['clave']],
+                $status
+            );
+        }
+    }
+
     private function statuses(): array
     {
         return [

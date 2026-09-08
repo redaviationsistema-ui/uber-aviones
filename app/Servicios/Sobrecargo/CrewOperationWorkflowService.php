@@ -26,6 +26,9 @@ class CrewOperationWorkflowService
     {
         $loadedOperation = $this->loadOperationWorkflow($operation);
         $incidents = $this->loadIncidents($loadedOperation);
+        $allowedActions = $this->allowedActions($loadedOperation);
+        $recoverableActions = $this->recoverableActions($loadedOperation);
+        $currentStep = $this->currentStep($loadedOperation);
 
         return [
             'operation_id' => $loadedOperation->id,
@@ -44,80 +47,259 @@ class CrewOperationWorkflowService
             'tracking_events' => $loadedOperation->timeline,
             'incidents' => $incidents,
             'closure' => $loadedOperation->crew_final_report,
-            'allowed_actions' => $this->allowedActions($loadedOperation),
+            'allowed_actions' => $allowedActions,
+            'recoverable_actions' => $recoverableActions,
+            'recoverable' => $recoverableActions !== [],
+            'current_step' => $currentStep,
+            'current_phase' => $this->currentPhase($currentStep, $allowedActions),
+            'next_action' => $allowedActions[0] ?? null,
+            'workflow_inconsistent' => $this->inconsistencyReasons($loadedOperation) !== [],
+            'inconsistency_reasons' => $this->inconsistencyReasons($loadedOperation),
+            'blocking_reason' => $this->blockingReason($loadedOperation),
+            'crew_checkin_at' => optional($loadedOperation->crew_checkin_at)?->toISOString(),
+            'editable_checklists' => $this->editableChecklists($loadedOperation),
+            'checkin' => $this->checkinEvidence($loadedOperation),
         ];
     }
 
-    private function allowedActions(Operacion $operation): array
+    private function currentStep(Operacion $operation): string
+    {
+        if (! $this->checklistComplete($operation, 'preparation')) {
+            return 'preparation';
+        }
+        if (! $this->hasCheckin($operation)) {
+            return 'airport_arrival';
+        }
+        if (! $this->checklistComplete($operation, 'preflight')) {
+            return 'preflight';
+        }
+
+        return match (CrewAssignmentStatus::normalize($operation->crew_status)) {
+            CrewAssignmentStatus::POSTFLIGHT_PENDING => 'postflight',
+            CrewAssignmentStatus::REPORT_PENDING => 'closure',
+            CrewAssignmentStatus::CREW_COMPLETED,
+            CrewAssignmentStatus::ADMINISTRATIVELY_CLOSED => 'completed',
+            default => 'tracking',
+        };
+    }
+
+    private function currentPhase(string $currentStep, array $allowedActions): string
+    {
+        if ($currentStep !== 'tracking') {
+            return $currentStep;
+        }
+
+        return match ($allowedActions[0]['type'] ?? null) {
+            'departure' => 'departure',
+            'landing' => 'landing',
+            'disembark' => 'disembark',
+            default => 'tracking',
+        };
+    }
+
+    private function checkinEvidence(Operacion $operation): ?array
+    {
+        $this->loadOperationWorkflow($operation);
+        $entry = $operation->timeline->whereIn('status', ['crew_checkin', 'checked_in'])->sortBy('id')->first();
+        $timestamp = $operation->crew_checkin_at ?: $entry?->created_at;
+        if (! $timestamp) {
+            return null;
+        }
+        $actor = $entry?->created_by ? DB::table('users')->where('id', $entry->created_by)->value('name') : null;
+
+        return ['recorded_at' => $timestamp->toISOString(), 'actor_name' => $actor, 'actor_id' => $entry?->created_by];
+    }
+
+    private function editableChecklists(Operacion $operation): array
+    {
+        if ($this->blockingReason($operation)) {
+            return [];
+        }
+
+        return match (CrewAssignmentStatus::normalize($operation->crew_status)) {
+            CrewAssignmentStatus::CONFIRMED, CrewAssignmentStatus::PREPARATION_PENDING => ['preparation'],
+            CrewAssignmentStatus::PREFLIGHT_IN_PROGRESS => $this->hasCheckin($operation) ? ['preflight'] : [],
+            CrewAssignmentStatus::POSTFLIGHT_PENDING => $this->hasCheckin($operation) ? ['postflight'] : [],
+            default => [],
+        };
+    }
+
+    public function hasCheckin(Operacion $operation): bool
+    {
+        $this->loadOperationWorkflow($operation);
+        return $operation->crew_checkin_at !== null || $operation->timeline->whereIn('status', ['crew_checkin', 'checked_in'])->isNotEmpty();
+    }
+
+    public function hasCabinEvidence(Operacion $operation): bool
+    {
+        $this->loadOperationWorkflow($operation);
+        return $operation->timeline->contains('status', 'cabina_lista');
+    }
+
+    public function checklistComplete(Operacion $operation, string $type): bool
+    {
+        $this->loadOperationWorkflow($operation);
+        $checklist = $operation->checklists->where('type', $type)
+            ->where('sobrecargo_user_id', $operation->latestCrewAssignment?->sobrecargo_user_id)->sortByDesc('id')->first();
+        $required = $checklist?->items->where('is_required', true);
+        return $required && $required->isNotEmpty()
+            && $required->every(fn ($item) => in_array($item->status, ['completed', 'not_applicable'], true));
+
+    }
+
+    public function inconsistencyReasons(Operacion $operation): array
     {
         $status = CrewAssignmentStatus::normalize($operation->crew_status);
-        $hasCabinReadyEvent = $operation->timeline->contains(fn ($item) => $item->status === 'cabina_lista');
-
-        if ($status === CrewAssignmentStatus::READY_FOR_OPERATION) {
-            return [['type' => 'checkin', 'label' => 'Confirmar llegada']];
+        $afterArrival = [CrewAssignmentStatus::CHECKED_IN, CrewAssignmentStatus::PREFLIGHT_IN_PROGRESS,
+            CrewAssignmentStatus::CABIN_READY, CrewAssignmentStatus::BOARDING,
+            CrewAssignmentStatus::BOARDING_COMPLETED, CrewAssignmentStatus::IN_FLIGHT,
+            CrewAssignmentStatus::LANDED, CrewAssignmentStatus::POSTFLIGHT_PENDING,
+            CrewAssignmentStatus::REPORT_PENDING, CrewAssignmentStatus::CREW_COMPLETED,
+            CrewAssignmentStatus::ADMINISTRATIVELY_CLOSED];
+        $reasons = [];
+        if (in_array($status, $afterArrival, true) && ! $this->hasCheckin($operation)) {
+            $reasons[] = 'Falta evidencia de llegada al aeropuerto.';
         }
-        if ($status === CrewAssignmentStatus::CABIN_READY && ! $hasCabinReadyEvent) {
-            return [['type' => 'cabin_ready', 'label' => 'Confirmar cabina lista']];
+        if (in_array($status, array_slice($afterArrival, 3), true) && ! $this->hasCabinEvidence($operation)) {
+            $reasons[] = 'Falta la confirmación de aeronave, catering e insumos.';
         }
-        if ($status === CrewAssignmentStatus::CABIN_READY) {
-            return [['type' => 'transition', 'status' => CrewAssignmentStatus::BOARDING, 'label' => 'Iniciar abordaje']];
-        }
-        if ($status === CrewAssignmentStatus::BOARDING) {
-            return [['type' => 'passengers_ready', 'label' => 'Confirmar pasajeros recibidos']];
-        }
-        if ($status === CrewAssignmentStatus::REPORT_PENDING) {
-            return [['type' => 'submit_report', 'label' => 'Enviar reporte final']];
-        }
-
-        $crewTransitions = [
-            CrewAssignmentStatus::PREPARATION_PENDING,
-            CrewAssignmentStatus::PREFLIGHT_IN_PROGRESS,
-            CrewAssignmentStatus::IN_FLIGHT,
-            CrewAssignmentStatus::LANDED,
-            CrewAssignmentStatus::POSTFLIGHT_PENDING,
+        $evidenceOrder = [
+            CrewAssignmentStatus::BOARDING_COMPLETED => ['pasajeros_recibidos', 'boarding_completed'],
+            CrewAssignmentStatus::IN_FLIGHT => ['in_flight'],
+            CrewAssignmentStatus::LANDED => ['landed'],
+            CrewAssignmentStatus::POSTFLIGHT_PENDING => ['postflight_pending'],
         ];
+        $stateIndex = array_search($status, $afterArrival, true);
+        foreach ($evidenceOrder as $milestone => $statuses) {
+            if ($stateIndex !== false && $stateIndex >= array_search($milestone, $afterArrival, true)
+                && ! $operation->timeline->whereIn('status', $statuses)->isNotEmpty()) {
+                $reasons[] = 'Falta evidencia del avance '.str_replace('_', ' ', $milestone).'.';
+            }
+        }
 
-        return collect(CrewAssignmentStatus::TRANSITIONS[$status] ?? [])
-            ->filter(fn ($target) => in_array($target, $crewTransitions, true))
-            ->map(fn ($target) => [
-                'type' => 'transition',
-                'status' => $target,
-                'label' => 'Avanzar a '.str_replace('_', ' ', $target),
-            ])
-            ->values()
-            ->all();
+        return $reasons;
+    }
+
+    public function recoveryAction(Operacion $operation): ?array
+    {
+        $status = CrewAssignmentStatus::normalize($operation->crew_status);
+        if (!in_array($status, ['checked_in', 'preflight_in_progress', 'cabin_ready', 'boarding'], true)
+            || $operation->crew_service_started_at || !$this->checklistComplete($operation, 'preparation')) return null;
+        if (!$this->hasCheckin($operation)) {
+            return ['type' => 'crew_checkin', 'label' => 'Registrar llegada', 'recovery' => true];
+        }
+        if (in_array($status, ['cabin_ready', 'boarding'], true)
+            && $this->checklistComplete($operation, 'preflight') && !$this->hasCabinEvidence($operation)) {
+            return ['type' => 'cabin_ready', 'label' => 'Confirmar cabina, catering e insumos listos', 'recovery' => true];
+        }
+        return null;
+    }
+
+    public function blockingReason(Operacion $operation): ?string
+    {
+        if ($this->incidentRows($operation)->whereIn('status', ['open', 'in_review'])->contains('priority', 'critica')) {
+            return 'Resuelve primero la incidencia crítica abierta de esta operación.';
+        }
+        if ($this->inconsistencyReasons($operation) !== [] && !$this->recoveryAction($operation)) {
+            return 'Esta operación requiere regularización del flujo. '.implode(' ', $this->inconsistencyReasons($operation));
+        }
+        return null;
+    }
+
+    public function allowedActions(Operacion $operation): array
+    {
+        if ($this->blockingReason($operation)) {
+            return [];
+        }
+        if ($recovery = $this->recoveryAction($operation)) return [$recovery];
+        $status = CrewAssignmentStatus::normalize($operation->crew_status);
+        $action = fn (string $type, string $label, array $extra = []) => [array_merge(['type' => $type, 'label' => $label], $extra)];
+        if ($status === CrewAssignmentStatus::READY_FOR_OPERATION && ! $this->hasCheckin($operation)
+            && $this->checklistComplete($operation, 'preparation')) {
+            return $action('crew_checkin', 'Registrar llegada');
+        }
+        if ($status === CrewAssignmentStatus::CHECKED_IN && $this->hasCheckin($operation)) {
+            return $action('start_preflight', 'Iniciar checklist pre-vuelo', ['status' => CrewAssignmentStatus::PREFLIGHT_IN_PROGRESS]);
+        }
+        if ($status === CrewAssignmentStatus::CABIN_READY && ! $operation->crew_service_started_at && $this->checklistComplete($operation, 'preflight')) {
+            return ! $this->hasCabinEvidence($operation)
+                ? $action('cabin_ready', 'Confirmar aeronave y catering listos')
+                : $action('transition', 'Registrar pasajeros llegaron', ['status' => CrewAssignmentStatus::BOARDING]);
+        }
+        if ($status === CrewAssignmentStatus::BOARDING && $this->hasCabinEvidence($operation) && ! $operation->crew_service_started_at) {
+            return $action('passengers_ready', 'Confirmar pasajeros a bordo');
+        }
+        if ($status === CrewAssignmentStatus::REPORT_PENDING && ! $operation->crew_report_submitted_at
+            && $this->checklistComplete($operation, 'postflight')) {
+            return $action('submit_report', 'Enviar reporte final');
+        }
+
+        return match ($status) {
+            CrewAssignmentStatus::CONFIRMED => $action('transition', 'Iniciar preparación', ['status' => CrewAssignmentStatus::PREPARATION_PENDING]),
+            CrewAssignmentStatus::BOARDING_COMPLETED => $action('departure', 'Registrar despegue', ['status' => CrewAssignmentStatus::IN_FLIGHT]),
+            CrewAssignmentStatus::IN_FLIGHT => $action('landing', 'Registrar aterrizaje', ['status' => CrewAssignmentStatus::LANDED]),
+            CrewAssignmentStatus::LANDED => $action('disembark', 'Registrar desembarque', ['status' => CrewAssignmentStatus::POSTFLIGHT_PENDING]),
+            default => [],
+        };
+    }
+
+    public function recoverableActions(Operacion $operation): array
+    {
+        $action = $this->recoveryAction($operation);
+
+        return $action && !$this->blockingReason($operation) ? [$action] : [];
+    }
+
+    public function assertActionAllowed(Operacion $operation, string $type, ?string $target = null): void
+    {
+        abort_if($this->blockingReason($operation) !== null, 409, $this->blockingReason($operation));
+        $allowed = collect($this->allowedActions($operation))->contains(function ($action) use ($type, $target) {
+            if ($type === 'transition') {
+                return isset($action['status']) && $action['status'] === $target;
+            }
+
+            return $action['type'] === $type;
+        });
+        abort_unless($allowed, 409, 'La acción no está permitida en el estado actual. Actualiza el flujo.');
+    }
+
+    public function assertChecklistEditable(Operacion $operation, string $type): void
+    {
+        if (in_array($type, ['preflight', 'postflight'], true)) {
+            abort_unless($this->hasCheckin($operation), 409, 'Registra primero tu llegada al aeropuerto.');
+        }
+        abort_if($this->blockingReason($operation) !== null, 409, $this->blockingReason($operation));
+        $states = match ($type) {
+            'preparation' => [CrewAssignmentStatus::CONFIRMED, CrewAssignmentStatus::PREPARATION_PENDING],
+            'preflight' => [CrewAssignmentStatus::PREFLIGHT_IN_PROGRESS],
+            'postflight' => [CrewAssignmentStatus::POSTFLIGHT_PENDING],
+            default => [],
+        };
+        abort_unless(in_array(CrewAssignmentStatus::normalize($operation->crew_status), $states, true), 409,
+            'Este checklist no admite cambios en el estado actual.');
+    }
+
+    private function incidentRows(Operacion $operation)
+    {
+        if (! $operation->relationLoaded('workflowIncidentRows')) {
+            $operation->setRelation('workflowIncidentRows', DB::table('crew_operation_incidents')
+                ->where('crew_operation_id', $operation->id)->orderByDesc('reported_at')->orderByDesc('id')->get());
+        }
+        return $operation->getRelation('workflowIncidentRows');
     }
 
     private function loadIncidents(Operacion $operation): array
     {
-        return DB::table('crew_operation_incidents')
-            ->where('crew_operation_id', $operation->id)
-            ->orderByDesc('reported_at')
-            ->orderByDesc('id')
-            ->get()
-            ->map(function ($incident) {
-                $files = DB::table('crew_operation_incident_files')
-                    ->where('incident_id', $incident->id)
-                    ->orderBy('id')
-                    ->get()
-                    ->map(fn ($file) => [
-                        'id' => $file->id,
-                        'storage_disk' => $file->storage_disk,
-                        'file_path' => $file->file_path,
-                        'file_type' => $file->file_type,
-                        'original_name' => $file->original_name,
-                        'file_url' => $this->resolveChecklistEvidenceFileUrl(
-                            (string) ($file->storage_disk ?? ''),
-                            (string) ($file->file_path ?? ''),
-                        ),
-                    ])
-                    ->values()
-                    ->all();
-
-                return array_merge((array) $incident, ['files' => $files]);
-            })
-            ->values()
-            ->all();
+        $incidents = $this->incidentRows($operation);
+        $files = $incidents->isEmpty() ? collect() : DB::table('crew_operation_incident_files')
+            ->whereIn('incident_id', $incidents->pluck('id'))->orderBy('id')->get()->groupBy('incident_id');
+        return $incidents->map(function ($incident) use ($files) {
+            return array_merge((array) $incident, ['files' => ($files[$incident->id] ?? collect())->map(fn ($file) => [
+                'id' => $file->id, 'storage_disk' => $file->storage_disk, 'file_path' => $file->file_path,
+                'file_type' => $file->file_type, 'original_name' => $file->original_name,
+                'file_url' => $this->resolveChecklistEvidenceFileUrl((string) $file->storage_disk, (string) $file->file_path),
+            ])->values()->all()]);
+        })->values()->all();
     }
 
     private function serializeChecklist(ChecklistOperacion $checklist): array

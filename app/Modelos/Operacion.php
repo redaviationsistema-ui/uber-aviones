@@ -81,7 +81,7 @@ class Operacion extends Model
 
     public function checklists(): HasMany
     {
-        return $this->hasMany(ChecklistOperacion::class, 'operation_id');
+        return $this->hasMany(ChecklistOperacion::class, 'operation_id')->orderBy('id');
     }
 
     public function latestCrewAssignment(): HasOne

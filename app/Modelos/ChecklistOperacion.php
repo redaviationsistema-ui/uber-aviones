@@ -24,6 +24,7 @@ class ChecklistOperacion extends Model
 
     public function items(): HasMany
     {
-        return $this->hasMany(ChecklistItem::class, 'checklist_id');
+        // Keep workflow item positions stable when status or timestamps change.
+        return $this->hasMany(ChecklistItem::class, 'checklist_id')->orderBy('id');
     }
 }

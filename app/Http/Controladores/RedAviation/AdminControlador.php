@@ -2425,6 +2425,9 @@ class AdminControlador extends ControladorBase
             $locked = Operacion::query()->lockForUpdate()->findOrFail($operation->id);
             $current = CrewAssignmentStatus::normalize($locked->crew_status);
             $target = $data['status'];
+            if (in_array($target, [CrewAssignmentStatus::IN_FLIGHT, CrewAssignmentStatus::LANDED], true)) {
+                app(\App\Servicios\Sobrecargo\CrewOperationWorkflowService::class)->assertActionAllowed($locked, 'transition', $target);
+            }
             abort_unless(CrewAssignmentStatus::canTransition($current, $target), 409, 'La transicion administrativa no corresponde al estado actual.');
             abort_if($target === CrewAssignmentStatus::ADMINISTRATIVELY_CLOSED && ! $locked->crew_report_submitted_at, 409, 'El reporte final de sobrecargo sigue pendiente.');
 
