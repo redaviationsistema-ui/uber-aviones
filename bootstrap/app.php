@@ -167,16 +167,17 @@ return Application::configure(basePath: dirname(__DIR__))
                 ? $exception->getStatusCode()
                 : 500;
 
-            $message = trim($exception->getMessage());
-            if ($message === '') {
-                $message = $status >= 500
-                    ? 'Error interno del servidor.'
-                    : 'No se pudo procesar la solicitud.';
-            }
+            $evidenceUpload = $status >= 500
+                && $request->isMethod('POST')
+                && $request->is('api/v1/sobrecargo/operations/*/checklists/*/items/*/evidence');
+            // Exception reporting retains technical details in logs, never in API responses.
+            $message = $status >= 500
+                ? ($evidenceUpload ? 'No fue posible guardar la evidencia.' : 'Error interno del servidor.')
+                : (trim($exception->getMessage()) ?: 'No se pudo procesar la solicitud.');
 
             return agregarCabecerasCorsApi($request, response()->json([
                 'success' => false,
-                'code' => match ($status) {
+                'code' => $evidenceUpload ? 'EVIDENCE_UPLOAD_FAILED' : match ($status) {
                     401 => 'UNAUTHENTICATED',
                     403 => 'FORBIDDEN',
                     404 => 'RESOURCE_NOT_FOUND',
@@ -185,6 +186,7 @@ return Application::configure(basePath: dirname(__DIR__))
                     default => $status >= 500 ? 'INTERNAL_ERROR' : 'REQUEST_ERROR',
                 },
                 'message' => $message,
+                ...($evidenceUpload ? ['retriable' => true] : []),
             ], $status));
         });
     })->create();

@@ -5,7 +5,7 @@ namespace Tests\Feature;
 use App\Modelos\{Aeronave, AsignacionSobrecargo, ChecklistItem, LineaTiempoOperacion, Operacion, Proveedor, SolicitudVuelo, Usuario};
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
-use Illuminate\Support\Facades\{DB, Storage};
+use Illuminate\Support\Facades\{DB, Log, Storage};
 use Tests\TestCase;
 
 class CrewEvidenceTest extends TestCase
@@ -76,9 +76,23 @@ class CrewEvidenceTest extends TestCase
         $this->putJson($url, ['status' => 'completed'])->assertStatus(409)->assertJsonPath('code', 'CONFLICT');
         $this->assertSame('postflight_pending', $op->fresh()->crew_status);
         $this->assertSame('pending', $last->fresh()->status);
+        Log::spy();
         $response = $this->upload($op, 'postflight', 'cabin_condition')->assertCreated();
+        foreach (['start', 'validation_ok', 'path_generated', 's3_upload_ok', 'db_update_ok', 'commit_ok', 'serialization_ok'] as $stage) {
+            Log::shouldHaveReceived('info')->with('crew_evidence_upload', \Mockery::on(fn ($context) =>
+                $context['stage'] === $stage && $context['item_id'] === $last->id
+                && $context['operation_id'] === $op->id && isset($context['upload_id'])
+            ))->once();
+        }
         $path = $response->json('item.evidence_files.0.file_path');
         Storage::disk('s3')->assertExists($path);
+        $this->assertIsArray($last->fresh()->evidence_files);
+        $response->assertJsonPath('item.status', 'pending')
+            ->assertJsonPath('item.is_completed', false)
+            ->assertJsonPath('item.evidence_files.0.storage_disk', 's3')
+            ->assertJsonPath('item.evidence_files.0.file_type', 'image/jpeg')
+            ->assertJsonPath('item.evidence_files.0.original_name', 'photo.jpg');
+        $this->assertSame('postflight_pending', $op->fresh()->crew_status);
         $this->assertSame($path, $last->fresh()->evidence_files[0]['file_path']);
         for ($i = 0; $i < 2; $i++) {
             $workflow = $this->getJson($this->base($op).'/workflow')->assertOk()->json();
@@ -90,7 +104,7 @@ class CrewEvidenceTest extends TestCase
         $this->assertSame('report_pending', $op->fresh()->crew_status);
     }
 
-    public function test_replacement_deletes_old_file_only_after_metadata_update(): void
+    public function test_upload_appends_evidence_and_preserves_old_file(): void
     {
         $op = $this->fixture();
         $old = $this->upload($op, 'postflight', 'cabin_condition', 'A.jpg')->assertCreated()->json('item.evidence_files.0.file_path');
@@ -98,13 +112,16 @@ class CrewEvidenceTest extends TestCase
             if ($item->isDirty('evidence_files')) Storage::disk('s3')->assertExists($old);
         });
         try {
-            $new = $this->upload($op, 'postflight', 'cabin_condition', 'B.jpg')->assertCreated()->json('item.evidence_files.0.file_path');
+            $new = $this->upload($op, 'postflight', 'cabin_condition', 'B.jpg')->assertCreated()->json('item.evidence_files.1.file_path');
         } finally {
             ChecklistItem::getEventDispatcher()->forget('eloquent.updating: '.ChecklistItem::class);
         }
-        Storage::disk('s3')->assertMissing($old);
+        Storage::disk('s3')->assertExists($old);
         Storage::disk('s3')->assertExists($new);
-        $this->assertSame($new, $this->item($op, 'postflight', 'cabin_condition')->evidence_files[0]['file_path']);
+        $item = $this->item($op, 'postflight', 'cabin_condition');
+        $this->putJson($this->base($op)."/checklists/postflight/items/{$item->id}",
+            ['status' => 'pending', 'notes' => 'Retry later', 'evidence_files' => []])->assertOk();
+        $this->assertSame([$old, $new], array_column($this->item($op, 'postflight', 'cabin_condition')->evidence_files, 'file_path'));
     }
 
     public function test_failed_metadata_update_preserves_old_file_and_cleans_new_file(): void
@@ -112,16 +129,71 @@ class CrewEvidenceTest extends TestCase
         $op = $this->fixture();
         $old = $this->upload($op, 'postflight', 'cabin_condition', 'A.jpg')->assertCreated()->json('item.evidence_files.0.file_path');
         ChecklistItem::updating(function ($item) {
-            if ($item->isDirty('evidence_files')) throw new \RuntimeException('Simulated metadata failure');
+            if ($item->isDirty('evidence_files')) throw new \RuntimeException('SQLSTATE postgres SQL: Host: Database: private/internal');
         });
         try {
-            $this->upload($op, 'postflight', 'cabin_condition', 'B.jpg')->assertStatus(500);
+            Log::spy();
+            config(['app.debug' => true]);
+            $response = $this->upload($op, 'postflight', 'cabin_condition', 'B.jpg')->assertStatus(500)
+                ->assertExactJson(['success' => false, 'code' => 'EVIDENCE_UPLOAD_FAILED',
+                    'message' => 'No fue posible guardar la evidencia.', 'retriable' => true]);
+            Log::shouldHaveReceived('error')->with('Crew evidence upload failed', \Mockery::on(fn ($context) =>
+                $context['stage'] === 'db_update' && $context['committed'] === false
+                && $context['exception_class'] === \RuntimeException::class
+                && str_contains($context['exception'], 'SQLSTATE')
+            ))->once();
+            foreach (['SQLSTATE', 'postgres', 'SQL:', 'Host:', 'Database:', 'private/internal'] as $secret) {
+                $this->assertStringNotContainsString($secret, $response->getContent());
+            }
         } finally {
             ChecklistItem::getEventDispatcher()->forget('eloquent.updating: '.ChecklistItem::class);
         }
         Storage::disk('s3')->assertExists($old);
         $this->assertSame([$old], Storage::disk('s3')->allFiles());
         $this->assertSame($old, $this->item($op, 'postflight', 'cabin_condition')->evidence_files[0]['file_path']);
+    }
+
+    public function test_response_failure_keeps_persisted_file_and_logs_serialization_stage(): void
+    {
+        $op = $this->fixture();
+        $item = $this->item($op, 'postflight', 'cabin_condition');
+        Log::spy();
+        ChecklistItem::retrieved(function ($row) {
+            if (! empty($row->evidence_files)) throw new \RuntimeException('Internal serialization failure');
+        });
+        try {
+            $this->upload($op, 'postflight', 'cabin_condition')->assertStatus(500)
+                ->assertJsonPath('message', 'No fue posible guardar la evidencia.');
+        } finally {
+            ChecklistItem::getEventDispatcher()->forget('eloquent.retrieved: '.ChecklistItem::class);
+        }
+        $path = $item->fresh()->evidence_files[0]['file_path'];
+        Storage::disk('s3')->assertExists($path);
+        Log::shouldHaveReceived('error')->with('Crew evidence upload failed', \Mockery::on(fn ($context) =>
+            $context['stage'] === 'serialization' && $context['committed'] === true
+        ))->once();
+    }
+
+    public function test_invalid_file_is_rejected_without_storage_or_metadata_changes(): void
+    {
+        $op = $this->fixture();
+        $item = $this->item($op, 'postflight', 'cabin_condition');
+        $this->post($this->base($op)."/checklists/postflight/items/{$item->id}/evidence",
+            ['file' => UploadedFile::fake()->create('bad.pdf', 12, 'application/pdf')],
+            ['Accept' => 'application/json'])->assertStatus(422)->assertJsonValidationErrors('file');
+        $this->assertSame([], Storage::disk('s3')->allFiles());
+        $this->assertNull($item->fresh()->evidence_files);
+    }
+
+    public function test_storage_exception_returns_safe_error_without_changing_metadata(): void
+    {
+        $op = $this->fixture();
+        $item = $this->item($op, 'postflight', 'cabin_condition');
+        Storage::shouldReceive('disk')->with('s3')->andThrow(new \RuntimeException('Host: private S3 details'));
+        $this->upload($op, 'postflight', 'cabin_condition')->assertStatus(500)
+            ->assertJsonPath('code', 'EVIDENCE_UPLOAD_FAILED')
+            ->assertJsonPath('message', 'No fue posible guardar la evidencia.');
+        $this->assertNull($item->fresh()->evidence_files);
     }
 
     public function test_legacy_report_pending_can_add_missing_photos_but_not_close_without_them(): void

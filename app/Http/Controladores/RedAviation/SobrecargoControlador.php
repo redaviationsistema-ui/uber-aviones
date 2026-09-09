@@ -22,6 +22,7 @@ use Carbon\Carbon;
 use Carbon\CarbonPeriod;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
@@ -526,6 +527,16 @@ class SobrecargoControlador extends ControladorBase
 
     public function uploadChecklistEvidence(Request $request, Operacion $operation, string $type, ChecklistItem $item)
     {
+        $context = [
+            'upload_id' => (string) \Illuminate\Support\Str::uuid(),
+            'operation_id' => $operation->id,
+            'item_id' => $item->id,
+            'checklist_type' => $type,
+        ];
+        // Diagnostic stages contain identifiers only: never headers, tokens or AWS credentials.
+        $trace = static fn (string $stage, array $extra = []) =>
+            Log::info('crew_evidence_upload', array_merge($context, ['stage' => $stage], $extra));
+        $trace('start');
         $this->resolveActiveCrewAssignmentForUserOrAbort($operation, $request->user()->id);
         $data = $request->validate([
             'file' => ['required', File::image()->types(['jpg', 'jpeg', 'png', 'webp'])->max(10 * 1024)],
@@ -534,70 +545,82 @@ class SobrecargoControlador extends ControladorBase
         $checklist = $this->ensureOperationChecklist($operation, $request->user()->id, $type);
         abort_if($item->checklist_id !== $checklist->id, 404);
 
-        $disk = $this->resolveChecklistEvidenceUploadDisk();
+        $trace('validation_ok');
+        $stage = 'storage_configuration';
+        $committed = false;
+        $disk = null;
+        $path = null;
         $file = $data['file'];
         $directory = sprintf('crew/checklists/%s/%s/%s', $operation->id, $type, $item->id);
-        $path = $file->store($directory, $disk);
 
         try {
-            abort_unless(is_string($path) && $path !== '' && Storage::disk($disk)->exists($path),
+            $disk = $this->resolveChecklistEvidenceUploadDisk();
+            // Know the exact new key even if storage fails after writing the object.
+            $path = $directory.'/'.$file->hashName();
+            $stage = 's3_upload';
+            $trace('path_generated', ['path' => $path]);
+            $storedPath = $file->storeAs($directory, $file->hashName(), $disk);
+            abort_unless($storedPath === $path && Storage::disk($disk)->exists($path),
                 500, 'No se pudo verificar el almacenamiento de la evidencia.');
-            DB::transaction(function () use ($operation, $item, $request, $disk, $path, $file, $type) {
+            $trace('s3_upload_ok', ['path' => $path]);
+            $stage = 'db_transaction';
+            DB::transaction(function () use ($operation, $item, $request, $disk, $path, $file, $type, $trace, &$stage) {
+                $stage = 'operation_lock';
                 $lockedOperation = Operacion::query()->lockForUpdate()->findOrFail($operation->id);
+                $stage = 'workflow_permission';
                 $this->crewOperationWorkflowService->assertEvidenceEditable($lockedOperation, $type, $item->code);
+                $stage = 'item_lock';
                 $lockedItem = ChecklistItem::query()->lockForUpdate()->findOrFail($item->id);
+                $stage = 'metadata_read';
                 $previousFiles = $lockedItem->evidence_files ?? [];
 
+                $stage = 'db_update';
                 $lockedItem->update([
-                    'evidence_files' => [[
+                    'evidence_files' => array_merge($previousFiles, [[
                         'storage_disk' => $disk,
                         'file_path' => $path,
-                        'file_type' => $file->getClientMimeType(),
+                        'file_type' => $file->getMimeType(),
                         'original_name' => $file->getClientOriginalName(),
                         'size' => $file->getSize(),
                         'uploaded_at' => now()->toISOString(),
                         'uploaded_by' => $request->user()->id,
-                    ]],
+                    ]]),
                 ]);
-                // Runs only after the outermost transaction commits. A cleanup failure
-                // must never roll back metadata or delete the newly referenced file.
-                DB::afterCommit(function () use ($previousFiles, $path) {
-                    foreach ($previousFiles as $entry) {
-                        $oldDisk = trim((string) data_get($entry, 'storage_disk'));
-                        $oldPath = trim((string) data_get($entry, 'file_path'));
-                        if ($oldDisk === 's3' && $oldPath !== '' && $oldPath !== $path) {
-                            try {
-                                if (! Storage::disk($oldDisk)->delete($oldPath)) {
-                                    report(new \RuntimeException('No se pudo eliminar la evidencia anterior.'));
-                                }
-                            } catch (\Throwable $cleanupException) {
-                                report($cleanupException);
-                            }
-                        }
-                    }
-                });
+                $trace('db_update_ok');
+                $stage = 'db_commit';
             });
+            $committed = true;
+            $trace('commit_ok');
+            $stage = 'serialization';
+            $freshChecklist = $checklist->fresh(['items' => fn ($query) => $query->orderBy('id')]);
+            $response = $this->ok([
+                'checklist' => $this->serializeChecklist($freshChecklist),
+                'item' => $this->serializeChecklistItem(
+                    $freshChecklist->items->firstWhere('id', $item->id) ?: $item->fresh()
+                ),
+            ], 201);
+            $trace('serialization_ok');
+
+            return $response;
         } catch (\Throwable $exception) {
-            if (is_string($path) && $path !== '') {
+            Log::error('Crew evidence upload failed', array_merge($context, [
+                'stage' => $stage,
+                'path' => $path,
+                'committed' => $committed,
+                'exception' => $exception->getMessage(),
+                'exception_class' => get_class($exception),
+            ]));
+            if (! $committed && is_string($path) && $path !== '') {
                 try {
                     if (! Storage::disk($disk)->delete($path)) {
-                        report(new \RuntimeException('No se pudo limpiar la nueva evidencia tras el fallo.'));
+                        Log::error('crew_evidence_cleanup_failed', ['disk' => $disk, 'path' => $path, 'item_id' => $item->id]);
                     }
                 } catch (\Throwable $cleanupException) {
-                    report($cleanupException);
+                    Log::error('crew_evidence_cleanup_failed', ['disk' => $disk, 'path' => $path, 'item_id' => $item->id, 'exception' => $cleanupException]);
                 }
             }
             throw $exception;
         }
-
-        $freshChecklist = $checklist->fresh(['items' => fn ($query) => $query->orderBy('id')]);
-
-        return $this->ok([
-            'checklist' => $this->serializeChecklist($freshChecklist),
-            'item' => $this->serializeChecklistItem(
-                $freshChecklist->items->firstWhere('id', $item->id) ?: $item->fresh()
-            ),
-        ], 201);
     }
 
     public function transitionOperation(Request $request, Operacion $operation)
