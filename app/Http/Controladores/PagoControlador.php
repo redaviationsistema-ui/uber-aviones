@@ -126,12 +126,16 @@ class PagoControlador extends ControladorBase
 
         abort_if(! $payment, 404, 'No existe una orden de pago previa para esta reserva.');
 
-        $payment->update([
-            'status' => 'pending',
-            'failure_reason' => null,
-            'gateway_response' => null,
-            'paid_at' => null,
-        ]);
+        abort_if(
+            strtolower((string) $payment->status) === 'paid',
+            409,
+            'Un pago liquidado no puede reintentarse ni modificarse.'
+        );
+        abort_unless(
+            in_array(strtolower((string) $payment->status), ['failed', 'cancelled'], true),
+            409,
+            'Solo pueden reintentarse pagos fallidos o cancelados.'
+        );
 
         $reservation->update(['status' => 'pending_payment']);
         $this->aircraftAvailabilityService->releaseReservationBlock($reservation->fresh(['flightRequest', 'latestPayment']));
@@ -139,7 +143,7 @@ class PagoControlador extends ControladorBase
             'new_values' => [
                 'reservation_id' => $reservation->id,
                 'payment_id' => $payment->id,
-                'status' => 'pending',
+                'status' => $payment->status,
             ],
         ]);
 
@@ -217,8 +221,6 @@ class PagoControlador extends ControladorBase
 
         return Reserva::with(['contract', 'payments'])
             ->where('id', $normalizedIdentifier)
-            ->orWhere('flight_request_id', $normalizedIdentifier)
-            ->latest('id')
             ->firstOrFail();
     }
 

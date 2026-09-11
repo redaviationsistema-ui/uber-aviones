@@ -7,6 +7,7 @@ use App\Servicios\Contratos\ContratoPdfServicio;
 use App\Servicios\Contratos\ContratoReservaServicio;
 use App\Servicios\Contratos\DocuSignServicio;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Throwable;
@@ -48,17 +49,25 @@ class DocuSignWebhookControlador extends ControladorBase
         }
 
         $docusignStatus = $this->extractStatus($payload);
+        $currentStatus = strtolower(trim((string) $contract->docusign_status));
+        if ($this->isStatusRegression($currentStatus, $docusignStatus)) {
+            $contract->update(['last_webhook_payload' => $payload]);
 
-        $contract->update([
-            'docusign_status' => $docusignStatus ?: $contract->docusign_status,
-            'last_webhook_payload' => $payload,
-        ]);
-
-        if ($docusignStatus !== 'completed') {
             return response()->json(['success' => true, 'received' => true]);
         }
 
-        if ($contract->completed_at && $contract->docusign_status === 'completed') {
+        if ($docusignStatus !== 'completed') {
+            $contract->update([
+                'docusign_status' => $docusignStatus ?: $contract->docusign_status,
+                'last_webhook_payload' => $payload,
+            ]);
+
+            return response()->json(['success' => true, 'received' => true]);
+        }
+
+        if ($contract->completed_at || $currentStatus === 'completed') {
+            $contract->update(['last_webhook_payload' => $payload]);
+
             return response()->json([
                 'success' => true,
                 'received' => true,
@@ -75,21 +84,45 @@ class DocuSignWebhookControlador extends ControladorBase
                 $signedPdf
             );
 
-            $termsSnapshot = is_array($contract->terms_snapshot) ? $contract->terms_snapshot : [];
-            $termsSnapshot['docusign'] = [
-                'completed_via' => 'webhook',
-                'status' => $docusignStatus,
-                'completed_at' => now()->toIso8601String(),
-            ];
+            $paymentOrder = DB::transaction(function () use ($contract, $payload, $docusignStatus, $signedPdfPath, $contratoReservaServicio) {
+                $lockedContract = ContratoReserva::query()
+                    ->with(['reservation.client', 'reservation.flightRequest', 'reservation.payments'])
+                    ->lockForUpdate()
+                    ->findOrFail($contract->id);
 
-            $paymentOrder = $contratoReservaServicio->registrarFirma(
-                $contract->reservation,
-                $contract,
-                $contract->reservation->client,
-                $termsSnapshot,
-                $signedPdfPath,
-                $docusignStatus
-            );
+                if ($lockedContract->completed_at || strtolower((string) $lockedContract->docusign_status) === 'completed') {
+                    $lockedContract->update(['last_webhook_payload' => $payload]);
+
+                    return null;
+                }
+
+                $termsSnapshot = is_array($lockedContract->terms_snapshot) ? $lockedContract->terms_snapshot : [];
+                $termsSnapshot['docusign'] = [
+                    'completed_via' => 'webhook',
+                    'status' => $docusignStatus,
+                    'completed_at' => now()->toIso8601String(),
+                ];
+
+                $lockedContract->update(['last_webhook_payload' => $payload]);
+
+                return $contratoReservaServicio->registrarFirma(
+                    $lockedContract->reservation,
+                    $lockedContract,
+                    $lockedContract->reservation->client,
+                    $termsSnapshot,
+                    $signedPdfPath,
+                    $docusignStatus
+                );
+            });
+
+            if (! $paymentOrder) {
+                return response()->json([
+                    'success' => true,
+                    'received' => true,
+                    'duplicate' => true,
+                    'contract_id' => $contract->id,
+                ]);
+            }
 
             return response()->json([
                 'success' => true,
@@ -140,5 +173,19 @@ class DocuSignWebhookControlador extends ControladorBase
         }
 
         return $status;
+    }
+
+    private function isStatusRegression(string $currentStatus, string $incomingStatus): bool
+    {
+        $rank = [
+            'created' => 1,
+            'sent' => 2,
+            'delivered' => 3,
+            'signed' => 4,
+            'completed' => 5,
+        ];
+
+        return isset($rank[$currentStatus], $rank[$incomingStatus])
+            && $rank[$incomingStatus] < $rank[$currentStatus];
     }
 }

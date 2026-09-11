@@ -8,6 +8,10 @@ use App\Http\Controladores\RedAviation\FlightMembershipAdminControlador;
 use Illuminate\Support\Facades\Route;
 
 Route::prefix('admin')->middleware(['auth.token', 'role:admin'])->group(function () {
+    Route::post('/users/{user}/identity-review', [\App\Http\Controladores\AdminIdentityReviewControlador::class, 'reviewIdentity']);
+    Route::post('/users/{user}/identity-evidence', [\App\Http\Controladores\AdminIdentityReviewControlador::class, 'evidence']);
+    Route::post('/users/{user}/crew-review', [\App\Http\Controladores\AdminIdentityReviewControlador::class, 'reviewCrew']);
+    Route::get('/users/{user}/crew-license', [\App\Http\Controladores\AdminIdentityReviewControlador::class, 'license']);
     Route::get('/dashboard-marketplace', [RedAviationAdminControlador::class, 'dashboard']);
     Route::get('/usuarios', [AdministradorControlador::class, 'users']);
     Route::get('/users', [AdministradorControlador::class, 'users']);

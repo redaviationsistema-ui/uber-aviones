@@ -173,6 +173,8 @@ class AdministradorControlador extends ControladorBase
 
     public function updateUsuario(Request $request, Usuario $user)
     {
+        abort_if($request->input('role') === 'sobrecargo' && ! $user->hasRole('sobrecargo'), 409, 'Aprueba primero la identidad y la candidatura desde la revisión administrativa.');
+
         $user->update($request->validate([
             'name' => ['sometimes', 'string', 'max:255'],
             'phone' => ['nullable', 'string', 'max:50'],

@@ -47,11 +47,11 @@ Route::middleware(['auth.token'])->group(function () {
         Route::get('/flight-requests', [ClienteControlador::class, 'indexFlightRequests']);
         Route::get('/flight-requests/{flightRequest}/flight-brief', [ClienteControlador::class, 'flightBrief']);
         Route::get('/flight-requests/{flightRequest}', [ClienteControlador::class, 'showFlightRequest']);
-        Route::get('/flight-requests/{reservation}/contract', [ReservaControlador::class, 'showContract']);
-        Route::get('/flight-requests/{reservation}/contract/pdf', [ReservaControlador::class, 'downloadContractPdf']);
-        Route::post('/flight-requests/{reservation}/contract/generate', [ReservaControlador::class, 'generateContract']);
-        Route::post('/flight-requests/{reservation}/contract/docusign', [ReservaControlador::class, 'startEmbeddedSigning']);
-        Route::post('/flight-requests/{reservation}/contract/sign', [ReservaControlador::class, 'signContract']);
+        Route::get('/flight-requests/{reservation}/contract', [ReservaControlador::class, 'contractAliasRetired']);
+        Route::get('/flight-requests/{reservation}/contract/pdf', [ReservaControlador::class, 'contractAliasRetired']);
+        Route::post('/flight-requests/{reservation}/contract/generate', [ReservaControlador::class, 'contractAliasRetired']);
+        Route::post('/flight-requests/{reservation}/contract/docusign', [ReservaControlador::class, 'contractAliasRetired']);
+        Route::post('/flight-requests/{reservation}/contract/sign', [ReservaControlador::class, 'contractAliasRetired']);
         Route::get('/reservations/{reservation}/contract', [ReservaControlador::class, 'showContract']);
         Route::get('/reservations/{reservation}/contract/pdf', [ReservaControlador::class, 'downloadContractPdf']);
         Route::post('/reservations/{reservation}/contract/generate', [ReservaControlador::class, 'generateContract']);

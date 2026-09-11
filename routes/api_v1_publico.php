@@ -29,4 +29,5 @@ Route::prefix('public')->group(function () {
 });
 
 Route::get('/airports/search', AeropuertoBusquedaControlador::class);
+Route::post('/crew/register', [AutenticacionControlador::class, 'registerCrew']);
 Route::post('/provider/register', [AutenticacionControlador::class, 'register']);

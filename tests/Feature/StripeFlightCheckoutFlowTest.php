@@ -357,7 +357,7 @@ class StripeFlightCheckoutFlowTest extends TestCase
             ->assertJsonPath('stripe_checkout_payment_status', 'unpaid');
     }
 
-    public function test_success_finalizes_paid_checkout_and_confirms_reservation(): void
+    public function test_success_finalizes_paid_checkout_without_confirming_flight(): void
     {
         $this->seed();
         $this->configureStripe();
@@ -425,9 +425,9 @@ class StripeFlightCheckoutFlowTest extends TestCase
         ]);
         $this->assertDatabaseHas('reservations', [
             'id' => $context['reservation']->id,
-            'status' => 'confirmed',
+            'status' => 'paid',
         ]);
-        $this->assertSame(1, \App\Modelos\Notificacion::where('type', 'flight.confirmed')->where('provider_id', $context['provider']->id)->count());
+        $this->assertSame(0, \App\Modelos\Notificacion::where('type', 'flight.confirmed')->where('provider_id', $context['provider']->id)->count());
 
         $this->assertDatabaseHas('flight_requests', [
             'id' => $context['flightRequest']->id,

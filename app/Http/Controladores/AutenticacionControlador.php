@@ -26,8 +26,23 @@ use Throwable;
 
 class AutenticacionControlador extends ControladorBase
 {
+    public function registerCrew(Request $request)
+    {
+        $request->merge(['role' => Usuario::ROLE_SOBRECARGO, 'operational_role' => null]);
+
+        return $this->register($request);
+    }
+
     public function register(Request $request)
     {
+        // Provider onboarding has its own public endpoint. A client registration
+        // cannot select a provider role or attach operational permissions.
+        if ($request->is('api/v1/provider/register')) {
+            $request->merge(['role' => Usuario::ROLE_PROVIDER, 'operational_role' => null]);
+        } elseif ($request->input('role') === Usuario::ROLE_PROVIDER) {
+            return response()->json(['success' => false, 'message' => 'Utiliza el registro de proveedor.'], 422);
+        }
+
         $data = $request->validate([
             'name' => ['nullable', 'string', 'max:255'],
             'full_name' => ['nullable', 'string', 'max:255'],
@@ -99,6 +114,7 @@ class AutenticacionControlador extends ControladorBase
             'face_occluded' => ['nullable', 'boolean'],
             'ine_front' => ['nullable', 'file', 'image', 'mimes:jpg,jpeg,png,webp', 'max:8192'],
             'ine_back' => ['nullable', 'file', 'image', 'mimes:jpg,jpeg,png,webp', 'max:8192'],
+            'license_file' => ['nullable', 'file', 'mimes:jpg,jpeg,png,webp,pdf', 'max:8192'],
             'selfie_biometric' => ['nullable', 'file', 'image', 'mimes:jpg,jpeg,png,webp', 'max:8192'],
         ]);
 
@@ -121,9 +137,23 @@ class AutenticacionControlador extends ControladorBase
             ?? null;
 
         $role = $data['role'];
-        $operationalRole = $data['operational_role']
-            ?? ($role === Usuario::ROLE_SOBRECARGO ? Usuario::ROLE_SOBRECARGO : null);
+        $operationalRole = null;
         $persistedRole = $role === Usuario::ROLE_SOBRECARGO ? Usuario::ROLE_CLIENT : $role;
+        foreach ([
+            'identity_verification_status', 'identity_verification_message', 'identity_verified',
+            'face_detected', 'faces_count', 'face_confidence', 'face_match_score', 'liveness_score',
+            'image_storage_score', 'biometric_image_saved', 'biometric_captured_at',
+            'biometric_provider', 'biometric_template_type', 'quality_brightness',
+            'quality_sharpness', 'pose_yaw', 'pose_pitch', 'pose_roll', 'face_occluded',
+        ] as $untrustedField) {
+            unset($data[$untrustedField]);
+        }
+        $data['role'] = $persistedRole;
+        $data['operational_role'] = null;
+        $data['identity_validation_required'] = true;
+        $data['identity_verification_status'] = 'pending';
+        $data['identity_verified'] = false;
+
         $registrationIdentification = $this->resolveRegistrationIdentificationRecord(
             $data['identification_document_id'] ?? null
         );
@@ -147,7 +177,7 @@ class AutenticacionControlador extends ControladorBase
 
         if (
             $role !== Usuario::ROLE_SOBRECARGO
-            && $request->boolean('identity_validation_required')
+            && ($registrationIdentification || $hasScannedIdentityFiles)
             && $documentType === 'INE'
             && $hasFrontIdentityFile
             && ! $hasBackIdentityFile
@@ -163,22 +193,7 @@ class AutenticacionControlador extends ControladorBase
 
         if (
             $role !== Usuario::ROLE_SOBRECARGO
-            && $request->boolean('identity_validation_required')
-            && ! $registrationIdentification
-            && ! $hasScannedIdentityFiles
-        ) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Escanea tu identificación oficial o súbela en PDF antes de completar el registro.',
-                'errors' => [
-                    'identification_document_id' => ['La identificación oficial aún no fue guardada o escaneada.'],
-                ],
-            ], 422);
-        }
-
-        if (
-            $role !== Usuario::ROLE_SOBRECARGO
-            && $request->boolean('identity_validation_required')
+            && ($registrationIdentification || $hasScannedIdentityFiles)
             && $requiresCurp
             && blank($data['curp'] ?? $data['ine_curp'] ?? null)
         ) {
@@ -271,10 +286,22 @@ class AutenticacionControlador extends ControladorBase
 
                 $user->syncRoles(
                     array_values(array_filter(array_unique([$persistedRole, $operationalRole]))),
-                    $operationalRole ?: $role
+                    $persistedRole
                 );
 
                 $profileTaxData = [];
+                if ($role === Usuario::ROLE_SOBRECARGO) {
+                    $licensePath = $request->hasFile('license_file')
+                        ? $this->storeRegistrationIdentityFile($identityStorage, $request->file('license_file'), 'identity/crew/licenses', $uploadedIdentityPaths)
+                        : null;
+                    $profileTaxData['crew_application'] = [
+                        'status' => 'pending',
+                        'requested_role' => Usuario::ROLE_SOBRECARGO,
+                        'license_path' => $licensePath,
+                        'license_disk' => $licensePath ? $identityStorage->diskName() : null,
+                        'submitted_at' => now()->toIso8601String(),
+                    ];
+                }
 
                 if ($registrationIdentification) {
                     $profileTaxData['official_identification'] = $registrationIdentification;
@@ -291,7 +318,7 @@ class AutenticacionControlador extends ControladorBase
                         'document_type' => $data['document_type'] ?? null,
                         'document_number' => $data['document_number'] ?? null,
                         'document_issuing_country' => $data['document_issuing_country'] ?? null,
-                        'identity_validation_required' => $request->boolean('identity_validation_required'),
+                        'identity_validation_required' => true,
                         'ine_curp' => $data['curp'] ?? $data['ine_curp'] ?? null,
                         'ine_cic' => $data['ine_cic'] ?? null,
                         'ine_ocr' => $data['ine_ocr'] ?? null,
@@ -331,7 +358,15 @@ class AutenticacionControlador extends ControladorBase
                     ]);
                 }
 
-                $responseExtras = [];
+                $responseExtras = [
+                    'user_created' => true,
+                    'registration_status' => 'success',
+                    'identity' => ['status' => 'pending', 'verified' => false],
+                ];
+                if ($role === Usuario::ROLE_SOBRECARGO) {
+                    $responseExtras['crew_application_status'] = 'pending';
+                    $responseExtras['message'] = 'Cuenta creada. Solicitud de sobrecargo pendiente de autorización.';
+                }
 
                 if ($user->role === Usuario::ROLE_PROVIDER && $user->operational_role !== Usuario::ROLE_SOBRECARGO) {
                     $provider = Proveedor::create([
@@ -357,7 +392,7 @@ class AutenticacionControlador extends ControladorBase
 
                     $user->forceFill(['provider_id' => $provider->id])->save();
 
-                    $responseExtras = [
+                    $responseExtras += [
                         'message' => 'Proveedor registrado. Pendiente de validacion por Admin.',
                         'provider_status' => 'pending_validation',
                         'approval_status' => 'pending',
@@ -1247,6 +1282,10 @@ class AutenticacionControlador extends ControladorBase
     private function normalizeDocumentType(mixed $value): ?string
     {
         $normalized = Str::of((string) ($value ?? ''))->trim()->upper()->value();
+
+        if (str_contains($normalized, 'LICENCIA')) {
+            return $normalized;
+        }
 
         return match ($normalized) {
             '', 'NULL' => null,

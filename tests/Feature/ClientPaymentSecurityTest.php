@@ -11,12 +11,22 @@ use App\Modelos\Reserva;
 use App\Modelos\SolicitudVuelo;
 use App\Modelos\TokenApi;
 use App\Modelos\Usuario;
+use App\Servicios\Contratos\ContratoPdfServicio;
+use App\Servicios\Contratos\DocuSignServicio;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Mockery;
 use Tests\TestCase;
 
 class ClientPaymentSecurityTest extends TestCase
 {
     use RefreshDatabase;
+
+    protected function tearDown(): void
+    {
+        Mockery::close();
+
+        parent::tearDown();
+    }
 
     public function test_client_cannot_force_manual_payment_to_paid(): void
     {
@@ -79,7 +89,7 @@ class ClientPaymentSecurityTest extends TestCase
 
         $response
             ->assertOk()
-            ->assertJsonPath('payment.status', 'pending');
+            ->assertJsonPath('payment.status', 'failed');
 
         $this->assertDatabaseHas('audit_logs', [
             'user_id' => $context['user']->id,
@@ -130,6 +140,39 @@ class ClientPaymentSecurityTest extends TestCase
         ]);
     }
 
+    public function test_active_docusign_envelope_is_reused_without_creating_another_envelope(): void
+    {
+        $this->seed();
+        $context = $this->createReservationPaymentContext();
+        $contract = $context['reservation']->contract;
+        $contract->update([
+            'status' => 'sent',
+            'docusign_status' => 'sent',
+            'docusign_envelope_id' => 'env-reusable-001',
+            'completed_at' => null,
+        ]);
+
+        $docuSign = Mockery::mock(DocuSignServicio::class);
+        $docuSign->shouldReceive('estaConfigurado')->twice()->andReturnTrue();
+        $docuSign->shouldReceive('construirReturnUrl')->twice()->andReturn('https://example.test/contract-return');
+        $docuSign->shouldReceive('crearEnvelopeParaFirmaEmbebida')->never();
+        $docuSign->shouldReceive('crearRecipientView')->twice()->andReturn('https://example.test/sign');
+        $pdf = Mockery::mock(ContratoPdfServicio::class);
+        $pdf->shouldReceive('guardarContratoReserva')->never();
+        $pdf->shouldReceive('rutaAbsoluta')->never();
+        $this->app->instance(DocuSignServicio::class, $docuSign);
+        $this->app->instance(ContratoPdfServicio::class, $pdf);
+
+        for ($attempt = 0; $attempt < 2; $attempt++) {
+            $this->withHeader('Authorization', 'Bearer '.$context['token'])
+                ->postJson('/api/v1/cliente/reservas/'.$context['reservation']->id.'/contrato/docusign')
+                ->assertOk()
+                ->assertJsonPath('envelope_id', 'env-reusable-001');
+        }
+
+        $this->assertSame('env-reusable-001', $contract->fresh()->docusign_envelope_id);
+    }
+
     public function test_other_client_cannot_read_payment_authorization(): void
     {
         $this->seed();
@@ -140,6 +183,25 @@ class ClientPaymentSecurityTest extends TestCase
         $this->withHeader('Authorization', 'Bearer '.$otherToken)
             ->getJson('/api/v1/cliente/reservas/'.$context['reservation']->id.'/payment-authorization')
             ->assertForbidden();
+    }
+
+    public function test_reservation_route_does_not_resolve_a_flight_request_identifier(): void
+    {
+        $this->seed();
+        $context = $this->createReservationPaymentContext();
+        $flightRequest = SolicitudVuelo::query()->create([
+            'client_id' => $context['user']->id,
+            'origin' => 'MMMX',
+            'destination' => 'MMTO',
+            'departure_datetime' => now()->addDays(5),
+            'passengers' => 2,
+            'trip_type' => 'one_way',
+            'status' => 'pending',
+        ]);
+
+        $this->withHeader('Authorization', 'Bearer '.$context['token'])
+            ->getJson('/api/v1/cliente/reservas/'.$flightRequest->id)
+            ->assertNotFound();
     }
 
     public function test_pending_contract_blocks_payment_authorization(): void

@@ -112,8 +112,8 @@ class PlataformaVuelosApiTest extends TestCase
         $response
             ->assertCreated()
             ->assertJsonPath('user.email', 'identidad@cliente.test')
-            ->assertJsonPath('user.identity_verification_status', 'approved')
-            ->assertJsonPath('user.identity_verified', true)
+            ->assertJsonPath('user.identity_verification_status', 'pending')
+            ->assertJsonPath('user.identity_verified', false)
             ->assertJsonPath('user.biometric_selfie_disk', $identityDisk);
 
         $user = Usuario::query()
@@ -139,8 +139,8 @@ class PlataformaVuelosApiTest extends TestCase
             ->first();
 
         $this->assertNotNull($verification);
-        $this->assertSame('approved', $verification->status);
-        $this->assertTrue($verification->identity_verified);
+        $this->assertSame('pending', $verification->status);
+        $this->assertFalse($verification->identity_verified);
         $this->assertSame($identityDisk, $user->biometric_selfie_disk);
         $this->assertNotNull($user->biometric_selfie_uploaded_at);
         $this->assertNotNull($user->biometric_selfie_url);

@@ -53,12 +53,12 @@ Route::prefix('cliente')->middleware(['auth.token', 'role:client,admin'])->group
     Route::post('/reservas/{reservation}/contrato/generar', [ReservaControlador::class, 'generateContract']);
     Route::post('/reservas/{reservation}/contrato/docusign', [ReservaControlador::class, 'startEmbeddedSigning']);
     Route::post('/reservas/{reservation}/contrato/firmar', [ReservaControlador::class, 'signContract']);
-    Route::get('/solicitudes/{reservation}/contrato', [ReservaControlador::class, 'showContract']);
-    Route::get('/solicitudes/{reservation}/payment-availability', [ReservaControlador::class, 'paymentAvailability']);
-    Route::get('/solicitudes/{reservation}/contrato/pdf', [ReservaControlador::class, 'downloadContractPdf']);
-    Route::post('/solicitudes/{reservation}/contrato/generar', [ReservaControlador::class, 'generateContract']);
-    Route::post('/solicitudes/{reservation}/contrato/docusign', [ReservaControlador::class, 'startEmbeddedSigning']);
-    Route::post('/solicitudes/{reservation}/contrato/firmar', [ReservaControlador::class, 'signContract']);
+    Route::get('/solicitudes/{reservation}/contrato', [ReservaControlador::class, 'contractAliasRetired']);
+    Route::get('/solicitudes/{reservation}/payment-availability', [ReservaControlador::class, 'contractAliasRetired']);
+    Route::get('/solicitudes/{reservation}/contrato/pdf', [ReservaControlador::class, 'contractAliasRetired']);
+    Route::post('/solicitudes/{reservation}/contrato/generar', [ReservaControlador::class, 'contractAliasRetired']);
+    Route::post('/solicitudes/{reservation}/contrato/docusign', [ReservaControlador::class, 'contractAliasRetired']);
+    Route::post('/solicitudes/{reservation}/contrato/firmar', [ReservaControlador::class, 'contractAliasRetired']);
     Route::get('/contratos/{contract}/estado', [ReservaControlador::class, 'showContractStatusById'])
         ->name('cliente.contratos.estado');
     Route::get('/contratos/{contract}/pdf-firmado', [ReservaControlador::class, 'downloadSignedContractPdf'])

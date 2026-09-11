@@ -40,6 +40,16 @@ class ReservaControlador extends ControladorBase
         private readonly IdempotencyService $idempotencyService,
     ) {}
 
+    public function contractAliasRetired(Request $request)
+    {
+        return response()->json([
+            'success' => false,
+            'code' => 'LEGACY_CONTRACT_ALIAS_RETIRED',
+            'message' => 'Esta ruta fue retirada porque su identificador esperaba reservation_id bajo un nombre ambiguo. Usa /cliente/reservas/{reservationId}/contrato o /client/reservations/{reservationId}/contract.',
+        ], 410);
+    }
+
+
     public function index(Request $request)
     {
         $query = Reserva::with([
@@ -194,6 +204,11 @@ class ReservaControlador extends ControladorBase
                 abort_if($quote->flightRequest->client_id !== $request->user()->id, 403, 'No puedes reservar esta cotizacion.');
                 abort_if($quote->status !== 'accepted', 409, 'Primero debes aceptar la cotizacion.');
 
+                $existing = Reserva::where('flight_request_id', $flightRequest->id)->lockForUpdate()->first();
+                if ($existing) {
+                    return [$existing, $flightRequest];
+                }
+
                 if ($quote->aircraft_id) {
                     DB::table('aircraft')
                         ->where('id', $quote->aircraft_id)
@@ -204,8 +219,9 @@ class ReservaControlador extends ControladorBase
                 }
 
                 $reservation = Reserva::firstOrCreate(
-                    ['quote_id' => $quote->id],
+                    ['flight_request_id' => $flightRequest->id],
                     [
+                        'quote_id' => $quote->id,
                         'client_id' => $request->user()->id,
                         'provider_id' => $quote->provider_id,
                         'aircraft_id' => $quote->aircraft_id,
@@ -232,6 +248,10 @@ class ReservaControlador extends ControladorBase
                 ->lockForUpdate()
                 ->latest('id')
                 ->first();
+
+            if ($reservation) {
+                return [$reservation, $flightRequest];
+            }
 
             if (! $reservation) {
                 abort_if(
@@ -288,6 +308,10 @@ class ReservaControlador extends ControladorBase
 
             return [$reservation, $flightRequest];
         });
+
+        if (! $reservation->wasRecentlyCreated) {
+            return $this->ok(['reservation' => $reservation->load(['quote', 'aircraft', 'contract'])], 201);
+        }
 
         $reservation = $this->commercialSnapshotService->persistIfMissing($reservation);
         $commissionBaseAmount = (float) (data_get($flightRequest->pricing_context, 'flight_cost') ?? $reservation->total_amount);
@@ -767,6 +791,24 @@ class ReservaControlador extends ControladorBase
         DocuSignServicio $docuSignServicio,
         ContratoPdfServicio $contratoPdfServicio,
     ) {
+        $reservation = Reserva::query()->findOrFail($this->normalizeReservationIdentifier($reservation));
+        $this->authorizeReservationClient($request, $reservation);
+
+        // Lock the parent even when no contract exists yet. Do not retry a
+        // transaction containing an external envelope creation automatically.
+        return DB::transaction(function () use ($request, $reservation, $docuSignServicio, $contratoPdfServicio) {
+            $lockedReservation = Reserva::query()->lockForUpdate()->findOrFail($reservation->id);
+
+            return $this->performEmbeddedSigning($request, $lockedReservation, $docuSignServicio, $contratoPdfServicio);
+        });
+    }
+
+    private function performEmbeddedSigning(
+        Request $request,
+        mixed $reservation,
+        DocuSignServicio $docuSignServicio,
+        ContratoPdfServicio $contratoPdfServicio,
+    ) {
         $reservation = $this->resolveReservation($reservation);
         $this->authorizeReservationClient($request, $reservation);
 
@@ -805,6 +847,44 @@ class ReservaControlador extends ControladorBase
         ]);
 
         $shouldRegenerate = (bool) ($data['regenerate'] ?? false);
+        $existing = $reservation->contract()->lockForUpdate()->first();
+        $status = strtolower(trim((string) $existing?->docusign_status));
+        $envelopeId = trim((string) $existing?->docusign_envelope_id);
+        if ($existing && ($status === 'completed' || $existing->completed_at)) {
+            return response()->json([
+                'success' => false,
+                'code' => 'CONTRACT_ALREADY_COMPLETED',
+                'message' => 'El contrato ya fue completado y no puede generar otro envelope.',
+                'contract' => $existing,
+            ], 422);
+        }
+        if ($envelopeId !== '' && in_array($status, ['voided', 'expired', 'error', 'declined'], true) && ! $shouldRegenerate) {
+            return response()->json([
+                'success' => false,
+                'code' => 'CONTRACT_REGENERATION_REQUIRED',
+                'message' => 'El envelope anterior ya no es vigente; solicita una regeneración explícita.',
+            ], 422);
+        }
+        if ($envelopeId !== '' && in_array($status, ['created', 'sent', 'delivered', 'signing'], true)) {
+            try {
+                $returnUrl = $this->resolveDocuSignReturnUrl($docuSignServicio, (int) $existing->id, (int) $reservation->id, $data);
+                $signingUrl = $docuSignServicio->crearRecipientView(
+                    $envelopeId, (string) $existing->signer_name, (string) $existing->signer_email,
+                    (string) $existing->client_user_id, $returnUrl,
+                );
+            } catch (RuntimeException $exception) {
+                return response()->json(['success' => false, 'message' => $exception->getMessage()], 422);
+            }
+
+            return $this->ok([
+                'contract' => $existing,
+                'reservation' => $reservation->fresh(['contract']),
+                'envelope_id' => $envelopeId,
+                'signing_url' => $signingUrl,
+                'recipient_view_url' => $signingUrl,
+                'embedded_signing_url' => $signingUrl,
+            ]);
+        }
         $this->ensureContractFlowAvailability($reservation);
         $contract = $this->buildReservationContract($reservation, $shouldRegenerate);
         $termsSnapshot = is_array($contract->terms_snapshot) ? $contract->terms_snapshot : [];
@@ -973,20 +1053,63 @@ class ReservaControlador extends ControladorBase
         );
 
         try {
-            $envelopeId = $docuSignServicio->crearEnvelopeParaFirmaEmbebida(
-                $contratoPdfServicio->rutaAbsoluta($pdfRelativePath),
-                (string) $contract->signer_name,
-                (string) $contract->signer_email,
-                (string) $contract->client_user_id
-            );
+            $signing = DB::transaction(function () use ($contract, $docuSignServicio, $contratoPdfServicio, $pdfRelativePath, $returnUrl, $shouldRegenerate) {
+                $lockedContract = ContratoReserva::query()->lockForUpdate()->findOrFail($contract->id);
+                $docusignStatus = strtolower(trim((string) $lockedContract->docusign_status));
+                $envelopeId = trim((string) $lockedContract->docusign_envelope_id);
 
-            $signingUrl = $docuSignServicio->crearRecipientView(
-                $envelopeId,
-                (string) $contract->signer_name,
-                (string) $contract->signer_email,
-                (string) $contract->client_user_id,
-                $returnUrl
-            );
+                if ($docusignStatus === 'completed' || $lockedContract->completed_at) {
+                    throw new RuntimeException('El contrato ya fue completado y no puede generar otro envelope.');
+                }
+
+                if ($envelopeId !== '' && in_array($docusignStatus, ['created', 'sent', 'delivered', 'signing'], true)) {
+                    return [
+                        'contract' => $lockedContract,
+                        'envelope_id' => $envelopeId,
+                        'signing_url' => $docuSignServicio->crearRecipientView(
+                            $envelopeId,
+                            (string) $lockedContract->signer_name,
+                            (string) $lockedContract->signer_email,
+                            (string) $lockedContract->client_user_id,
+                            $returnUrl
+                        ),
+                    ];
+                }
+
+                if ($envelopeId !== '' && in_array($docusignStatus, ['voided', 'expired', 'error', 'declined'], true) && ! $shouldRegenerate) {
+                    throw new RuntimeException('El envelope anterior ya no es vigente; solicita una regeneración explícita.');
+                }
+
+                $envelopeId = $docuSignServicio->crearEnvelopeParaFirmaEmbebida(
+                    $contratoPdfServicio->rutaAbsoluta($pdfRelativePath),
+                    (string) $lockedContract->signer_name,
+                    (string) $lockedContract->signer_email,
+                    (string) $lockedContract->client_user_id
+                );
+
+
+                $lockedContract->update([
+                    'status' => 'sent',
+                    'docusign_envelope_id' => $envelopeId,
+                    'docusign_status' => 'sent',
+                    'contract_pdf_path' => $pdfRelativePath,
+                    'document_url' => $pdfRelativePath,
+                    'generated_at' => $lockedContract->generated_at ?: now(),
+                    'sent_at' => now(),
+                ]);
+
+                return [
+                    'contract' => $lockedContract->fresh(),
+                    'envelope_id' => $envelopeId,
+                    'signing_url' => null,
+                ];
+            });
+            if ($signing['signing_url'] === null) {
+                $signing['signing_url'] = $docuSignServicio->crearRecipientView(
+                    $signing['envelope_id'], (string) $signing['contract']->signer_name,
+                    (string) $signing['contract']->signer_email, (string) $signing['contract']->client_user_id, $returnUrl,
+                );
+            }
         } catch (RuntimeException $exception) {
             return response()->json([
                 'success' => false,
@@ -1002,16 +1125,9 @@ class ReservaControlador extends ControladorBase
                 ),
             ], 422);
         }
-
-        $contract->update([
-            'status' => 'sent',
-            'docusign_envelope_id' => $envelopeId,
-            'docusign_status' => 'sent',
-            'contract_pdf_path' => $pdfRelativePath,
-            'document_url' => $pdfRelativePath,
-            'generated_at' => $contract->generated_at ?: now(),
-            'sent_at' => now(),
-        ]);
+        $contract = $signing['contract'];
+        $envelopeId = $signing['envelope_id'];
+        $signingUrl = $signing['signing_url'];
 
         $this->writeAudit($request, 'send', 'reservation_contracts', 'Contrato enviado a DocuSign para firma embebida.');
 
@@ -1161,8 +1277,6 @@ class ReservaControlador extends ControladorBase
 
         return Reserva::with(['quote', 'aircraft', 'provider', 'legs', 'contract', 'review', 'payments'])
             ->where('id', $normalizedIdentifier)
-            ->orWhere('flight_request_id', $normalizedIdentifier)
-            ->latest('id')
             ->firstOrFail();
     }
 
@@ -1174,13 +1288,13 @@ class ReservaControlador extends ControladorBase
 
         if (is_array($value)) {
             return $this->normalizeReservationIdentifier(
-                $value['id'] ?? $value['reservation_id'] ?? $value['flight_request_id'] ?? ''
+                $value['reservation_id'] ?? $value['id'] ?? ''
             );
         }
 
         if (is_object($value)) {
             return $this->normalizeReservationIdentifier(
-                $value->id ?? $value->reservation_id ?? $value->flight_request_id ?? ''
+                $value->reservation_id ?? $value->id ?? ''
             );
         }
 
@@ -1205,18 +1319,27 @@ class ReservaControlador extends ControladorBase
 
     private function buildReservationContract(Reserva $reservation, bool $regenerate = false): ContratoReserva
     {
+        return DB::transaction(function () use ($reservation, $regenerate) {
+            $locked = Reserva::query()->lockForUpdate()->findOrFail($reservation->id);
+            $locked->setRelation('contract', $locked->contract()->lockForUpdate()->first());
+
+            return $this->performBuildReservationContract($locked, $regenerate);
+        });
+    }
+
+    private function performBuildReservationContract(Reserva $reservation, bool $regenerate): ContratoReserva
+    {
         $reservation = $this->commercialSnapshotService->persistIfMissing($reservation);
         $existing = $reservation->contract;
 
         if (
             $existing
-            && strtolower((string) $existing->docusign_status) === 'completed'
-            && $existing->completed_at
+            && (strtolower((string) $existing->docusign_status) === 'completed' || $existing->completed_at)
         ) {
             return $existing;
         }
 
-        if ($existing && ! $regenerate) {
+        if ($existing && (! $regenerate || (filled($existing->docusign_envelope_id) && in_array(strtolower((string) $existing->docusign_status), ['created', 'sent', 'delivered', 'signing'], true)))) {
             return $existing;
         }
 

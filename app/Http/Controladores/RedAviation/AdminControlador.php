@@ -850,6 +850,8 @@ class AdminControlador extends ControladorBase
 
     public function storeUser(Request $request)
     {
+        abort_if($request->input('role') === 'sobrecargo', 409, 'Aprueba primero la identidad y la candidatura desde la revisión administrativa.');
+
         $data = $request->validate([
             'name' => ['required', 'string', 'max:255'],
             'email' => ['required', 'email', 'max:255', 'unique:users,email'],
@@ -909,6 +911,8 @@ class AdminControlador extends ControladorBase
 
     public function updateUser(Request $request, Usuario $user)
     {
+        abort_if($request->input('role') === 'sobrecargo' && ! $user->hasRole('sobrecargo'), 409, 'Aprueba primero la identidad y la candidatura desde la revisión administrativa.');
+
         $data = $request->validate([
             'name' => ['sometimes', 'string', 'max:255'],
             'email' => ['sometimes', 'email', 'max:255', Rule::unique('users', 'email')->ignore($user->id)],

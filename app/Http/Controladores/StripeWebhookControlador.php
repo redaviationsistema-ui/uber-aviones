@@ -312,6 +312,45 @@ class StripeWebhookControlador extends ControladorBase
             return;
         }
 
+        if (
+            in_array(strtolower((string) $flightRequest->status), ['cancelled', 'canceled'], true)
+            || in_array(strtolower((string) $reservation->status), ['cancelled', 'canceled'], true)
+        ) {
+            Pago::updateOrCreate(
+                [
+                    'reservation_id' => $reservation->id,
+                    'flight_request_id' => $flightRequest->id,
+                    'provider' => 'stripe',
+                    'payment_type' => 'reservation',
+                ],
+                [
+                    'user_id' => $flightRequest->client_id,
+                    'amount' => ((int) ($session->amount_total ?? 0)) / 100,
+                    'currency' => strtoupper((string) ($session->currency ?? $flightRequest->currency ?? 'USD')),
+                    'transaction_reference' => (string) ($session->payment_intent ?? $session->id),
+                    'stripe_checkout_session_id' => $session->id,
+                    'stripe_payment_intent_id' => $session->payment_intent ?? null,
+                    'status' => 'paid',
+                    'paid_at' => now(),
+                    'gateway_response' => json_decode(json_encode($session), true),
+                ],
+            );
+
+            $this->auditWebhookAction(
+                (int) $flightRequest->client_id,
+                'stripe_webhook_payment_received_after_cancellation',
+                'Stripe confirmó un pago después de la cancelación; se conservó la evidencia financiera sin reactivar la operación.',
+                [
+                    'flight_request_id' => $flightRequest->id,
+                    'reservation_id' => $reservation->id,
+                    'checkout_session_id' => (string) ($session->id ?? ''),
+                    'result' => 'recorded_without_reactivation',
+                ],
+            );
+
+            return;
+        }
+
         DB::transaction(function () use ($flightRequest, $reservation, $session) {
 
             app(\App\Servicios\RedAviation\ProviderFlightNotificationService::class)
@@ -320,14 +359,13 @@ class StripeWebhookControlador extends ControladorBase
                 'payment_status' => 'paid',
                 'stripe_checkout_session_id' => $session->id,
                 'stripe_payment_intent_id' => $session->payment_intent ?? null,
-                'workflow_status' => 'vuelo confirmado',
-                'status' => 'reserved',
+                'workflow_status' => 'pago confirmado',
+                'status' => 'payment_confirmed',
             ], $reservation);
 
             if ($reservation) {
                 $reservation->update([
-                    'status' => 'confirmed',
-                    'confirmed_at' => $reservation->confirmed_at ?: now(),
+                    'status' => 'paid',
                 ]);
             }
 
@@ -364,8 +402,8 @@ class StripeWebhookControlador extends ControladorBase
             'flight_request_id' => $flightRequestId,
             'reservation_id' => $flightRequest->reservation()->latest('id')->value('id'),
             'payment_status' => 'paid',
-            'booking_status' => 'confirmed',
-            'status' => 'confirmed',
+            'booking_status' => 'paid',
+            'status' => 'paid',
         ]);
 
         $this->auditWebhookAction(
@@ -378,7 +416,7 @@ class StripeWebhookControlador extends ControladorBase
                 'checkout_session_id' => (string) ($session->id ?? ''),
                 'payment_intent_id' => (string) ($session->payment_intent ?? ''),
                 'payment_status' => 'paid',
-                'reservation_status' => 'confirmed',
+                'reservation_status' => 'paid',
                 'result' => 'applied',
             ],
         );
@@ -555,6 +593,44 @@ class StripeWebhookControlador extends ControladorBase
             return;
         }
 
+        if (
+            in_array(strtolower((string) $flightRequest->status), ['cancelled', 'canceled'], true)
+            || in_array(strtolower((string) $reservation->status), ['cancelled', 'canceled'], true)
+        ) {
+            Pago::updateOrCreate(
+                [
+                    'reservation_id' => $reservation->id,
+                    'flight_request_id' => $flightRequest->id,
+                    'provider' => 'stripe',
+                    'payment_type' => 'reservation',
+                ],
+                [
+                    'user_id' => $flightRequest->client_id,
+                    'amount' => ((int) ($paymentIntent->amount ?? 0)) / 100,
+                    'currency' => strtoupper((string) ($paymentIntent->currency ?? $flightRequest->currency ?? 'USD')),
+                    'transaction_reference' => $paymentIntent->id,
+                    'stripe_payment_intent_id' => $paymentIntent->id,
+                    'status' => 'paid',
+                    'paid_at' => now(),
+                    'gateway_response' => json_decode(json_encode($paymentIntent), true),
+                ],
+            );
+
+            $this->auditWebhookAction(
+                (int) $flightRequest->client_id,
+                'stripe_webhook_payment_received_after_cancellation',
+                'Stripe confirmó un pago después de la cancelación; se conservó la evidencia financiera sin reactivar la operación.',
+                [
+                    'flight_request_id' => $flightRequest->id,
+                    'reservation_id' => $reservation->id,
+                    'payment_intent_id' => (string) ($paymentIntent->id ?? ''),
+                    'result' => 'recorded_without_reactivation',
+                ],
+            );
+
+            return;
+        }
+
         DB::transaction(function () use ($flightRequest, $reservation, $paymentIntent) {
             $checkoutSessionId = $this->resolveCheckoutSessionIdFromGatewayPayload(
                 $paymentIntent,
@@ -568,14 +644,13 @@ class StripeWebhookControlador extends ControladorBase
                 'payment_status' => 'paid',
                 'stripe_checkout_session_id' => $checkoutSessionId ?: $flightRequest->stripe_checkout_session_id,
                 'stripe_payment_intent_id' => $paymentIntent->id,
-                'workflow_status' => 'vuelo confirmado',
-                'status' => 'reserved',
+                'workflow_status' => 'pago confirmado',
+                'status' => 'payment_confirmed',
             ], $reservation);
 
             if ($reservation) {
                 $reservation->update([
-                    'status' => 'confirmed',
-                    'confirmed_at' => $reservation->confirmed_at ?: now(),
+                    'status' => 'paid',
                 ]);
             }
 
@@ -611,8 +686,8 @@ class StripeWebhookControlador extends ControladorBase
             'flight_request_id' => $flightRequestId,
             'reservation_id' => $flightRequest->reservation()->latest('id')->value('id'),
             'payment_status' => 'paid',
-            'booking_status' => 'confirmed',
-            'status' => 'confirmed',
+            'booking_status' => 'paid',
+            'status' => 'paid',
         ]);
 
         $this->auditWebhookAction(
@@ -625,7 +700,7 @@ class StripeWebhookControlador extends ControladorBase
                 'payment_intent_id' => (string) ($paymentIntent->id ?? ''),
                 'checkout_session_id' => (string) ($metadata['checkout_session_id'] ?? ''),
                 'payment_status' => 'paid',
-                'reservation_status' => 'confirmed',
+                'reservation_status' => 'paid',
                 'result' => 'applied',
             ],
         );

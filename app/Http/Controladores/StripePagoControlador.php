@@ -247,40 +247,10 @@ class StripePagoControlador extends ControladorBase
             ], 409);
         }
 
-        $reservation = $this->ensureReservationForFlightRequest($flightRequest, $request->user()->id);
-        try {
-            $reservation = $this->commercialSnapshotService->persistIfMissing($reservation);
-        } catch (RuntimeException $exception) {
-            return response()->json([
-                'success' => false,
-                'code' => 'COMMERCIAL_SNAPSHOT_MISMATCH',
-                'message' => 'El snapshot comercial de la reserva no superó la validación de integridad.',
-            ], 409);
-        }
+        $reservation = $this->authorizeReservationPayment($request, $flightRequest);
         $snapshot = $reservation->commercial_snapshot ?? [];
         $amount = (float) ($snapshot['total_amount'] ?? 0);
         abort_if($amount <= 0, 422, 'La reserva no tiene un snapshot comercial valido para cobrar.');
-
-        $authorization = $this->paymentAuthorizationService->evaluate($reservation, true);
-        if (! $authorization['authorized']) {
-            $code = in_array('AIRCRAFT_NOT_AVAILABLE', $authorization['blocking_reasons'], true)
-                ? 'AIRCRAFT_NOT_AVAILABLE'
-                : 'PAYMENT_NOT_AUTHORIZED';
-
-            return response()->json([
-                'success' => false,
-                'code' => $code,
-                'message' => $code === 'AIRCRAFT_NOT_AVAILABLE'
-                    ? 'La aeronave seleccionada ya no está disponible.'
-                    : 'La reserva todavía no cumple los requisitos para pagar.',
-                ...$authorization,
-            ], 409);
-        }
-        try {
-            $this->ensureReservationAircraftHold($flightRequest, $reservation, (int) $request->user()->id);
-        } catch (RuntimeException $exception) {
-            abort(409, $exception->getMessage());
-        }
 
         $reusablePayment = $this->findStoredReservationStripePayment(
             reservationId: (int) $reservation->id,
@@ -478,12 +448,10 @@ class StripePagoControlador extends ControladorBase
             ], 409);
         }
 
-        $reservation = $this->ensureReservationForFlightRequest($flightRequest, $request->user()->id);
-        try {
-            $this->ensureReservationAircraftHold($flightRequest, $reservation, (int) $request->user()->id);
-        } catch (RuntimeException $exception) {
-            abort(409, $exception->getMessage());
-        }
+        $reservation = $this->authorizeReservationPayment($request, $flightRequest);
+        $snapshot = $reservation->commercial_snapshot ?? [];
+        $amount = (float) ($snapshot['total_amount'] ?? 0);
+        abort_if($amount <= 0, 422, 'La reserva no tiene un snapshot comercial valido para cobrar.');
 
         $reusablePayment = $this->findStoredReservationStripePayment(
             reservationId: (int) $reservation->id,
@@ -563,6 +531,10 @@ class StripePagoControlador extends ControladorBase
         }
 
         Stripe::setApiKey((string) config('services.stripe.secret'));
+        $idempotencyKey = trim((string) $request->header(
+            'Idempotency-Key',
+            'payment-intent:reservation:'.$reservation->id,
+        ));
 
         $paymentIntent = PaymentIntent::create([
             'amount' => (int) round($amount * 100),
@@ -573,7 +545,7 @@ class StripePagoControlador extends ControladorBase
                 'flight_request_id' => (string) $flightRequest->id,
                 'client_id' => (string) $request->user()->id,
             ],
-        ]);
+        ], ['idempotency_key' => $idempotencyKey]);
 
         DB::transaction(function () use ($request, $flightRequest, $reservation, $paymentIntent, $amount, $pricingBreakdown) {
             $flightRequest->update([
@@ -644,9 +616,21 @@ class StripePagoControlador extends ControladorBase
         $amount = (float) ($pricingBreakdown['total_amount'] ?? $this->resolveFlightRequestAmount($flightRequest));
         abort_if($amount <= 0, 422, 'La solicitud no tiene un monto valido para transferencia.');
 
-        $reservation = $this->ensureReservationForFlightRequest($flightRequest, $request->user()->id);
+        $reservation = $this->authorizeReservationPayment($request, $flightRequest);
+        $snapshot = $reservation->commercial_snapshot ?? [];
+        $amount = (float) ($snapshot['total_amount'] ?? 0);
+        abort_if($amount <= 0, 422, 'La reserva no tiene un snapshot comercial valido para transferencia.');
 
-        $reference = 'WIRE-'.Str::upper(Str::random(10));
+        $existingWirePayment = Pago::query()
+            ->where('reservation_id', $reservation->id)
+            ->where('flight_request_id', $flightRequest->id)
+            ->where('payment_type', 'reservation')
+            ->where('provider', 'bank_transfer')
+            ->where('status', 'pending')
+            ->latest('id')
+            ->first();
+        $reference = trim((string) $existingWirePayment?->transaction_reference);
+        $reference = $reference !== '' ? $reference : 'WIRE-'.Str::upper(Str::random(10));
 
         DB::transaction(function () use ($request, $flightRequest, $reservation, $amount, $reference, $data, $pricingBreakdown) {
             $flightRequest->update([
@@ -1126,6 +1110,33 @@ class StripePagoControlador extends ControladorBase
         }
     }
 
+    private function authorizeReservationPayment(Request $request, SolicitudVuelo $flightRequest): Reserva
+    {
+        $reservation = $this->ensureReservationForFlightRequest($flightRequest, (int) $request->user()->id);
+
+        try {
+            $reservation = $this->commercialSnapshotService->persistIfMissing($reservation);
+        } catch (RuntimeException) {
+            abort(409, 'El snapshot comercial de la reserva no superó la validación de integridad.');
+        }
+
+        $authorization = $this->paymentAuthorizationService->evaluate($reservation, true);
+        if (! $authorization['authorized']) {
+            $message = in_array('AIRCRAFT_NOT_AVAILABLE', $authorization['blocking_reasons'], true)
+                ? 'La aeronave seleccionada ya no está disponible.'
+                : 'La reserva todavía no cumple los requisitos para pagar.';
+            abort(409, $message);
+        }
+
+        try {
+            $this->ensureReservationAircraftHold($flightRequest, $reservation, (int) $request->user()->id);
+        } catch (RuntimeException $exception) {
+            abort(409, $exception->getMessage());
+        }
+
+        return $reservation;
+    }
+
     private function resolveFlightRequestAmount(SolicitudVuelo $flightRequest): float
     {
         $pricingContext = is_array($flightRequest->pricing_context) ? $flightRequest->pricing_context : [];
@@ -1177,47 +1188,53 @@ class StripePagoControlador extends ControladorBase
 
     private function ensureReservationForFlightRequest(SolicitudVuelo $flightRequest, int $userId): Reserva
     {
-        $existing = $flightRequest->reservation()->latest('id')->first();
-        if ($existing) {
+        return DB::transaction(function () use ($flightRequest, $userId) {
+            $flightRequest = SolicitudVuelo::query()
+                ->with('quotes')
+                ->lockForUpdate()
+                ->findOrFail($flightRequest->id);
+            $existing = $flightRequest->reservation()->lockForUpdate()->first();
+            if ($existing) {
+                $this->ensureReservationAircraftAvailability(
+                    (int) $existing->aircraft_id,
+                    $flightRequest,
+                    (int) $existing->id,
+                    $existing->quote_id ? (int) $existing->quote_id : null,
+                );
+
+                return $existing;
+            }
+
+            $acceptedQuote = $flightRequest->quotes()
+                ->where('status', 'accepted')
+                ->latest('id')
+                ->first();
+
+            $providerId = $acceptedQuote?->provider_id ?? $flightRequest->assigned_provider_id;
+            $aircraftId = $acceptedQuote?->aircraft_id ?? $flightRequest->assigned_aircraft_id;
+            $amount = $this->resolveFlightRequestAmount($flightRequest);
+
+            abort_if(! $providerId || ! $aircraftId, 409, 'La solicitud aun no tiene proveedor y aeronave confirmados.');
+            abort_if($amount <= 0, 422, 'La solicitud no tiene un monto valido para crear la reserva.');
             $this->ensureReservationAircraftAvailability(
-                (int) $existing->aircraft_id,
+                (int) $aircraftId,
                 $flightRequest,
-                (int) $existing->id,
-                $existing->quote_id ? (int) $existing->quote_id : null,
+                null,
+                $acceptedQuote?->id ? (int) $acceptedQuote->id : null,
             );
 
-            return $existing;
-        }
-
-        $acceptedQuote = $flightRequest->quotes()
-            ->where('status', 'accepted')
-            ->latest('id')
-            ->first();
-
-        $providerId = $acceptedQuote?->provider_id ?? $flightRequest->assigned_provider_id;
-        $aircraftId = $acceptedQuote?->aircraft_id ?? $flightRequest->assigned_aircraft_id;
-        $amount = $this->resolveFlightRequestAmount($flightRequest);
-
-        abort_if(! $providerId || ! $aircraftId, 409, 'La solicitud aun no tiene proveedor y aeronave confirmados.');
-        abort_if($amount <= 0, 422, 'La solicitud no tiene un monto valido para crear la reserva.');
-        $this->ensureReservationAircraftAvailability(
-            (int) $aircraftId,
-            $flightRequest,
-            null,
-            $acceptedQuote?->id ? (int) $acceptedQuote->id : null,
-        );
-
-        return Reserva::create([
-            'client_id' => $userId,
-            'provider_id' => $providerId,
-            'aircraft_id' => $aircraftId,
-            'flight_request_id' => $flightRequest->id,
-            'quote_id' => $acceptedQuote?->id,
-            'reservation_code' => 'PV-'.now()->format('ymd').'-'.Str::upper(Str::random(6)),
-            'status' => 'pending_payment',
-            'total_amount' => $amount,
-            'currency' => $acceptedQuote?->currency ?? $flightRequest->currency ?? 'USD',
-        ]);
+            return Reserva::create([
+                'client_id' => $userId,
+                'provider_id' => $providerId,
+                'aircraft_id' => $aircraftId,
+                'flight_request_id' => $flightRequest->id,
+                'quote_id' => $acceptedQuote?->id,
+                'reservation_code' => 'PV-'.now()->format('ymd').'-'.Str::upper(Str::random(6)),
+                'status' => 'pending_payment',
+                'total_amount' => $amount,
+                'currency' => $acceptedQuote?->currency ?? $flightRequest->currency ?? 'USD',
+            ]);
+        });
     }
 
     private function ensureReservationAircraftHold(SolicitudVuelo $flightRequest, Reserva $reservation, int $userId): void
@@ -1331,15 +1348,14 @@ class StripePagoControlador extends ControladorBase
                     ? ($flightRequest->stripe_checkout_session_id ?: $reservation->payments->first()?->stripe_checkout_session_id)
                     : $flightRequest->stripe_checkout_session_id,
                 'stripe_payment_intent_id' => $paymentIntent->id,
-                'workflow_status' => 'vuelo confirmado',
-                'status' => $flightRequestStatus,
+                'workflow_status' => 'pago confirmado',
+                'status' => 'payment_confirmed',
                 'final_price' => (float) $pricingBreakdown['total_amount'],
                 'pricing_context' => $this->mergeFlightRequestPricingContext($flightRequest, $pricingBreakdown),
             ], $reservation);
 
             $reservation->update([
-                'status' => 'confirmed',
-                'confirmed_at' => $reservation->confirmed_at ?: now(),
+                'status' => 'paid',
                 'total_amount' => (float) $pricingBreakdown['total_amount'],
                 'currency' => $reservation->currency ?: strtoupper((string) ($paymentIntent->currency ?? $flightRequest->currency ?? 'USD')),
             ]);
@@ -1429,9 +1445,9 @@ class StripePagoControlador extends ControladorBase
                 'checkout_session_id' => $flightRequest->stripe_checkout_session_id ?: $paymentOrder?->stripe_checkout_session_id,
             ],
             'payment_status' => 'paid',
-            'booking_status' => 'confirmed',
-            'status' => 'confirmed',
-            'workflow_status' => 'vuelo confirmado',
+            'booking_status' => 'paid',
+            'status' => 'paid',
+            'workflow_status' => 'pago confirmado',
         ]);
     }
 
@@ -1472,9 +1488,9 @@ class StripePagoControlador extends ControladorBase
                 'checkout_session_id' => $paymentOrder?->stripe_checkout_session_id,
             ],
             'payment_status' => 'paid',
-            'booking_status' => 'confirmed',
-            'status' => 'confirmed',
-            'workflow_status' => 'vuelo confirmado',
+            'booking_status' => 'paid',
+            'status' => 'paid',
+            'workflow_status' => 'pago confirmado',
         ]);
     }
 

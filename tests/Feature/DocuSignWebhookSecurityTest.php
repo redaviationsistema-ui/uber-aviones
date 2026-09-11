@@ -63,6 +63,17 @@ class DocuSignWebhookSecurityTest extends TestCase
         $this->assertNotNull($contract->completed_at);
         $this->assertDatabaseCount('payments', 1);
 
+        foreach (['sent', 'delivered'] as $lateStatus) {
+            $this->signedWebhook([
+                'data' => ['envelopeId' => 'env-completed', 'status' => $lateStatus],
+            ])->assertOk();
+        }
+
+        $contract->refresh();
+        $this->assertSame('completed', $contract->status);
+        $this->assertSame('completed', $contract->docusign_status);
+        $this->assertDatabaseCount('payments', 1);
+
         $this->signedWebhook([
             'data' => ['envelopeId' => 'env-unknown', 'status' => 'completed'],
         ])->assertOk()->assertJsonPath('received', true);

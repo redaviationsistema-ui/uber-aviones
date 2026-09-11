@@ -120,7 +120,8 @@ class BiometricControlador extends ControladorBase
                 'identityVerified' => false,
                 'faceDetected' => false,
                 'facesCount' => 0,
-                'identityVerificationStatus' => 'rejected',
+                'identityVerificationStatus' => 'pending',
+                'captureAccepted' => false,
                 'biometricProvider' => 'aws_rekognition',
                 'biometricTemplateType' => 'selfie-photo',
             ], 422);
@@ -133,7 +134,8 @@ class BiometricControlador extends ControladorBase
                 'identityVerified' => false,
                 'faceDetected' => true,
                 'facesCount' => count($faces),
-                'identityVerificationStatus' => 'rejected',
+                'identityVerificationStatus' => 'pending',
+                'captureAccepted' => false,
                 'biometricProvider' => 'aws_rekognition',
                 'biometricTemplateType' => 'selfie-photo',
             ], 422);
@@ -148,7 +150,7 @@ class BiometricControlador extends ControladorBase
         $roll = round(abs((float) ($face['Pose']['Roll'] ?? 0)), 2);
         $occluded = (bool) ($face['FaceOccluded']['Value'] ?? false);
 
-        $approved = $confidence >= 95
+        $captureAccepted = $confidence >= 95
             && $brightness >= 40
             && $sharpness >= 40
             && $yaw <= 25
@@ -158,11 +160,12 @@ class BiometricControlador extends ControladorBase
 
         return response()->json([
             'success' => true,
-            'message' => $approved
-                ? 'Rostro validado correctamente.'
+            'message' => $captureAccepted
+                ? 'Rostro detectado. Identidad pendiente de revisión.'
                 : 'Rostro detectado, pero no cumple la calidad requerida.',
-            'identityVerified' => $approved,
-            'identityVerificationStatus' => $approved ? 'approved' : 'rejected',
+            'identityVerified' => false,
+            'captureAccepted' => $captureAccepted,
+            'identityVerificationStatus' => 'pending',
             'biometricProvider' => 'aws_rekognition',
             'biometricTemplateType' => 'selfie-photo',
             'faceDetected' => true,
@@ -182,7 +185,7 @@ class BiometricControlador extends ControladorBase
         ]);
     }
 
-    private function rekognition(): RekognitionClient
+    protected function rekognition(): RekognitionClient
     {
         return new RekognitionClient([
             'region' => env('AWS_REKOGNITION_REGION', env('AWS_DEFAULT_REGION', 'us-east-1')),

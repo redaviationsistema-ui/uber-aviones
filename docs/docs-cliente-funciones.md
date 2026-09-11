@@ -225,7 +225,7 @@ Se cubren dos bloques principales:
 
 - Rutas principales:
   - `GET /cliente/reservas/{reservation}/payment-availability`
-  - `GET /cliente/solicitudes/{reservation}/payment-availability`
+  - `GET /cliente/solicitudes/{reservation}/payment-availability` — **Retirado: HTTP 410. Usar la ruta canónica de reservas con `reservations.id`.**
 - Evalua si la reserva esta en condiciones de pagarse.
 - Usa `AircraftAvailabilityService` para validar hold, inventario y otros bloqueos.
 - Devuelve una bandera `can_pay`, contexto tecnico y un mensaje legible para frontend.
@@ -259,8 +259,8 @@ Se cubren dos bloques principales:
 
 - Rutas principales:
   - `GET /cliente/reservas/{reservation}/contrato`
-  - `GET /cliente/solicitudes/{reservation}/contrato`
-  - `GET /client/flight-requests/{reservation}/contract`
+  - `GET /cliente/solicitudes/{reservation}/contrato` — **Retirado: HTTP 410. Usar la ruta canónica de reservas con `reservations.id`.**
+  - `GET /client/flight-requests/{reservation}/contract` — **Retirado: HTTP 410. Usar la ruta canónica de reservas con `reservations.id`.**
   - `GET /client/reservations/{reservation}/contract`
 - Construye o recupera el contrato asociado a la reserva.
 - Devuelve el contrato, la reserva y una bandera que indica si DocuSign esta configurado.
@@ -269,14 +269,14 @@ Se cubren dos bloques principales:
 
 - Rutas principales:
   - `GET /cliente/reservas/{reservation}/contrato/pdf`
-  - `GET /cliente/solicitudes/{reservation}/contrato/pdf`
+  - `GET /cliente/solicitudes/{reservation}/contrato/pdf` — **Retirado: HTTP 410. Usar la ruta canónica de reservas con `reservations.id`.**
 - Genera el PDF del contrato usando la vista `pdf.contract` y lo descarga.
 
 #### `generateContract(Request $request, mixed $reservation)`
 
 - Rutas principales:
   - `POST /cliente/reservas/{reservation}/contrato/generar`
-  - `POST /cliente/solicitudes/{reservation}/contrato/generar`
+  - `POST /cliente/solicitudes/{reservation}/contrato/generar` — **Retirado: HTTP 410. Usar la ruta canónica de reservas con `reservations.id`.**
 - Regenera el contrato usando snapshot comercial.
 - Tambien usa idempotencia para evitar recreaciones repetidas por doble click o reintentos.
 - Escribe auditoria de regeneracion.
@@ -304,7 +304,7 @@ Se cubren dos bloques principales:
 
 - Rutas principales:
   - `POST /cliente/reservas/{reservation}/contrato/docusign`
-  - `POST /cliente/solicitudes/{reservation}/contrato/docusign`
+  - `POST /cliente/solicitudes/{reservation}/contrato/docusign` — **Retirado: HTTP 410. Usar la ruta canónica de reservas con `reservations.id`.**
 - Prepara el contrato para firma embebida en DocuSign.
 - Reglas importantes:
   - prohibe que el cliente mande HTML de contrato arbitrario;
@@ -319,7 +319,7 @@ Se cubren dos bloques principales:
 
 - Rutas principales:
   - `POST /cliente/reservas/{reservation}/contrato/firmar`
-  - `POST /cliente/solicitudes/{reservation}/contrato/firmar`
+  - `POST /cliente/solicitudes/{reservation}/contrato/firmar` — **Retirado: HTTP 410. Usar la ruta canónica de reservas con `reservations.id`.**
 - Esta funcion no firma directamente.
 - Siempre responde error `422` para forzar que la firma valida solo llegue desde DocuSign cuando el envelope quede `completed`.
 - Es una barrera de seguridad para no permitir al cliente simular una firma.
