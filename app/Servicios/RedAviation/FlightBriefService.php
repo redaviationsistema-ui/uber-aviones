@@ -155,7 +155,12 @@ class FlightBriefService
     {
         $payload = is_array($flightRequest->visibility_payload) ? $flightRequest->visibility_payload : [];
         $briefing = is_array($payload['briefing'] ?? null) ? $payload['briefing'] : [];
-        $location = $this->nullableText($payload['presentation_location'] ?? $payload['presentation_place'] ?? $briefing['lugar_presentacion'] ?? null);
+        $providerRelease = is_array($payload['provider_operational_release'] ?? null)
+            ? $payload['provider_operational_release']
+            : [];
+        $location = $this->nullableText(
+            $providerRelease['fbo'] ?? $payload['presentation_location'] ?? $payload['presentation_place'] ?? $briefing['lugar_presentacion'] ?? null
+        );
         $presentationDateTime = $this->presentationDateTime(
             $payload['presentation_datetime'] ?? $payload['presentation_time'] ?? $briefing['hora_presentacion'] ?? null,
             $flightRequest

@@ -29,9 +29,9 @@ Route::prefix('cliente')->middleware(['auth.token', 'role:client,admin'])->group
     Route::post('/suscripcion/cancelar', [SuscripcionControlador::class, 'cancel']);
 
     Route::post('/buscar-vuelo', [AeronaveControlador::class, 'search']);
-    Route::apiResource('solicitudes', SolicitudVueloControlador::class)
-        ->parameters(['solicitudes' => 'flightRequest'])
-        ->only(['index', 'store', 'show']);
+    Route::get('/solicitudes', [\App\Http\Controladores\LegacyClientRoutesControlador::class, 'retired']);
+    Route::post('/solicitudes', [\App\Http\Controladores\LegacyClientRoutesControlador::class, 'retired']);
+    Route::get('/solicitudes/{flightRequest}', [\App\Http\Controladores\LegacyClientRoutesControlador::class, 'retired']);
 
     Route::get('/cotizaciones', [CotizacionControlador::class, 'index']);
     Route::get('/cotizaciones/{quote}', [CotizacionControlador::class, 'show']);

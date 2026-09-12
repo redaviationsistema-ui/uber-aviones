@@ -382,50 +382,9 @@ class OperadorControlador extends ControladorBase
     {
         $providerId = $this->resolvedProviderIdOrAbort($request);
         $this->ensureOperationalProviderAccess($request);
-        $match = $flightRequest->matches()->where('provider_id', $providerId)->firstOrFail();
-        $match->loadMissing('aircraft');
-
-        $match->update([
-            'status' => 'accepted',
-            'accepted_at' => now(),
-        ]);
-
-        $visibilityPayload = $flightRequest->visibility_payload ?? [];
-        $flightRequest->update([
-            'workflow_status' => 'aceptada',
-            'assigned_provider_id' => $providerId,
-            'assigned_aircraft_id' => $match->aircraft_id,
-            'assigned_aircraft_model' => $match->aircraft?->model,
-            'visibility_payload' => [
-                ...$visibilityPayload,
-                'selected_provider_id' => $providerId,
-                'selected_aircraft_id' => $match->aircraft_id,
-                'aircraft_model' => $match->aircraft?->model,
-                'aircraft_category' => $match->aircraft?->category,
-                'aircraft_capacity' => $match->aircraft?->capacity,
-            ],
-        ]);
-
-        $operacion = Operacion::create([
-            'flight_request_id' => $flightRequest->id,
-            'provider_id' => $providerId,
-            'aircraft_id' => $match->aircraft_id,
-            'status' => 'confirmada',
-        ]);
-
-        $operacion->timeline()->create([
-            'status' => 'confirmada',
-            'title' => 'Operador asignado',
-            'description' => 'La operacion fue aceptada por un operador verificado.',
-            'created_by' => $request->user()->id,
-        ]);
-
-        $chat = $flightRequest->chatsProtegidos()->first();
-        if ($chat && ! $chat->provider_id) {
-            $chat->update(['provider_id' => $providerId]);
-        }
-
-        return $this->ok(['operation' => $operacion->load('timeline')]);
+        $operation = app(\App\Servicios\Reservas\ProviderAcceptanceService::class)
+            ->accept($flightRequest->id, $providerId, $request->user()->id, true);
+        return $this->ok(['operation' => $operation]);
     }
 
     public function reject(Request $request, SolicitudVuelo $flightRequest)

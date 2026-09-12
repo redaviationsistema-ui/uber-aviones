@@ -872,7 +872,6 @@ class AdminControlador extends ControladorBase
             'name' => $data['name'],
             'email' => $data['email'],
             'password' => Hash::make($plainPassword),
-            'temporary_password_visible' => $plainPassword,
             'phone' => $data['phone'] ?? null,
             'provider_id' => $data['provider_id'] ?? null,
             'status' => $data['status'] ?? 'active',
@@ -880,6 +879,9 @@ class AdminControlador extends ControladorBase
 
         $this->syncUserRoles($user, $data['role']);
         $this->ensureProviderRecord($user, $data);
+        if (empty($data['password'])) {
+            \Illuminate\Support\Facades\Password::broker()->sendResetLink(['email' => $user->email]);
+        }
         $this->writeAudit($request, 'admin_user_created', 'admin_users', sprintf(
             'Admin creo al usuario %s con rol %s.',
             $user->email,
@@ -905,7 +907,7 @@ class AdminControlador extends ControladorBase
                     'activeSuscripcion.plan:id,name,code,billing_cycle',
                 ])
             ),
-            'temporary_password' => $plainPassword,
+            'message' => 'Usuario creado. Puede establecer su contraseña mediante el enlace de recuperación.',
         ], 201);
     }
 
@@ -982,6 +984,7 @@ class AdminControlador extends ControladorBase
             ], 409);
         }
 
+        \App\Servicios\Reservas\CommercialHistoryGuard::user($user->id);
         $email = $user->email;
         $user->delete();
 
@@ -1228,22 +1231,12 @@ class AdminControlador extends ControladorBase
 
     public function resetUserPassword(Request $request, Usuario $user)
     {
-        $plainPassword = Str::password(12);
-        $user->forceFill([
-            'password' => Hash::make($plainPassword),
-            'temporary_password_visible' => $plainPassword,
-        ])->save();
-
-        $this->writeAudit($request, 'admin_user_password_reset', 'admin_users', sprintf(
-            'Admin reinicio la contrasena del usuario %s.',
-            $user->email
-        ));
-
-        return $this->ok([
-            'message' => 'Contrasena reiniciada correctamente.',
-            'temporary_password' => $plainPassword,
-            'user' => $user->fresh(['roles', 'profile', 'provider', 'demo', 'activeSuscripcion.plan']),
-        ]);
+        $status = \Illuminate\Support\Facades\Password::broker()->sendResetLink(['email' => $user->email]);
+        if ($status !== \Illuminate\Support\Facades\Password::RESET_LINK_SENT) {
+            return response()->json(['success' => false, 'message' => __($status)], 422);
+        }
+        $this->writeAudit($request, 'admin_user_password_reset_link', 'admin_users', 'Enlace de recuperación solicitado.');
+        return $this->ok(['message' => 'Enviamos un enlace de recuperación al correo del usuario.']);
     }
 
     public function operators()
@@ -2173,8 +2166,6 @@ class AdminControlador extends ControladorBase
             'note' => ['nullable', 'string', 'max:1000'],
             'briefing_time' => ['nullable', 'string', 'max:120'],
             'presentation_time' => ['nullable', 'string', 'max:120'],
-            'presentation_place' => ['nullable', 'string', 'max:255'],
-            'presentation_location' => ['nullable', 'string', 'max:255'],
             'presentation_address' => ['nullable', 'string', 'max:500'],
             'presentation_instructions' => ['nullable', 'string', 'max:2000'],
             'presentation_maps_url' => ['nullable', 'url', 'max:2048'],
@@ -2182,7 +2173,6 @@ class AdminControlador extends ControladorBase
 
         $hasAssignedCrew = ! empty($data['sobrecargo_user_id']);
         $currentWorkflowStatus = Str::lower(trim((string) ($flightRequest->workflow_status ?? '')));
-        $presentationPlace = trim((string) ($data['presentation_place'] ?? $data['presentation_location'] ?? ''));
         $crewNote = trim((string) ($data['note'] ?? ''));
         $existingOperation = Operacion::query()
             ->where('flight_request_id', $flightRequest->id)
@@ -2374,8 +2364,6 @@ class AdminControlador extends ControladorBase
                 'operational_status' => $nextWorkflowStatus,
                 'operational_ready' => (bool) ($visibilityPayload['operational_ready'] ?? false),
                 'presentation_time' => $hasAssignedCrew ? $resolvedPresentationTime : ($visibilityPayload['presentation_time'] ?? null),
-                'presentation_place' => $presentationPlace !== '' ? $presentationPlace : ($visibilityPayload['presentation_place'] ?? $visibilityPayload['presentation_location'] ?? null),
-                'presentation_location' => $presentationPlace !== '' ? $presentationPlace : ($visibilityPayload['presentation_location'] ?? $visibilityPayload['presentation_place'] ?? null),
                 'presentation_address' => trim((string) ($data['presentation_address'] ?? '')) ?: ($visibilityPayload['presentation_address'] ?? null),
                 'presentation_instructions' => trim((string) ($data['presentation_instructions'] ?? '')) ?: ($visibilityPayload['presentation_instructions'] ?? null),
                 'presentation_maps_url' => trim((string) ($data['presentation_maps_url'] ?? '')) ?: ($visibilityPayload['presentation_maps_url'] ?? null),
@@ -2389,7 +2377,6 @@ class AdminControlador extends ControladorBase
                     'salida' => $hasAssignedCrew ? $resolvedBriefingDeparture : $flightRequest->departure_datetime,
                     'pasajeros_autorizados' => $flightRequest->passengers,
                     'hora_presentacion' => $hasAssignedCrew ? $resolvedPresentationTime : ($existingBriefing['hora_presentacion'] ?? null),
-                    'lugar_presentacion' => $presentationPlace !== '' ? $presentationPlace : ($existingBriefing['lugar_presentacion'] ?? null),
                 ],
             ],
         ]);
@@ -3615,7 +3602,6 @@ class AdminControlador extends ControladorBase
             'name' => $user->name,
             'email' => $user->email,
             'phone' => $user->phone,
-            'temporary_password_visible' => $user->temporary_password_visible,
             'created_at' => $user->created_at,
             'role' => $user->role,
             'operational_role' => $user->operational_role,

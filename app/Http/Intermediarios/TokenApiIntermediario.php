@@ -11,7 +11,7 @@ class TokenApiIntermediario
 {
     public function handle(Request $request, Closure $next): Response
     {
-        $plainToken = $request->bearerToken() ?: $request->cookie($this->authCookieName());
+        $plainToken = $request->bearerToken();
 
         if (! $plainToken) {
             return $this->unauthenticated();

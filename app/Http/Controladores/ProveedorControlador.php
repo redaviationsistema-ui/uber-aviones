@@ -499,38 +499,8 @@ class ProveedorControlador extends ControladorBase
     {
         $providerId = $this->resolvedProviderIdOrAbort($request, 404);
         $this->ensureOperationalAccess($request);
-        abort_unless(
-            (int) $flightRequest->assigned_provider_id === (int) $providerId
-            || $flightRequest->matches()->where('provider_id', $providerId)
-                ->whereIn('status', ['pending', 'sent_to_provider', 'accepted'])->exists(),
-            403, 'No puedes responder esta solicitud.'
-        );
-
-        $match = $flightRequest->matches()->where('provider_id', $providerId)->first();
-        $match?->loadMissing('aircraft');
-
-        $flightRequest->matches()->where('provider_id', $providerId)->update([
-            'status' => 'accepted',
-            'accepted_at' => now(),
-            'rejected_at' => null,
-        ]);
-        $visibilityPayload = $flightRequest->visibility_payload ?? [];
-        $flightRequest->update([
-            'status' => 'matched',
-            'workflow_status' => 'aceptada',
-            'assigned_provider_id' => $providerId,
-            'assigned_aircraft_id' => $match?->aircraft_id,
-            'assigned_aircraft_model' => $match?->aircraft?->model,
-            'visibility_payload' => [
-                ...$visibilityPayload,
-                'selected_provider_id' => $providerId,
-                'selected_aircraft_id' => $match?->aircraft_id,
-                'aircraft_model' => $match?->aircraft?->model,
-                'aircraft_category' => $match?->aircraft?->category,
-                'aircraft_capacity' => $match?->aircraft?->capacity,
-            ],
-        ]);
-
+        app(\App\Servicios\Reservas\ProviderAcceptanceService::class)
+            ->accept($flightRequest->id, $providerId, $request->user()->id, false);
         return $this->ok(['message' => 'Solicitud aceptada para cotizar.']);
     }
 

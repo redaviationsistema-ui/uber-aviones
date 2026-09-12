@@ -60,7 +60,6 @@ class Usuario extends Authenticatable implements MustVerifyEmail
         'name',
         'email',
         'password',
-        'temporary_password_visible',
         'phone',
         'role',
         'operational_role',
@@ -85,7 +84,13 @@ class Usuario extends Authenticatable implements MustVerifyEmail
         'biometric_selfie_uploaded_at',
     ];
 
+    public function setTemporaryPasswordVisibleAttribute($value): void
+    {
+        throw new \LogicException('Recoverable password storage is disabled. Use password reset.');
+    }
+
     protected $hidden = [
+        'temporary_password_visible',
         'password',
         'remember_token',
     ];

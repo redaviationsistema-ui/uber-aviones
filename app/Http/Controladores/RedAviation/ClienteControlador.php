@@ -1331,7 +1331,7 @@ class ClienteControlador extends ControladorBase
             return $request->user()->fresh(['activeSuscripcion', 'demo', 'roles']);
         }
 
-        $plainToken = $request->bearerToken() ?: $request->cookie((string) env('AUTH_TOKEN_COOKIE', 'red_aviation_session'));
+        $plainToken = $request->bearerToken();
 
         if (! $plainToken) {
             return null;

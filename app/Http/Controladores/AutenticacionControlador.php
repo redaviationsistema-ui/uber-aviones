@@ -823,7 +823,7 @@ class AutenticacionControlador extends ControladorBase
 
     public function logout(Request $request)
     {
-        $plainToken = $request->bearerToken() ?: $request->cookie($this->authCookieName());
+        $plainToken = $request->bearerToken();
 
         if ($plainToken) {
             TokenApi::where('token', hash('sha256', $plainToken))->delete();
@@ -1035,17 +1035,7 @@ class AutenticacionControlador extends ControladorBase
             'token' => $plainToken,
             'token_type' => 'Bearer',
             ...$extra,
-        ], $status)->cookie(
-            $this->authCookieName(),
-            $plainToken,
-            $this->authCookieLifetimeMinutes(),
-            '/',
-            env('SESSION_DOMAIN'),
-            $this->shouldUseSecureCookies($request),
-            true,
-            false,
-            $this->authCookieSameSite($request)
-        );
+        ], $status)->withoutCookie($this->authCookieName());
     }
 
     private function loadAuthUser(Usuario $user): Usuario

@@ -273,6 +273,9 @@ class FlightBriefEndpointTest extends TestCase
         $flightRequest->update([
             'visibility_payload' => [
                 'presentation_location' => 'FBO Norte',
+                'provider_operational_release' => [
+                    'fbo' => 'ICCS',
+                ],
                 'presentation_address' => 'Acceso norte 100, Toluca',
                 'presentation_datetime' => '2026-09-12T09:30:00.000000Z',
                 'presentation_instructions' => 'Sigue las indicaciones del acceso norte.',
@@ -295,7 +298,7 @@ class FlightBriefEndpointTest extends TestCase
             ->assertJsonPath('flight_brief.presentation.airport_code', 'MMMX')
             ->assertJsonPath('flight_brief.presentation.airport_name', 'Aeropuerto Internacional de Ciudad de Mexico')
             ->assertJsonPath('flight_brief.presentation.city', 'Ciudad de Mexico')
-            ->assertJsonPath('flight_brief.presentation.location_name', 'FBO Norte')
+            ->assertJsonPath('flight_brief.presentation.location_name', 'ICCS')
             ->assertJsonPath('flight_brief.presentation.address', 'Acceso norte 100, Toluca')
             ->assertJsonPath('flight_brief.presentation.presentation_datetime', '2026-09-12T09:30:00.000000Z')
             ->assertJsonPath('flight_brief.presentation.instructions', 'Sigue las indicaciones del acceso norte.')

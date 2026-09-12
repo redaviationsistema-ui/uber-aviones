@@ -205,6 +205,7 @@ class AeronaveControlador extends ControladorBase
     public function destroy(Request $request, Aeronave $aircraft)
     {
         $this->authorizeProveedorAeronave($request, $aircraft);
+        \App\Servicios\Reservas\CommercialHistoryGuard::aircraft($aircraft->id);
         $aircraft->delete();
 
         return $this->ok(['message' => 'Aeronave eliminada.']);

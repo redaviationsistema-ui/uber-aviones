@@ -27,11 +27,11 @@ return [
 
     'allowed_origins_patterns' => [],
 
-    'allowed_headers' => ['*'],
+    'allowed_headers' => ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Idempotency-Key'],
 
     'exposed_headers' => [],
 
     'max_age' => (int) env('CORS_MAX_AGE', 600),
 
-    'supports_credentials' => true,
+    'supports_credentials' => false,
 ];

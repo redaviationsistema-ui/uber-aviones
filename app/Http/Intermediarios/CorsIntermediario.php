@@ -13,16 +13,19 @@ class CorsIntermediario
         $origin = $request->headers->get('Origin');
         $allowOrigin = $this->resolveAllowedOrigin($origin);
 
+        if ($origin && ! $allowOrigin) {
+            return response()->json(['success' => false, 'message' => 'Origin not allowed.'], 403);
+        }
+
         $headers = [
             'Access-Control-Allow-Methods' => 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
-            'Access-Control-Allow-Headers' => 'Content-Type, Authorization, X-Requested-With, Accept',
+            'Access-Control-Allow-Headers' => 'Content-Type, Authorization, X-Requested-With, Accept, Idempotency-Key',
             'Access-Control-Max-Age' => (string) env('CORS_MAX_AGE', 600),
             'Vary' => 'Origin',
         ];
 
         if ($allowOrigin) {
             $headers['Access-Control-Allow-Origin'] = $allowOrigin;
-            $headers['Access-Control-Allow-Credentials'] = 'true';
         }
 
         if ($request->getMethod() === 'OPTIONS') {
@@ -44,20 +47,7 @@ class CorsIntermediario
             return null;
         }
 
-        $allowedOrigins = collect(explode(',', (string) env('CORS_ALLOWED_ORIGINS', '')))
-            ->map(fn ($item) => trim($item))
-            ->filter()
-            ->values();
-
-        if ($allowedOrigins->isEmpty()) {
-            $allowedOrigins = collect([
-                'http://localhost:5173',
-                'http://127.0.0.1:5173',
-                'https://redskyg.com',
-                'https://www.redskyg.com',
-                rtrim((string) env('APP_URL', ''), '/'),
-            ])->filter()->values();
-        }
+        $allowedOrigins = collect(config('cors.allowed_origins', []))->reject(fn ($origin) => $origin === '*');
 
         return $allowedOrigins->contains($origin) ? $origin : null;
     }

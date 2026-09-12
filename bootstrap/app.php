@@ -61,9 +61,9 @@ if (! function_exists('agregarCabecerasCorsApi')) {
 
         if ($origin !== '' && $allowedOrigins->contains($origin)) {
             $response->headers->set('Access-Control-Allow-Origin', $origin);
-            $response->headers->set('Access-Control-Allow-Credentials', 'true');
+            $response->headers->remove('Access-Control-Allow-Credentials');
             $response->headers->set('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
-            $response->headers->set('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept');
+            $response->headers->set('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Idempotency-Key');
             $response->headers->set('Vary', 'Origin');
         }
 
@@ -118,6 +118,7 @@ return Application::configure(basePath: dirname(__DIR__))
         EnviarRecordatoriosOperativosSobrecargoComando::class,
     ])
     ->withMiddleware(function (Middleware $middleware): void {
+        $middleware->append(\App\Http\Intermediarios\ApiResponsePrivacy::class);
         $middleware->append(CorsIntermediario::class);
         $middleware->append(HandleCors::class);
 
